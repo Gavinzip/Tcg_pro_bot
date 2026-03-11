@@ -394,6 +394,85 @@ def extract_price(price_str):
     except:
         return 0.0
 
+
+def _normalize_alnum_dash(text):
+    return re.sub(r'[^a-z0-9]+', '-', str(text).lower()).strip('-')
+
+
+def _contains_token_boundary(text_norm, token):
+    tok = _normalize_alnum_dash(token)
+    if not tok:
+        return False
+    return re.search(rf'(?<![a-z0-9]){re.escape(tok)}(?![a-z0-9])', text_norm) is not None
+
+
+def _extract_number_denominator(number_text):
+    parts = str(number_text or "").split("/", 1)
+    if len(parts) < 2:
+        return ""
+    m = re.search(r'\d+', parts[1])
+    return m.group(0) if m else ""
+
+
+def _score_pricecharting_candidate(
+    url,
+    *,
+    name_slug,
+    name_slug_alt,
+    number_clean,
+    number_padded,
+    number_denominator,
+    set_code_slug,
+):
+    slug = url.split('/')[-1].lower()
+    slug_norm = _normalize_alnum_dash(slug)
+    slug_compact = re.sub(r'[^a-z0-9]', '', slug)
+    score = 0
+    reasons = []
+
+    # Priority #1: set code exact
+    if set_code_slug and set_code_slug in slug_compact:
+        score += 140
+        reasons.append("set_code")
+
+    # Priority #2: precise name matching (token boundary)
+    if name_slug and _contains_token_boundary(slug_norm, name_slug):
+        score += 85
+        reasons.append("name_exact")
+    elif name_slug_alt and _contains_token_boundary(slug_norm, name_slug_alt):
+        score += 70
+        reasons.append("name_alt_exact")
+    else:
+        tokens = [t for t in (name_slug or "").split('-') if t and len(t) >= 2]
+        if tokens:
+            token_hits = sum(1 for t in tokens if _contains_token_boundary(slug_norm, t))
+            if token_hits == len(tokens):
+                score += 55
+                reasons.append("name_tokens_all")
+            elif token_hits > 0:
+                score += 20
+                reasons.append("name_tokens_partial")
+
+    # Priority #3: exact number
+    if number_clean and re.search(rf'(?<!\d){re.escape(number_clean)}(?!\d)', slug):
+        score += 45
+        reasons.append("number_exact")
+    elif number_padded and number_padded in slug:
+        score += 40
+        reasons.append("number_padded")
+
+    # Extra bonus: denominator/full-form hints to avoid same-number wrong card.
+    if number_denominator:
+        den_trim = number_denominator.lstrip('0') or number_denominator
+        if f"-{number_denominator}" in slug or f"/{number_denominator}" in slug:
+            score += 35
+            reasons.append("denominator_exact")
+        elif f"-{den_trim}" in slug or f"/{den_trim}" in slug:
+            score += 28
+            reasons.append("denominator_trim")
+
+    return score, reasons
+
 def filter_pricecharting_candidates(candidates):
     """Normalize and dedupe PriceCharting candidate strings."""
     seen = set()
@@ -410,7 +489,7 @@ def filter_pricecharting_candidates(candidates):
         filtered.append(c)
     return filtered
 
-def search_pricecharting(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name=""):
+def search_pricecharting(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name=""):
     # Basic Name cleaning (strip parentheses like "Queen (Flagship Battle Top 8 Prize)")
     name_query = re.sub(r'\(.*?\)', '', name).strip()
     
@@ -428,6 +507,7 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
     
     # Try to extract suffix like SM-P from the number itself if it's there
     suffix = ""
+    number_denominator = _extract_number_denominator(number)
     _num_parts = number.split('/')
     if len(_num_parts) > 1:
         potential_suffix = _num_parts[1].strip()
@@ -562,11 +642,8 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
                 else:
                     _debug_log(f"  ❌ [PKM] URL 不符合: {u}")
 
-        # 合併：最高優先為同時符合的，依序遞減
+        # 合併：先確保至少匹配，再進入分數排序
         valid_urls = matching_both + matching_name + matching_number
-        
-        if return_candidates:
-            return valid_urls, None, None
                 
         if not valid_urls:
             _debug_step("PriceCharting", pc_step + 1,
@@ -576,22 +653,43 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
                         reason=f"所有 {len(urls)} 個候選 URL 均不符合卡片名稱或編號，放棄")
             print(f"DEBUG: No PC product URL matched the card name '{name}' or number '{number_clean}'.")
             return None, None, None
-            
-        # Prioritize the first valid match
-        product_url = valid_urls[0]
-        selection_reason = "Default (First match)"
+
+        # Score ranking: set_code > exact name > exact number > denominator hints.
+        scored_urls = []
+        for u in valid_urls:
+            sc, why = _score_pricecharting_candidate(
+                u,
+                name_slug=name_slug,
+                name_slug_alt=name_slug_alt,
+                number_clean=number_clean,
+                number_padded=number_padded_pc,
+                number_denominator=number_denominator,
+                set_code_slug=set_code_slug,
+            )
+            scored_urls.append((u, sc, why))
+        scored_urls.sort(key=lambda x: x[1], reverse=True)
+        ranked_urls = [u for u, _, _ in scored_urls]
+
+        if return_candidates:
+            return ranked_urls, None, None
+
+        product_url = ranked_urls[0]
+        top_score = scored_urls[0][1]
+        top_why = ",".join(scored_urls[0][2]) if scored_urls[0][2] else "fallback"
+        selection_reason = f"Scored Best ({top_score}): {top_why}"
+        _debug_log(f"PriceCharting ranking top3: {[(u, s) for u, s, _ in scored_urls[:3]]}")
         
         # Filter based on is_flagship / is_alt_art (features-based override 主導)
         if is_flagship:
             # 旗艦賽獎品卡：尋找包含 flagship 的 URL
-            for u in valid_urls:
+            for u in ranked_urls:
                 lower_u = u.replace('[', '').replace(']', '').lower()
                 if "flagship" in lower_u:
                     product_url = u
                     selection_reason = "Flagship Filter (偵測到 Flagship Battle 關鍵字)"
                     break
         elif is_alt_art:
-            for u in valid_urls:
+            for u in ranked_urls:
                 lower_u = u.replace('[', '').replace(']', '').lower()
                 # 航海王異圖版優先尋找包含這些關鍵字的
                 if "manga" in lower_u or "alternate-art" in lower_u or "-sp" in lower_u:
@@ -607,7 +705,8 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
                     reason=selection_reason,
                     extra={"matching_both": matching_both,
                            "matching_name": matching_name,
-                           "matching_number": matching_number})
+                           "matching_number": matching_number,
+                           "scored_top3": [(u, s) for u, s, _ in scored_urls[:3]]})
         print(f"DEBUG: Selected PC product URL: {product_url} ({selection_reason})")
         records, resolved_url, pc_img_url = _fetch_pc_prices_from_url(product_url, target_grade=target_grade)
     else:
@@ -635,6 +734,8 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
     
     if not number_clean: number_clean = '0'
     number_padded = number_clean.zfill(3)
+    number_denominator = _extract_number_denominator(number)
+    set_code_slug = re.sub(r'[^a-zA-Z0-9]', '', set_code).lower() if set_code else ""
 
     en_name_query = re.sub(r'\(.*?\)', '', en_name).strip()
     jp_name_query = re.sub(r'\(.*?\)', '', jp_name).strip() if jp_name else ""
@@ -734,15 +835,78 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
             continue # If no titles specifically have the card number, do not guess
             
         unique_matches = filtered_by_number
-                
+
         if unique_matches:
+            # Ranking: set_code > exact name > exact number > denominator.
+            ranked_matches = []
+            en_name_norm = re.sub(r'\(.*?\)', '', en_name).strip().lower()
+            jp_name_norm = re.sub(r'\(.*?\)', '', jp_name).strip().lower() if jp_name else ""
+
+            for title, pid, thumb in unique_matches:
+                title_l = str(title).lower()
+                title_norm = _normalize_alnum_dash(title_l)
+                title_compact = re.sub(r'[^a-z0-9]', '', title_l)
+
+                score = 0
+                reasons = []
+
+                if set_code_slug and set_code_slug in title_compact:
+                    score += 140
+                    reasons.append("set_code")
+
+                # Japanese name exact string gets highest name confidence.
+                if jp_name_norm and jp_name_norm in title_l:
+                    score += 90
+                    reasons.append("jp_name_exact")
+
+                # English name with token boundaries avoids Mew->Mewtwo false hit.
+                if en_name_norm:
+                    if _contains_token_boundary(title_norm, en_name_norm):
+                        score += 85
+                        reasons.append("en_name_exact")
+                    else:
+                        en_tokens = [t for t in _normalize_alnum_dash(en_name_norm).split('-') if t and len(t) >= 2]
+                        if en_tokens:
+                            token_hits = sum(1 for t in en_tokens if _contains_token_boundary(title_norm, t))
+                            if token_hits == len(en_tokens):
+                                score += 60
+                                reasons.append("en_tokens_all")
+                            elif token_hits > 0:
+                                score += 18
+                                reasons.append("en_tokens_partial")
+                        if en_name_norm in title_l and not _contains_token_boundary(title_norm, en_name_norm):
+                            score -= 35
+                            reasons.append("en_substring_penalty")
+
+                if number_padded and number_padded in title_l:
+                    score += 45
+                    reasons.append("number_padded")
+                elif number_clean and f"{number_clean}/" in title_l:
+                    score += 40
+                    reasons.append("number_slash")
+
+                if number_denominator:
+                    den_trim = number_denominator.lstrip('0') or number_denominator
+                    if f"/{number_denominator}" in title_l:
+                        score += 35
+                        reasons.append("denominator_exact")
+                    elif f"/{den_trim}" in title_l:
+                        score += 28
+                        reasons.append("denominator_trim")
+
+                ranked_matches.append((title, pid, thumb, score, reasons))
+
+            ranked_matches.sort(key=lambda x: x[3], reverse=True)
+            unique_matches = [(t, p, i) for t, p, i, _, _ in ranked_matches]
+            _debug_log(f"SNKRDUNK ranking top3: {[(t, p, s) for t, p, _, s, _ in ranked_matches[:3]]}")
+
             if return_candidates:
                 # 只回傳 URL 列表 (加上標題方便 bot 顯示列表)
                 return [f"https://snkrdunk.com/apparels/{pid} — {title}" for title, pid, _ in unique_matches], None, None
                 
             product_id = unique_matches[0][1] # default to first result
             img_url = unique_matches[0][2]
-            selection_reason = "Default (First match)"
+            selection_reason = "Scored (Top rank)"
             
             # ─────────────────────────────────────────────────────────────────
             # 三階段串聯過濾：Variant → Alt-Art/Normal → Language
@@ -798,7 +962,13 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
             candidate_urls=[f"https://snkrdunk.com/apparels/{pid} — {t}" for t, pid, _ in unique_matches],
             selected_url=f"https://snkrdunk.com/apparels/{product_id}",
             reason=selection_reason,
-            extra={"number_padded": number_padded, "is_alt_art": is_alt_art})
+            extra={
+                "number_padded": number_padded,
+                "number_denominator": number_denominator,
+                "set_code_slug": set_code_slug,
+                "is_alt_art": is_alt_art,
+                "scored_top3": [(t, p, s) for t, p, _, s, _ in ranked_matches[:3]],
+            })
             break
         
         time.sleep(1)
@@ -1189,7 +1359,7 @@ async def process_single_image(
     print(f"🌐 正在從網路(PC & SNKRDUNK)抓取市場行情 (異圖/特殊版: {is_alt_art})...")
     loop = asyncio.get_running_loop()
     pc_result, snkr_result = await asyncio.gather(
-        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship),
+        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, False, "", jp_name),
         loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws),
     )
 
@@ -1526,7 +1696,7 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
 
     loop = asyncio.get_running_loop()
     pc_result, snkr_result = await asyncio.gather(
-        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, True),
+        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, True, "", jp_name),
         loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws, True),
     )
     

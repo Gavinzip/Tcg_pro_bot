@@ -5,6 +5,7 @@ __pycache__/
 /.vscode
 .DS_Store
 output_run/
+run_logs/
 run_debug_*.log
 .git.disabled*/
 _archive/

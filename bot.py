@@ -44,11 +44,13 @@ def run_health_server():
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+MAX_CONCURRENT_IMAGES = max(1, int(os.getenv("MAX_CONCURRENT_IMAGES", "3")))
 
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
+ANALYSIS_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_IMAGES)
 
 
 def smart_split(text, limit=1900):
@@ -99,7 +101,7 @@ class VersionSelectView(discord.ui.View):
             return None
 
 
-async def handle_image(attachment, message, lang="zh"):
+async def _handle_image_impl(attachment, message, lang="zh"):
     """
     ** 並發核心函數（stream 模式）**
 
@@ -251,6 +253,17 @@ async def handle_image(attachment, message, lang="zh"):
     finally:
         shutil.rmtree(card_out_dir, ignore_errors=True)
         print(f"✅ [並發] 完成並清理: {attachment.filename}")
+
+
+async def handle_image(attachment, message, lang="zh"):
+    loop = asyncio.get_running_loop()
+    waited = ANALYSIS_SEMAPHORE.locked()
+    wait_start = loop.time()
+    async with ANALYSIS_SEMAPHORE:
+        if waited:
+            waited_sec = loop.time() - wait_start
+            print(f"⏳ 佇列等待 {waited_sec:.1f}s 後開始: {attachment.filename}")
+        await _handle_image_impl(attachment, message, lang=lang)
 
 
 @client.event
@@ -472,10 +485,21 @@ async def on_message(message):
             else:
                 lang = "zh"
 
-            for attachment in message.attachments:
-                if any(attachment.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
-                    # 每張圖各自建立獨立並發 Task，直接傳入由指令決定的語言
-                    asyncio.create_task(handle_image(attachment, message, lang=lang))
+            valid_attachments = [
+                a for a in message.attachments
+                if any(a.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp'])
+            ]
+            if not valid_attachments:
+                return
+
+            if len(valid_attachments) > MAX_CONCURRENT_IMAGES:
+                await message.reply(
+                    f"📦 收到 {len(valid_attachments)} 張圖片，系統會同時處理最多 {MAX_CONCURRENT_IMAGES} 張，其餘自動排隊。"
+                )
+
+            for attachment in valid_attachments:
+                # 每張圖建立獨立 Task；實際執行由 Semaphore 控制上限
+                asyncio.create_task(handle_image(attachment, message, lang=lang))
 
 
 if __name__ == "__main__":
