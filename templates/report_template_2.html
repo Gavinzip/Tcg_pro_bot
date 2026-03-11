@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <title>{{ card_name }} Market Data Poster</title>
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&amp;display=swap"
+        rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap"
+        rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap"
+        rel="stylesheet" />
+    <script>
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#d4af37",
+                        "primary-light": "#ffdf73",
+                        "primary-dark": "#aa8323",
+                        "background-dark": "#0a0a09",
+                        "surface": "#12110c",
+                        "surface-light": "#1e1c14",
+                        "border-gold": "#4a3f1d",
+                        "text-gold-light": "#e8e0b3",
+                    },
+                    fontFamily: {
+                        "display": ["Manrope", '"Noto Sans TC"', "sans-serif"]
+                    },
+                    backgroundImage: {
+                        'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
+                    }
+                },
+            },
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Manrope', 'Noto Sans TC', sans-serif;
+            width: 1200px;
+            min-height: 900px;
+            height: auto;
+            margin: 0 auto;
+            background: #000;
+        }
+
+        .gold-gradient-text {
+            background: linear-gradient(135deg, #FFEAA7 0%, #D4AF37 40%, #AA8323 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: 0px 4px 20px rgba(212, 175, 55, 0.3);
+            filter: drop-shadow(0px 2px 4px rgba(0, 0, 0, 0.8));
+        }
+
+        .metallic-border {
+            position: relative;
+            background: #0a0a09;
+            border-radius: 1rem;
+            z-index: 1;
+        }
+
+        .metallic-border::before {
+            content: "";
+            position: absolute;
+            inset: -2px;
+            border-radius: 1.1rem;
+            background: linear-gradient(135deg, rgba(255, 223, 115, 0.7) 0%, rgba(212, 175, 55, 0.1) 25%, rgba(10, 10, 9, 1) 50%, rgba(212, 175, 55, 0.1) 75%, rgba(255, 223, 115, 0.7) 100%);
+            z-index: -1;
+            box-shadow: 0 0 30px rgba(212, 175, 55, 0.2);
+        }
+
+        .glass-panel {
+            background: linear-gradient(180deg, rgba(30, 28, 20, 0.6) 0%, rgba(18, 17, 12, 0.8) 100%);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(212, 175, 55, 0.15);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), border-top 0px, 0 10px 30px rgba(0, 0, 0, 0.8);
+        }
+    </style>
+</head>
+
+<body class="bg-black text-slate-100 font-display min-h-[900px] m-0 p-0 flex items-center justify-center">
+
+    <!-- Main Container -->
+    <div class="relative w-[1200px] min-h-[900px] flex flex-col metallic-border overflow-hidden" style="background: 
+            radial-gradient(circle at 105% 105%, rgba(212, 175, 55, 0.12) 0%, transparent 60%),
+            radial-gradient(circle at 85% 95%, rgba(170, 131, 35, 0.05) 0%, transparent 70%),
+            #0a0a09;">
+
+        <!-- (Top lighting removed for artistic asymmetry) -->
+        <!-- Grain texture overlay -->
+        <div class="absolute inset-0 opacity-[0.03] pointer-events-none mix-blend-screen"
+            style="background-image: url('data:image/svg+xml,%3Csvg viewBox=%220 0 400 400%22 xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cfilter id=%22noiseFilter%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%220.9%22 numOctaves=%223%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%22100%25%22 height=%22100%25%22 filter=%22url(%23noiseFilter)%22/%3E%3C/svg%3E');">
+        </div>
+
+        <!-- Header Section -->
+        <div class="relative z-10 p-10 pb-8 text-center border-b border-border-gold/30 bg-transparent text-center">
+            <h1 class="text-4xl md:text-5xl font-black tracking-tight text-white mb-3 gold-gradient-text"
+                style="filter:none;">
+                Global Market Data
+            </h1>
+            <p class="text-primary-light text-xl font-bold tracking-[0.2em] uppercase opacity-90 pb-2">
+                {{ card_name }} <span class="text-primary-dark mx-2">/</span> {{ card_set }} <span
+                    class="text-primary-dark mx-2">/</span> {{ grade }}
+            </p>
+            <div
+                class="flex items-center justify-center gap-2 mt-2 text-text-gold-light text-sm tracking-widest uppercase font-bold opacity-60">
+                <span class="material-symbols-outlined text-base">analytics</span>
+                <span>Combined Transaction Report</span>
+            </div>
+        </div>
+
+        <!-- Main Content Grid -->
+        <div
+            class="relative z-10 flex-1 grid grid-cols-1 lg:grid-cols-2 gap-0 divide-y lg:divide-y-0 lg:divide-x divide-border-gold/40">
+
+            <!-- Left Column: PriceCharting -->
+            <div class="flex flex-col p-8 bg-black/10">
+                <div class="flex items-center gap-4 mb-4">
+                    <div
+                        class="p-3 rounded-xl bg-gradient-to-br from-primary-dark/20 to-black border border-primary/30 shadow-[0_0_15px_rgba(212,175,55,0.1)]">
+                        <span
+                            class="material-symbols-outlined text-3xl text-primary-light drop-shadow-[0_0_5px_rgba(212,175,55,1)]">currency_exchange</span>
+                    </div>
+                    <div class="flex-1">
+                        <h2 class="text-2xl font-bold text-white tracking-wide">PriceCharting Trend</h2>
+                        <p class="text-text-gold-light text-sm tracking-widest uppercase mt-1 opacity-70">Confirmed
+                            sales (USD)</p>
+                    </div>
+                </div>
+
+                <!-- EvilCharts -->
+                {{ pc_charts_html }}
+                {{ pc_table_html }}
+            </div>
+
+            <!-- Right Column: SNKRDUNK -->
+            <div class="flex flex-col p-8 bg-black/10">
+                <div class="flex items-center gap-4 mb-4">
+                    <div
+                        class="p-3 rounded-xl bg-gradient-to-br from-primary-dark/20 to-black border border-primary/30 shadow-[0_0_15px_rgba(212,175,55,0.1)]">
+                        <span
+                            class="material-symbols-outlined text-3xl text-primary-light drop-shadow-[0_0_5px_rgba(212,175,55,1)]">storefront</span>
+                    </div>
+                    <div class="flex-1">
+                        <h2 class="text-2xl font-bold text-white tracking-wide">SNKRDUNK Trend</h2>
+                        <p class="text-text-gold-light text-sm tracking-widest uppercase mt-1 opacity-70">Real-time
+                            marketplace (JPY &rarr; USD)</p>
+                    </div>
+                </div>
+
+                <!-- EvilCharts -->
+                {{ snkr_charts_html }}
+                {{ snkr_table_html }}
+            </div>
+        </div>
+
+        <!-- Footer: Aggregated Stats -->
+        <div
+            class="relative z-10 p-8 border-t border-border-gold/40 bg-gradient-to-t from-surface/20 to-black/30 shadow-[inset_0_10px_30px_rgba(0,0,0,0.5)]">
+            <h3 class="text-sm font-black uppercase tracking-[0.3em] text-primary-dark mb-6 flex items-center gap-3">
+                <span
+                    class="w-2 h-2 rounded-full bg-primary-light shadow-[0_0_8px_rgba(255,223,115,1)] animate-pulse"></span>
+                Global Aggregated Market Stats
+            </h3>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
+
+                <div
+                    class="glass-panel flex flex-col gap-1 p-5 rounded-xl border border-border-gold/40 shadow-[0_10px_20px_rgba(0,0,0,0.5)]">
+                    <span class="text-primary-dark text-xs font-bold uppercase tracking-widest">{{ stat_1_title
+                        }}</span>
+                    <span class="text-4xl font-bold text-white tracking-tight mt-1">{{ stat_1_val }}</span>
+                    <div class="w-full h-1 bg-gradient-to-r from-emerald-500/50 to-transparent mt-3 rounded-full"></div>
+                </div>
+
+                <!-- Stat Card 2 -->
+                <div
+                    class="glass-panel flex flex-col gap-1 p-5 rounded-xl border border-border-gold/40 shadow-[0_10px_20px_rgba(0,0,0,0.5)]">
+                    <span class="text-primary-dark text-xs font-bold uppercase tracking-widest">{{ stat_2_title
+                        }}</span>
+                    <span class="text-4xl font-bold text-white tracking-tight mt-1">{{ stat_2_val }}</span>
+                    <div class="w-full h-1 bg-gradient-to-r from-rose-500/50 to-transparent mt-3 rounded-full"></div>
+                </div>
+
+                <!-- Stat Card 3 -->
+                <div
+                    class="glass-panel flex flex-col gap-1 p-5 rounded-xl border border-primary/50 shadow-[0_0_20px_rgba(212,175,55,0.15)] relative overflow-hidden group">
+                    <div
+                        class="absolute inset-0 bg-primary/5 group-hover:bg-primary/10 transition-colors pointer-events-none">
+                    </div>
+                    <span
+                        class="text-primary-light text-xs font-bold uppercase tracking-widest relative z-10 drop-shadow-[0_0_5px_rgba(212,175,55,0.8)]">{{
+                        stat_3_title }}</span>
+                    <span class="gold-gradient-text text-4xl font-black mt-1 relative z-10">{{ stat_3_val }}</span>
+                    <div
+                        class="w-full h-1 bg-gradient-to-r from-primary to-transparent mt-2 rounded-full relative z-10 shadow-[0_0_10px_rgba(212,175,55,0.5)]">
+                    </div>
+                </div>
+
+                <!-- Stat Card 4 -->
+                <div
+                    class="glass-panel flex flex-col gap-1 p-5 rounded-xl border border-border-gold/40 shadow-[0_10px_20px_rgba(0,0,0,0.5)]">
+                    <span class="text-primary-dark text-xs font-bold uppercase tracking-widest">{{ stat_4_title
+                        }}</span>
+                    <span class="text-4xl font-bold text-white tracking-tight mt-1">{{ stat_4_val }}</span>
+                    <div class="w-full h-1 bg-gradient-to-r from-indigo-500/40 to-transparent mt-3 rounded-full"></div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+</body>
+
+</html>

@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <title>皮卡丘 V (Pikachu V) Asset Profile Poster</title>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&amp;display=swap"
+        rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap"
+        rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap"
+        rel="stylesheet" />
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#d4af37",
+                        "primary-light": "#ffdf73",
+                        "primary-dark": "#aa8323",
+                        "background-dark": "#0a0a09",
+                        "surface": "#12110c",
+                        "surface-light": "#1e1c14",
+                    },
+                    fontFamily: {
+                        "display": ["Manrope", '"Noto Sans TC"', "sans-serif"]
+                    }
+                },
+            },
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Manrope', 'Noto Sans TC', sans-serif;
+            width: 1200px;
+            height: 900px;
+            margin: 0 auto;
+            background: #000;
+            /* Outer background to blend */
+        }
+
+        /* Premium CSS Classes */
+        .gold-gradient-text {
+            background: linear-gradient(135deg, #FFEAA7 0%, #D4AF37 40%, #AA8323 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: 0px 4px 20px rgba(212, 175, 55, 0.3);
+            filter: drop-shadow(0px 2px 4px rgba(0, 0, 0, 0.8));
+        }
+
+        .silver-gradient-text {
+            background: linear-gradient(135deg, #ffffff 0%, #b3b3b3 50%, #7a7a7a 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .metallic-border {
+            position: relative;
+            background: #0a0a09;
+            border-radius: 1rem;
+            z-index: 1;
+        }
+
+        /* The metallic reflection edge */
+        .metallic-border::before {
+            content: "";
+            position: absolute;
+            inset: -2px;
+            border-radius: 1.1rem;
+            background: linear-gradient(135deg, rgba(255, 223, 115, 0.7) 0%, rgba(212, 175, 55, 0.1) 25%, rgba(10, 10, 9, 1) 50%, rgba(212, 175, 55, 0.1) 75%, rgba(255, 223, 115, 0.7) 100%);
+            z-index: -1;
+            box-shadow: 0 0 30px rgba(212, 175, 55, 0.2);
+        }
+
+        .glass-panel {
+            background: linear-gradient(180deg, rgba(30, 28, 20, 0.8) 0%, rgba(18, 17, 12, 0.9) 100%);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(212, 175, 55, 0.15);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), border-top 0px, 0 10px 30px rgba(0, 0, 0, 0.8);
+        }
+
+        .ambient-glow {
+            position: absolute;
+            width: 60%;
+            height: 60%;
+            background: radial-gradient(circle, rgba(212, 175, 55, 0.15) 0%, rgba(0, 0, 0, 0) 70%);
+            pointer-events: none;
+            z-index: 0;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        .progress-bar-glow {
+            background: linear-gradient(90deg, #aa8323 0%, #d4af37 50%, #ffdf73 100%);
+            box-shadow: 0 0 10px rgba(212, 175, 55, 0.5), inset 0 0 4px rgba(255, 255, 255, 0.4);
+            border-right: 1px solid #fff;
+        }
+
+        .progress-track {
+            background: #111;
+            box-shadow: inset 0 2px 5px rgba(0, 0, 0, 1);
+            border: 1px solid rgba(212, 175, 55, 0.1);
+        }
+
+        /* ===== Badges ===== */
+
+        /* ===== Badges ===== */
+        .badge-ungraded {
+            background: rgba(22, 27, 40, 0.86);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: rgba(255, 255, 255, 0.90);
+            font-weight: 800;
+            letter-spacing: 0.02em;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+
+        .badge-psa10 {
+            width: 86px;
+            height: 86px;
+            border-radius: 999px;
+            background: linear-gradient(to bottom right, #d4af37, #e6c21f, #b39616);
+            border: 3px solid rgba(74, 66, 32, 0.95);
+            box-shadow: 0 10px 28px rgba(0, 0, 0, 0.50);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* ===== Badge mode switching (by data-badge) ===== */
+        /* default: both */
+        [data-badge="both"] [data-kind="ungraded"] {
+            display: block;
+        }
+
+        [data-badge="both"] [data-kind="psa10"] {
+            display: flex;
+        }
+
+        /* only ungraded */
+        [data-badge="ungraded"] [data-kind="ungraded"] {
+            display: block;
+        }
+
+        [data-badge="ungraded"] [data-kind="psa10"] {
+            display: none;
+        }
+
+        /* only psa10 */
+        [data-badge="psa10"] [data-kind="ungraded"] {
+            display: none;
+        }
+
+        [data-badge="psa10"] [data-kind="psa10"] {
+            display: flex;
+        }
+    </style>
+</head>
+
+<body class="bg-black text-slate-100 min-h-screen flex items-center justify-center p-8">
+
+    <!-- Main Poster Container -->
+    <div
+        class="relative w-full h-full metallic-border flex flex-col md:flex-row overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,1)]">
+
+        <!-- Ambient glowing lights -->
+        <div
+            class="absolute top-0 right-0 w-[800px] h-[800px] bg-[radial-gradient(circle,rgba(212,175,55,0.08)_0%,transparent_60%)] -translate-y-1/2 translate-x-1/4">
+        </div>
+        <div
+            class="absolute bottom-0 left-0 w-[600px] h-[600px] bg-[radial-gradient(circle,rgba(212,175,55,0.05)_0%,transparent_60%)] translate-y-1/4 -translate-x-1/4">
+        </div>
+        <!-- Grain texture overlay for premium feel -->
+        <div class="absolute inset-0 opacity-[0.03] pointer-events-none mix-blend-screen"
+            style="background-image: url('data:image/svg+xml,%3Csvg viewBox=%220 0 400 400%22 xmlns=%22http://www.w3.org/2000/svg%22%3E%3Cfilter id=%22noiseFilter%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%220.9%22 numOctaves=%223%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%22100%25%22 height=%22100%25%22 filter=%22url(%23noiseFilter)%22/%3E%3C/svg%3E');">
+        </div>
+
+
+        <!-- Left Side: Card Presentation -->
+        <div class="relative w-full md:w-5/12 h-full flex items-center justify-center p-12 z-10"
+            style="background: linear-gradient(145deg, rgba(40,36,20,0.95) 0%, rgba(12,11,8,0.98) 100%);">
+
+            <div
+                class="absolute right-0 top-0 bottom-0 w-px bg-gradient-to-b from-transparent via-primary/20 to-transparent">
+            </div>
+            <div class="ambient-glow opacity-50"></div>
+
+            <!-- Wireframe Card Container -->
+            <div class="relative w-full max-w-[340px] aspect-[2.6/3.6] group flex items-center justify-center"
+                data-badge="both">
+
+                <!-- Transparent Wireframe Border -->
+                <div
+                    class="absolute inset-0 rounded-2xl border border-primary/40 shadow-[0_0_20px_rgba(212,175,55,0.08)] pointer-events-none">
+                </div>
+
+                <!-- Ambient Gold Glow behind card -->
+                <div
+                    class="absolute inset-4 bg-primary/20 blur-[40px] rounded-full pointer-events-none opacity-40 group-hover:opacity-60 transition-opacity duration-700">
+                </div>
+
+                <!-- The Actual Card -->
+                <div
+                    class="relative w-[88%] h-[90%] rounded-[14px] overflow-hidden shadow-[0_20px_40px_rgba(0,0,0,0.8)] z-10 transform group-hover:scale-[1.03] transition-transform duration-700 ease-out border border-white/10">
+                    <div class="absolute inset-0 bg-cover bg-center"
+                        style='background-image: url("https://s3.ap-northeast-1.amazonaws.com/image.snkrdunk.com/trading-cards/products/202501/7/8ce38fc1-f761-4606-aec0-d3e9c5edc507.jpg");'>
+                    </div>
+                </div>
+
+                <!-- Badge container Top Right aligned to the wireframe -->
+                <div class="absolute -top-3 -right-5 z-30 flex flex-col gap-3 items-end">
+                    <div class="absolute top-4 right-4 z-30 flex flex-col gap-3 items-end">
+
+                        <!-- Ungraded pill -->
+                        <div class="badge-ungraded px-4 py-2 rounded-full" data-kind="ungraded">
+                            Ungraded
+                        </div>
+
+                        <!-- PSA 10 coin -->
+                        <div class="badge-psa10" data-kind="psa10">
+                            <div class="text-center">
+                                <span class="block text-[#4a4220] font-black text-[10px] tracking-wider">GEM MT</span>
+                                <span class="block text-[#221f10] font-bold text-[34px] leading-none">10</span>
+                                <span
+                                    class="block text-[#4a4220] font-bold text-[10px] tracking-widest mt-0.5">PSA</span>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+        </div>
+
+
+        <!-- Right Side: Content -->
+        <div class="relative w-full md:w-7/12 h-full flex flex-col justify-between p-12 z-10">
+            <div class="space-y-8 flex-1">
+
+                <!-- Header Section -->
+                <div class="border-l-2 border-primary pl-6 relative">
+                    <div
+                        class="absolute -left-[2px] top-0 bottom-0 w-[2px] bg-gradient-to-b from-primary-light via-primary to-transparent shadow-[0_0_10px_rgba(212,175,55,1)]">
+                    </div>
+                    <h3 class="silver-gradient-text tracking-[0.3em] text-xs font-bold uppercase mb-2">25th Anniversary
+                        Golden Box
+                    </h3>
+                    <h1
+                        class="gold-gradient-text text-5xl md:text-6xl font-display font-bold leading-tight tracking-tight mt-1 pb-1">
+                        皮卡丘 V (Pikachu V)
+                    </h1>
+                    <div class="flex items-center gap-4 mt-4">
+                        <span class="text-xl text-slate-400 font-medium tracking-widest font-mono">#{{ card_number
+                            }}</span>
+                        <div class="h-px w-8 bg-primary/30"></div>
+                        <span
+                            class="px-3 py-1 rounded border border-primary/30 text-primary-light text-[10px] font-black tracking-widest uppercase bg-primary/10 shadow-[0_0_10px_rgba(212,175,55,0.1)]">{{
+                            category }}</span>
+                    </div>
+                </div>
+
+                <!-- Market Analysis Section -->
+                <div class="pt-2">
+                    <h2
+                        class="text-xl text-white font-bold mb-6 flex items-center gap-3 border-b border-primary/10 pb-3">
+                        <span
+                            class="material-symbols-outlined text-primary drop-shadow-[0_0_8px_rgba(212,175,55,0.8)]">monitoring</span>
+                        Core Asset Analysis
+                    </h2>
+
+                    <div class="space-y-6 pr-4">
+                        <!-- Market Heat -->
+                        <div>
+                            <div class="flex justify-between items-end mb-2">
+                                <span class="text-slate-300 font-bold text-sm uppercase tracking-wider">Market Heat
+                                    (熱度)</span>
+                                <span class="gold-gradient-text font-black text-lg">High</span>
+                            </div>
+                            <div class="h-1.5 w-full progress-track rounded-full overflow-hidden mb-2">
+                                <div class="h-full progress-bar-glow rounded-full" style="width: 90%"></div>
+                            </div>
+                            <p class="text-[13px] text-slate-400 leading-relaxed">此卡來自於全球熱搶的 25
+                                週年黃金紀念箱，皮卡丘作為招牌角色，其限定版本在二手中市場具有極高的流動性與熱度。</p>
+                        </div>
+
+                        <!-- Collection Value -->
+                        <div>
+                            <div class="flex justify-between items-end mb-2">
+                                <span class="text-slate-300 font-bold text-sm uppercase tracking-wider">Collection Value
+                                    (價值)</span>
+                                <span class="gold-gradient-text font-black text-lg">High</span>
+                            </div>
+                            <div class="h-1.5 w-full progress-track rounded-full overflow-hidden mb-2">
+                                <div class="h-full progress-bar-glow rounded-full" style="width: 90%"></div>
+                            </div>
+                            <p class="text-[13px] text-slate-400 leading-relaxed">黃金盒限定卡片且具備 PSA 10
+                                的滿分等級，在收藏市場中屬於頂級配置，具備非常穩定的長期持有價值。</p>
+                        </div>
+
+                        <!-- Playability -->
+                        <div>
+                            <div class="flex justify-between items-end mb-2">
+                                <span class="text-slate-400 font-bold text-sm uppercase tracking-wider">Playability
+                                    (競技)</span>
+                                <span class="text-slate-400 font-bold text-lg">Low</span>
+                            </div>
+                            <div class="h-1.5 w-full progress-track rounded-full overflow-hidden mb-2">
+                                <div class="h-full bg-gradient-to-r from-slate-600 to-slate-400 rounded-full"
+                                    style="width: 30%"></div>
+                            </div>
+                            <p class="text-[13px] text-slate-500 leading-relaxed">
+                                雖然可以在官方賽事中使用，但這張卡片主要被視為收藏品，在主流競技套牌中的出現頻率較低。</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Card Features Section -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
+                    <!-- We inject features here, but since Python sets background colors, we'll let Python handle it, or we rely on Tailwind classes in Python output -->
+
+                    <div class="glass-panel p-5 rounded-xl flex items-start gap-4 relative overflow-hidden group">
+                        <div
+                            class="absolute inset-0 bg-primary/5 group-hover:bg-primary/10 transition-colors pointer-events-none">
+                        </div>
+                        <span
+                            class="material-symbols-outlined text-primary-light drop-shadow-[0_0_5px_rgba(212,175,55,1)] mt-0.5 text-2xl">verified</span>
+                        <div class="relative z-10 flex flex-col justify-center">
+                            <h4 class="text-white font-bold text-sm tracking-wide">25 週年紀念限定版本</h4>
+
+                        </div>
+                    </div>
+
+                    <div class="glass-panel p-5 rounded-xl flex items-start gap-4 relative overflow-hidden group">
+                        <div
+                            class="absolute inset-0 bg-primary/5 group-hover:bg-primary/10 transition-colors pointer-events-none">
+                        </div>
+                        <span
+                            class="material-symbols-outlined text-primary-light drop-shadow-[0_0_5px_rgba(212,175,55,1)] mt-0.5 text-2xl">hotel_class</span>
+                        <div class="relative z-10 flex flex-col justify-center">
+                            <h4 class="text-white font-bold text-sm tracking-wide">Special Feature</h4>
+                            <p class="text-slate-400 text-xs mt-1.5 leading-relaxed">卡面印有 25th Anniversary 專屬標誌</p>
+                        </div>
+                    </div>
+
+                    <div
+                        class="glass-panel p-5 rounded-xl flex items-start gap-4 md:col-span-2 relative overflow-hidden group">
+                        <div
+                            class="absolute inset-0 bg-primary/5 group-hover:bg-primary/10 transition-colors pointer-events-none">
+                        </div>
+                        <span
+                            class="material-symbols-outlined text-primary-light drop-shadow-[0_0_5px_rgba(212,175,55,1)] mt-0.5 text-2xl">bolt</span>
+                        <div class="relative z-10 flex flex-col justify-center">
+                            <h4 class="text-white font-bold text-sm tracking-wide">Special Feature</h4>
+                            <p class="text-slate-400 text-xs mt-1.5 leading-relaxed">全圖閃卡工藝配合生動的電擊特效背景</p>
+                        </div>
+                    </div>
+
+                </div>
+
+            </div>
+
+            <!-- Footer Meta -->
+            <div class="mt-8 pt-6 border-t border-primary/20 flex justify-between items-end text-sm z-10">
+                <div>
+                    <span
+                        class="block text-primary-dark text-[10px] font-bold uppercase tracking-widest mb-1.5">Illustrator</span>
+                    <span class="text-slate-200 font-bold flex items-center gap-2">
+                        <span class="material-symbols-outlined text-[16px] text-primary">draw</span>
+                        Ryota Murayama
+                    </span>
+                </div>
+                <div class="text-right">
+                    <span class="block text-primary-dark text-[10px] font-bold uppercase tracking-widest mb-1.5">Release
+                        Info</span>
+                    <span class="text-slate-200 font-bold">2021 Pokemon Japanese</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</body>
+
+</html>

@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+/venv
+/.vscode
+.DS_Store
+output_run/
+run_debug_*.log
+.git.disabled*/
+_archive/

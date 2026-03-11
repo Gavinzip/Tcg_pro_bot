@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <title>{{ card_name }} Asset Profile Poster</title>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&amp;display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet" />
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <script id="tailwind-config">
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        "holo-cyan": "#e0f7fa",
+                        "holo-purple": "#ede7f6",
+                        "holo-gold": "#fff8e1",
+                        "premium-gold": "#d4af37",
+                        "premium-gold-light": "#ffea8c",
+                        "premium-gold-dark": "#aa8323",
+                        "text-main": "#1a2f44",
+                        "text-muted": "#5c738c",
+                    },
+                    fontFamily: {
+                        "display": ["Manrope", '"Noto Sans TC"', "sans-serif"]
+                    }
+                },
+            },
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Manrope', 'Noto Sans TC', sans-serif;
+            width: 1200px;
+            min-height: 900px;
+            margin: 0 auto;
+            background: #f8f9fa;
+            color: #1a2f44;
+        }
+
+        /* 頂級深色金屬文字 */
+        .dark-metal-text {
+            background: linear-gradient(135deg, #173753 0%, #32688f 50%, #173753 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* 珍珠光澤文字 (取代原本的銀色) */
+        .pearl-text {
+            background: linear-gradient(135deg, #5d748c 0%, #7f96ac 50%, #5d748c 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .rainbow-gradient-text {
+            background: linear-gradient(
+                90deg,
+                #ff7a59 0%,
+                #f59e57 16%,
+                #f065c2 38%,
+                #8b5cf6 58%,
+                #5b6cf8 78%,
+                #3b82f6 100%
+            );
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.35));
+        }
+
+        /* 頂級玻璃擬物主容器 */
+        .glass-container {
+            background: linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(255,255,255,0.6) 100%);
+            backdrop-filter: blur(40px);
+            -webkit-backdrop-filter: blur(40px);
+            border: 1px solid rgba(255,255,255,1);
+            box-shadow: 
+                0 30px 60px rgba(0, 0, 0, 0.05), 
+                inset 0 2px 4px rgba(255,255,255,0.8),
+                inset 0 -2px 10px rgba(0,0,0,0.02);
+            border-radius: 1.5rem;
+        }
+
+        /* 稜鏡邊框效果 (模擬全息玻璃邊緣) */
+        .prismatic-border {
+            position: relative;
+        }
+        .prismatic-border::before {
+            content: "";
+            position: absolute;
+            inset: -2px;
+            border-radius: inherit;
+            background: linear-gradient(120deg, #e0f7fa, #ede7f6, #fff8e1, #e0f7fa);
+            background-size: 200% 200%;
+            z-index: -1;
+            opacity: 0.8;
+            filter: blur(4px);
+        }
+
+        /* 進度條 - 奢華金 */
+        .progress-bar-glow {
+            background: linear-gradient(90deg, #aa8323 0%, #d4af37 50%, #ffea8c 100%);
+            box-shadow: 0 0 12px rgba(212, 175, 55, 0.4);
+        }
+
+        .progress-track {
+            background: rgba(0, 0, 0, 0.03);
+            border: 1px solid rgba(212, 175, 55, 0.1);
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.02);
+        }
+
+        /* ===== Badges ===== */
+        .badge-ungraded {
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid rgba(212, 175, 55, 0.3);
+            color: #aa8323;
+            font-weight: 800;
+            letter-spacing: 0.05em;
+            box-shadow: 0 8px 24px rgba(212, 175, 55, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 0.5rem;
+            padding: 0.35rem 1rem;
+            text-transform: uppercase;
+        }
+
+        /* 華麗的 PSA 10 認證金牌 */
+        .badge-psa10 {
+            width: 96px;
+            height: 96px;
+            border-radius: 20px; /* 圓角矩形/六邊形感 */
+            background: linear-gradient(135deg, #ffea8c 0%, #d4af37 40%, #aa8323 100%);
+            border: 2px solid #ffffff;
+            box-shadow: 
+                0 15px 35px rgba(212, 175, 55, 0.3), 
+                inset 0 0 20px rgba(255, 255, 255, 0.9),
+                inset 0 0 5px rgba(255, 255, 255, 1);
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            text-shadow: 0 2px 4px rgba(170, 131, 35, 0.8);
+            font-weight: 900;
+            font-size: 1.4rem;
+            transform: rotate(-5deg);
+            z-index: 50;
+        }
+        
+        /* 徽章內部的全息反光動畫 */
+        .badge-psa10::after {
+            content: '';
+            position: absolute;
+            top: -100%; left: -100%; right: -100%; bottom: -100%;
+            background: linear-gradient(45deg, 
+                transparent 35%, 
+                rgba(255,255,255,0.8) 45%, 
+                rgba(224, 247, 250, 0.6) 50%, 
+                rgba(255,255,255,0.8) 55%, 
+                transparent 65%);
+            animation: shimmer 4s infinite linear;
+        }
+
+        @keyframes shimmer {
+            0% { transform: translate(-50%, -50%) rotate(0deg); }
+            100% { transform: translate(50%, 50%) rotate(0deg); }
+        }
+
+        /* ===== Badge mode switching ===== */
+        [data-badge="both"] [data-kind="ungraded"] { display: block; }
+        [data-badge="both"] [data-kind="psa10"] { display: flex; }
+        [data-badge="ungraded"] [data-kind="ungraded"] { display: block; }
+        [data-badge="ungraded"] [data-kind="psa10"] { display: none; }
+        [data-badge="psa10"] [data-kind="ungraded"] { display: none; }
+        [data-badge="psa10"] [data-kind="psa10"] { display: flex; }
+    </style>
+</head>
+
+<body class="bg-[#f8f9fa] text-text-main min-h-[900px] m-0 p-0 flex items-center justify-center relative overflow-hidden">
+
+    <!-- 質感雜訊紋理 -->
+    <div class="absolute inset-0 z-0 opacity-[0.04] pointer-events-none" style="background-image: url(&quot;data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E&quot;);"></div>
+
+    <!-- 背景彩虹全息光暈 (呼應 Logo 色彩，降低飽和度以提升質感) -->
+    <div class="absolute top-[-10%] left-[-10%] w-[600px] h-[600px] bg-[#0044ff] rounded-full mix-blend-multiply filter blur-[150px] opacity-10 animate-pulse"></div>
+    <div class="absolute top-[20%] right-[-10%] w-[600px] h-[600px] bg-[#00dd88] rounded-full mix-blend-multiply filter blur-[150px] opacity-10"></div>
+    <div class="absolute bottom-[-10%] left-[20%] w-[600px] h-[600px] bg-[#ffdd00] rounded-full mix-blend-multiply filter blur-[150px] opacity-10"></div>
+    <div class="absolute bottom-[10%] right-[10%] w-[500px] h-[500px] bg-[#ff5500] rounded-full mix-blend-multiply filter blur-[150px] opacity-10"></div>
+
+    <!-- Main Poster Container -->
+    <div data-poster-root="true" class="relative w-[1200px] min-h-[900px] mx-auto glass-container prismatic-border flex flex-col md:flex-row overflow-hidden z-10">
+
+        <!-- Left Side: Card Presentation -->
+        <div class="relative w-full md:w-5/12 min-h-full flex flex-col items-center justify-center p-4 z-20 border-r border-white/80 bg-white/30">
+            
+            <!-- Brand Logo -->
+            <div class="absolute top-8 left-8 z-50 flex items-center">
+                <!-- 請將你的去背 Logo 圖片命名為 logo.png 並放在同一個資料夾，或者在 Python 中替換這裡的 src -->
+                <img src="logo.png" alt="你的 Logo 圖片" class="h-20 w-auto object-contain drop-shadow-sm" />
+            </div>
+
+            <!-- Badge -->
+            <div class="absolute top-8 right-8 z-50 flex flex-col gap-4 items-end">
+                {{ badge_html }}
+            </div>
+
+            <!-- Wireframe Card Container -->
+            <div class="relative w-full max-w-[400px] aspect-[2.6/3.6] group flex items-center justify-center" data-badge="{{ badge_mode }}">
+
+                <!-- Glowing Transparent Wireframe Border -->
+                <div class="absolute inset-0 rounded-2xl border-2 border-white/90 shadow-[0_10px_40px_rgba(212,175,55,0.1),inset_0_0_30px_rgba(255,255,255,1)] pointer-events-none z-20"></div>
+
+                <!-- Ambient Glow behind card (Gold/Pearl) -->
+                <div class="absolute inset-4 bg-gradient-to-tr from-[#e0f7fa] via-[#ffea8c] to-[#ede7f6] blur-[40px] rounded-full pointer-events-none opacity-50 group-hover:opacity-80 transition-opacity duration-700"></div>
+
+                <!-- The Actual Card -->
+                <div class="relative w-[88%] h-[90%] rounded-[14px] overflow-hidden shadow-[0_25px_50px_rgba(0,0,0,0.15)] z-10 transform group-hover:scale-[1.03] transition-transform duration-700 ease-out border-2 border-white bg-white">
+                    <img src="{{ card_image }}" alt="{{ card_name }}" class="absolute inset-0 w-full h-full object-cover object-center" />
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Side: Content -->
+        <div class="relative w-full md:w-7/12 h-full flex flex-col justify-between p-12 z-10 bg-white/40">
+            <div class="space-y-8 flex-1">
+
+                <!-- Header Section -->
+                <div class="border-l-4 border-premium-gold pl-6 relative">
+                    <h3 class="pearl-text tracking-[0.3em] text-[13px] font-bold uppercase mb-2">{{ card_set }}</h3>
+                    <h1 class="rainbow-gradient-text text-5xl md:text-6xl font-display font-black leading-tight tracking-tight mt-1 pb-1">
+                        {{ card_name }}
+                    </h1>
+                    <div class="flex items-center gap-4 mt-5">
+                        <span class="text-2xl text-text-main font-bold tracking-widest font-mono">#{{ card_number }}</span>
+                        <div class="h-px w-8 bg-premium-gold/30"></div>
+                        <span class="px-3 py-1 rounded-full border border-premium-gold/30 text-premium-gold-dark text-[10px] font-black tracking-widest uppercase bg-premium-gold/10 shadow-sm">{{ category }}</span>
+                    </div>
+                </div>
+
+                <!-- Market Analysis Section -->
+                <div class="pt-2">
+                    <div class="flex items-center justify-between mb-6 border-b border-black/5 pb-3">
+                        <h2 class="text-xl text-text-main font-black flex items-center gap-3">
+                            <span class="material-symbols-outlined text-premium-gold">monitoring</span>
+                            Core Asset Analysis
+                        </h2>
+
+                        <!-- Glass Average Price Badge (Gold) -->
+                        <div class="inline-block p-[1px] rounded-xl bg-gradient-to-br from-[#ffea8c] via-[#d4af37] to-[#aa8323] shadow-[0_8px_20px_rgba(212,175,55,0.2)] transform -rotate-2 -translate-y-1">
+                            <div class="bg-white/95 backdrop-blur-md px-6 py-3 rounded-[11px] flex items-center gap-3 h-full relative overflow-hidden">
+                                <div class="flex flex-col items-start relative z-10">
+                                    <span class="block text-text-muted text-xs font-black uppercase tracking-widest pl-1 mb-1">{{ target_grade }} AVG (近2個月)</span>
+                                    <span class="dark-metal-text text-4xl font-black tracking-tight flex items-center">{{ recent_avg_price }}<span class="material-symbols-outlined text-premium-gold text-3xl ml-1.5">trending_up</span></span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="space-y-6 pr-4">
+                        <!-- Market Heat -->
+                        <div>
+                            <div class="flex justify-between items-end mb-2">
+                                <span class="text-text-main font-bold text-[15px] uppercase tracking-wider">Market Heat (熱度)</span>
+                                <span class="dark-metal-text font-black text-xl">{{ market_heat_level }}</span>
+                            </div>
+                            <div class="h-2 w-full progress-track rounded-full overflow-hidden mb-2.5">
+                                <div class="h-full progress-bar-glow rounded-full" style="width: {{ market_heat_width }}%"></div>
+                            </div>
+                            <p class="text-[15px] text-text-muted leading-relaxed font-medium">{{ market_heat_desc }}</p>
+                        </div>
+
+                        <!-- Collection Value -->
+                        <div>
+                            <div class="flex justify-between items-end mb-2">
+                                <span class="text-text-main font-bold text-[15px] uppercase tracking-wider">Collection Value (價值)</span>
+                                <span class="dark-metal-text font-black text-xl">{{ collection_value_level }}</span>
+                            </div>
+                            <div class="h-2 w-full progress-track rounded-full overflow-hidden mb-2.5">
+                                <div class="h-full progress-bar-glow rounded-full" style="width: {{ collection_value_width }}%"></div>
+                            </div>
+                            <p class="text-[15px] text-text-muted leading-relaxed font-medium">{{ collection_value_desc }}</p>
+                        </div>
+
+                        <!-- Playability -->
+                        <div>
+                            <div class="flex justify-between items-end mb-2">
+                                <span class="text-text-main font-bold text-[15px] uppercase tracking-wider">Playability (競技)</span>
+                                <span class="text-text-main font-black text-xl">{{ competitive_freq_level }}</span>
+                            </div>
+                            <div class="h-2 w-full progress-track rounded-full overflow-hidden mb-2.5">
+                                <div class="h-full bg-gradient-to-r from-gray-300 to-gray-400 rounded-full" style="width: {{ competitive_freq_width }}%"></div>
+                            </div>
+                            <p class="text-[15px] text-text-muted leading-relaxed font-medium">{{ competitive_freq_desc }}</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Card Features Section -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                    <!-- Features 容器改為毛玻璃風格 -->
+                    <div class="col-span-2 bg-white/60 backdrop-blur-md border border-white rounded-xl p-5 shadow-sm">
+                        {{ features_html }}
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Footer Meta -->
+            <div class="mt-8 pt-6 border-t border-black/5 flex justify-between items-end text-base z-10">
+                <div>
+                    <span class="block text-text-muted text-xs font-bold uppercase tracking-widest mb-1.5">Illustrator</span>
+                    <span class="text-text-main font-black flex items-center gap-2">
+                        <span class="material-symbols-outlined text-[18px] text-premium-gold">draw</span>
+                        {{ illustrator }}
+                    </span>
+                </div>
+                <div class="text-right">
+                    <span class="block text-text-muted text-xs font-bold uppercase tracking-widest mb-1.5">Release Info</span>
+                    <span class="text-text-main font-black text-lg">{{ release_info }}</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
