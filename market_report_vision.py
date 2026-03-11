@@ -414,6 +414,32 @@ def _extract_number_denominator(number_text):
     return m.group(0) if m else ""
 
 
+def _title_number_match(title_text, number_clean, number_padded):
+    """
+    Match card number by numerator-first logic.
+    - Prefer fraction numerator match (e.g. target 018 should match 018/072, not 010/018)
+    - Fallback to standalone number token only after removing x/y fractions
+    Returns: (matched, numerator_hit, denominator_hit, reason)
+    """
+    if not number_clean or number_clean == "0":
+        return True, "", "", "no_number_constraint"
+
+    text = str(title_text or "").lower()
+    fractions = re.findall(r'(\d{1,4})\s*/\s*(\d{1,4})', text)
+    for n_raw, d_raw in fractions:
+        n_norm = n_raw.lstrip('0') or '0'
+        d_norm = d_raw.lstrip('0') or '0'
+        if n_norm == number_clean:
+            return True, n_norm, d_norm, "fraction_numerator"
+
+    text_wo_frac = re.sub(r'\d{1,4}\s*/\s*\d{1,4}', ' ', text)
+    if number_padded and re.search(rf'(?<!\d){re.escape(number_padded)}(?!\d)', text_wo_frac):
+        return True, number_clean, "", "standalone_padded"
+    if number_clean and re.search(rf'(?<!\d){re.escape(number_clean)}(?!\d)', text_wo_frac):
+        return True, number_clean, "", "standalone_clean"
+    return False, "", "", ""
+
+
 def _score_pricecharting_candidate(
     url,
     *,
@@ -430,12 +456,23 @@ def _score_pricecharting_candidate(
     score = 0
     reasons = []
 
-    # Priority #1: set code exact
-    if set_code_slug and set_code_slug in slug_compact:
+    # Priority #1: exact number is mandatory signal.
+    if number_clean and re.search(rf'(?<!\d){re.escape(number_clean)}(?!\d)', slug):
+        score += 150
+        reasons.append("number_exact")
+    elif number_padded and number_padded in slug:
         score += 140
+        reasons.append("number_padded")
+    elif number_clean and number_clean != "0":
+        score -= 160
+        reasons.append("number_missing_penalty")
+
+    # Priority #2: set code exact (secondary to number)
+    if set_code_slug and set_code_slug in slug_compact:
+        score += 65
         reasons.append("set_code")
 
-    # Priority #2: precise name matching (token boundary)
+    # Priority #3: precise name matching (token boundary)
     if name_slug and _contains_token_boundary(slug_norm, name_slug):
         score += 85
         reasons.append("name_exact")
@@ -452,14 +489,6 @@ def _score_pricecharting_candidate(
             elif token_hits > 0:
                 score += 20
                 reasons.append("name_tokens_partial")
-
-    # Priority #3: exact number
-    if number_clean and re.search(rf'(?<!\d){re.escape(number_clean)}(?!\d)', slug):
-        score += 45
-        reasons.append("number_exact")
-    elif number_padded and number_padded in slug:
-        score += 40
-        reasons.append("number_padded")
 
     # Extra bonus: denominator/full-form hints to avoid same-number wrong card.
     if number_denominator:
@@ -817,11 +846,14 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
             title_clean = re.sub(r'(?i)image\s*\d+:\s*', '', title).lower()
             # Drop all https CDN links to prevent their timestamp digits from matching the card number
             title_clean = re.sub(r'https?://[^\s()\]]+', '', title_clean)
-            
-            # SNKRDUNK always pads Pokemon/One Piece numbers to at least 3 digits
-            if number_padded in title_clean or f"{number_clean}/" in title_clean:
+
+            is_num_match, n_hit, d_hit, n_reason = _title_number_match(title_clean, number_clean, number_padded)
+            if is_num_match:
                 filtered_by_number.append((title, pid, thumb))
-                _debug_log(f"  ✅ 符合編號 '{number_padded}': [{pid}] {title}")
+                if n_reason == "fraction_numerator":
+                    _debug_log(f"  ✅ 符合分子編號 '{number_padded}' ({n_hit}/{d_hit}): [{pid}] {title}")
+                else:
+                    _debug_log(f"  ✅ 符合編號 '{number_padded}' ({n_reason}): [{pid}] {title}")
             else:
                 skipped.append((title, pid, thumb))
                 _debug_log(f"  ❌ 不含編號 '{number_padded}': [{pid}] {title}")
@@ -878,21 +910,27 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
                             score -= 35
                             reasons.append("en_substring_penalty")
 
-                if number_padded and number_padded in title_l:
-                    score += 45
-                    reasons.append("number_padded")
-                elif number_clean and f"{number_clean}/" in title_l:
-                    score += 40
-                    reasons.append("number_slash")
+                num_match, n_hit, d_hit, n_reason = _title_number_match(title_l, number_clean, number_padded)
+                if num_match:
+                    if n_reason == "fraction_numerator":
+                        score += 52
+                        reasons.append("number_fraction_numerator")
+                    elif n_reason == "standalone_padded":
+                        score += 45
+                        reasons.append("number_standalone_padded")
+                    elif n_reason == "standalone_clean":
+                        score += 40
+                        reasons.append("number_standalone_clean")
 
                 if number_denominator:
                     den_trim = number_denominator.lstrip('0') or number_denominator
-                    if f"/{number_denominator}" in title_l:
-                        score += 35
-                        reasons.append("denominator_exact")
-                    elif f"/{den_trim}" in title_l:
-                        score += 28
-                        reasons.append("denominator_trim")
+                    if d_hit:
+                        if d_hit == den_trim:
+                            score += 35
+                            reasons.append("denominator_exact")
+                        else:
+                            score -= 55
+                            reasons.append("denominator_mismatch_penalty")
 
                 ranked_matches.append((title, pid, thumb, score, reasons))
 
