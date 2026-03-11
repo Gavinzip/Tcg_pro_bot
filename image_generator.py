@@ -239,20 +239,28 @@ async def _screenshot_poster_root(page, out_path):
     await page.screenshot(path=out_path, type="png", full_page=False, animations="disabled")
 
 def parse_level_and_desc(text):
-    text = str(text).strip()
-    match = re.match(r'^([A-Za-z]+)[。，,：:\s]+(.*)', text)
+    raw = "" if text is None else str(text).strip()
+    unknown_markers = {"", "unknown", "n/a", "na", "none", "null", "未知", "未提供"}
+    if raw.lower() in unknown_markers:
+        return "N/A", "資料不足"
+
+    match = re.match(r'^\s*(high|medium|low)\b[。，,：:\s-]*(.*)$', raw, flags=re.IGNORECASE)
     if match:
         level = match.group(1).capitalize()
         desc = match.group(2).strip().lstrip('\\').lstrip(':').lstrip(' ').strip()
-        return level, desc
-    return "Medium", text.lstrip('\\').lstrip(':').lstrip(' ').strip()
+        return level, (desc if desc else "資料不足")
+
+    cleaned = raw.lstrip('\\').lstrip(':').lstrip(' ').strip()
+    return "N/A", (cleaned if cleaned else "資料不足")
 
 def get_width_from_level(level):
     l = level.lower()
+    if 'n/a' in l or 'unknown' in l:
+        return 0
     if 'high' in l or 'outstanding' in l: return 90
     if 'medium' in l: return 60
     if 'low' in l: return 30
-    return 50
+    return 0
 
 def generate_features_html(features_text, theme="dark"):
     lines = [L.strip().lstrip('•').strip() for L in str(features_text).split('\n') if L.strip()]
@@ -625,7 +633,8 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
         except Exception as e:
             print(f"⚠️ Logo inline failed: {e}")
 
-    name = card_data.get('c_name') or card_data.get('jp_name') or card_data.get('name', 'Unknown Trading Card')
+    # Prefer Chinese display name, then English name, and keep Japanese as last fallback.
+    name = card_data.get('c_name') or card_data.get('name') or card_data.get('jp_name') or 'Unknown Trading Card'
     safe_name = name.replace(' ', '_').replace('/', '_')
     
     mh_level, mh_desc = parse_level_and_desc(card_data.get('market_heat', 'Medium'))
