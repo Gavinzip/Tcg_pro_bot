@@ -572,20 +572,36 @@ def create_premium_matplotlib_chart_b64(records, color_line='#f4d125', target_gr
 def calculate_arbitrage_stats(pc_records, snkr_records):
     pc_safe = pc_records or []
     snkr_safe = snkr_records or []
-    
-    # Calculate stats for the bottom section
+
+    # Use a single conversion baseline in poster stats to keep both markets comparable.
+    jpy_to_usd = 150.0
+
+    # Calculate bottom-section stats with both markets combined.
     prices_10 = [float(r['price']) for r in pc_safe if '10' in str(r.get('grade', ''))]
     prices_raw = [float(r['price']) for r in pc_safe if 'Ungraded' in str(r.get('grade', ''))]
     prices_9 = [float(r['price']) for r in pc_safe if '9' in str(r.get('grade', ''))]
-    
+
+    prices_10.extend([
+        float(r['price']) / jpy_to_usd
+        for r in snkr_safe
+        if str(r.get('grade', '')).strip() in ['S', 'PSA10', 'PSA 10']
+    ])
+    prices_raw.extend([
+        float(r['price']) / jpy_to_usd
+        for r in snkr_safe
+        if str(r.get('grade', '')).strip() in ['A', 'Ungraded']
+    ])
+    prices_9.extend([
+        float(r['price']) / jpy_to_usd
+        for r in snkr_safe
+        if '9' in str(r.get('grade', ''))
+    ])
+
     avg_10 = sum(prices_10)/len(prices_10) if len(prices_10) > 0 else 0
     max_10 = max(prices_10) if len(prices_10) > 0 else 0
     avg_raw = sum(prices_raw)/len(prices_raw) if len(prices_raw) > 0 else 0
     avg_9 = sum(prices_9)/len(prices_9) if len(prices_9) > 0 else 0
-    
-    snkr_10 = [float(r['price']) for r in snkr_safe if r.get('grade', '') in ['S', 'PSA10', 'PSA 10']]
-    snkr_raw = [float(r['price']) for r in snkr_safe if 'A' in str(r.get('grade', ''))]
-    
+
     # Arbitrage Profit estimation for Raw -> PSA 10 (Targeting Max Price)
     # Grading fee estimated around 1100 TWD (~$35 USD) + 10% value upcharge
     profit = 0

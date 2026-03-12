@@ -290,6 +290,18 @@ def _normalize_card_language(raw_value):
         return "JP"
     return "UNKNOWN"
 
+def _has_pokemon_mega_feature(features_text):
+    text = str(features_text or "").lower()
+    mega_markers = [
+        "mega 進化卡面",
+        "mega進化卡面",
+        "mega evolution",
+        "mega-evolution",
+        "mega 進化",
+        "メガ進化",
+    ]
+    return any(marker in text for marker in mega_markers)
+
 def _title_has_en_marker(title):
     title_l = str(title).lower()
     en_markers = [
@@ -498,6 +510,7 @@ def _score_pricecharting_candidate(
     number_padded,
     number_denominator,
     set_code_slug,
+    mega_name_hint=False,
 ):
     slug = url.split('/')[-1].lower()
     slug_norm = _normalize_alnum_dash(slug)
@@ -549,6 +562,15 @@ def _score_pricecharting_candidate(
             score += 28
             reasons.append("denominator_trim")
 
+    # Pokemon-only hint: if features says this is a Mega evolution card,
+    # candidates explicitly containing mega/m naming get a ranking boost.
+    if mega_name_hint and (
+        _contains_token_boundary(slug_norm, "mega")
+        or re.search(r'(^|-)m-(?=[a-z0-9])', slug_norm)
+    ):
+        score += 60
+        reasons.append("mega_name_hint")
+
     return score, reasons
 
 def filter_pricecharting_candidates(candidates):
@@ -567,7 +589,7 @@ def filter_pricecharting_candidates(candidates):
         filtered.append(c)
     return filtered
 
-def search_pricecharting(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name=""):
+def search_pricecharting(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name="", mega_name_hint=False, promo_hint=False):
     # Basic Name cleaning (strip parentheses like "Queen (Flagship Battle Top 8 Prize)")
     name_query = re.sub(r'\(.*?\)', '', name).strip()
     
@@ -743,6 +765,7 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
                 number_padded=number_padded_pc,
                 number_denominator=number_denominator,
                 set_code_slug=set_code_slug,
+                mega_name_hint=mega_name_hint,
             )
             scored_urls.append((u, sc, why))
         scored_urls.sort(key=lambda x: x[1], reverse=True)
@@ -757,8 +780,15 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
         selection_reason = f"Scored Best ({top_score}): {top_why}"
         _debug_log(f"PriceCharting ranking top3: {[(u, s) for u, s, _ in scored_urls[:3]]}")
         
-        # Filter based on is_flagship / is_alt_art (features-based override 主導)
-        if is_flagship:
+        # Filter based on promo/flagship/alt-art (features-based override 主導)
+        if promo_hint:
+            for u in ranked_urls:
+                lower_u = u.replace('[', '').replace(']', '').lower()
+                if any(kw in lower_u for kw in ["dodgers", "promotion", "promo", "not-for-sale", "not for sale"]):
+                    product_url = u
+                    selection_reason = "Promo Filter (偵測到 Dodgers/Promotion/Not for sale 關鍵字)"
+                    break
+        elif is_flagship:
             # 旗艦賽獎品卡：尋找包含 flagship 的 URL
             for u in ranked_urls:
                 lower_u = u.replace('[', '').replace(']', '').lower()
@@ -1517,6 +1547,7 @@ async def process_single_image(
     # ── features-based override ──────────────────────────────────────────────
     features_lower = features.lower() if features else ""
     is_flagship = any(kw in features_lower for kw in ["flagship", "旗艦賽", "flagship battle"])
+    mega_name_hint = (category.lower() == "pokemon") and _has_pokemon_mega_feature(features)
     if any(kw in features_lower for kw in [
         "leader parallel", "sr parallel", "sr-p", "l-p",
         "リーダーパラレル", "コミパラ", "パラレル",
@@ -1527,10 +1558,16 @@ async def process_single_image(
     if is_flagship:
         is_alt_art = True
         _debug_log("✨ features-based override: is_flagship=True (從 features 偵測到旗艦賽關鍵字)")
+    if mega_name_hint:
+        _debug_log("✨ features-based override: mega_name_hint=True (從 features 偵測到 Mega 進化卡面)")
 
     # ── Detect card language and variant hints for SNKRDUNK ──
     is_one_piece_cat = (category.lower() == "one piece")
     release_info_lower = str(card_info.get("release_info", "")).lower()
+    promo_market_hint = is_one_piece_cat and any(
+        kw in (features_lower + " " + release_info_lower)
+        for kw in ["dodgers", "not for sale", "promotion", "promotional"]
+    )
     raw_language = card_info.get("language", card_info.get("card_language", card_info.get("lang", "")))
     card_language = _normalize_card_language(raw_language)
     if is_one_piece_cat:
@@ -1549,7 +1586,10 @@ async def process_single_image(
         card_language = "UNKNOWN"
 
     snkr_variant_kws = []
-    if is_one_piece_cat and is_alt_art:
+    if promo_market_hint:
+        snkr_variant_kws = ["dodgers", "promotion", "promotional", "not for sale", "not-for-sale"]
+        _debug_log(f"🎯 SNKR Variant: Promo ({snkr_variant_kws})")
+    elif is_one_piece_cat and is_alt_art:
         if is_flagship:
             snkr_variant_kws = ["フラッグシップ", "フラシ", "flagship"]
             _debug_log(f"🎯 SNKR Variant: Flagship ({snkr_variant_kws})")
@@ -1571,7 +1611,7 @@ async def process_single_image(
     print(f"🌐 正在從網路(PC & SNKRDUNK)抓取市場行情 (異圖/特殊版: {is_alt_art})...")
     loop = asyncio.get_running_loop()
     pc_result, snkr_result = await asyncio.gather(
-        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, False, "", jp_name),
+        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, False, "", jp_name, mega_name_hint, promo_market_hint),
         loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws),
     )
 
@@ -1873,6 +1913,7 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
     
     features_lower = features.lower() if features else ""
     is_flagship = any(kw in features_lower for kw in ["flagship", "旗艦賽", "flagship battle"])
+    mega_name_hint = (category.lower() == "pokemon") and _has_pokemon_mega_feature(features)
     if any(kw in features_lower for kw in [
         "leader parallel", "sr parallel", "sr-p", "l-p",
         "リーダーパラレル", "コミパラ", "パラレル",
@@ -1884,6 +1925,10 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
         
     is_one_piece_cat = (category.lower() == "one piece")
     release_info_lower = str(card_info.get("release_info", "")).lower()
+    promo_market_hint = is_one_piece_cat and any(
+        kw in (features_lower + " " + release_info_lower)
+        for kw in ["dodgers", "not for sale", "promotion", "promotional"]
+    )
     raw_language = card_info.get("language", card_info.get("card_language", card_info.get("lang", "")))
     card_language = _normalize_card_language(raw_language)
     if is_one_piece_cat and card_language == "UNKNOWN":
@@ -1893,7 +1938,9 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
             card_language = "EN"
         
     snkr_variant_kws = []
-    if is_one_piece_cat and is_alt_art:
+    if promo_market_hint:
+        snkr_variant_kws = ["dodgers", "promotion", "promotional", "not for sale", "not-for-sale"]
+    elif is_one_piece_cat and is_alt_art:
         if is_flagship:
             snkr_variant_kws = ["フラッグシップ", "フラシ", "flagship"]
         elif any(kw in features_lower for kw in ["sr parallel", "sr-p", "スーパーレアパラレル"]):
@@ -1907,7 +1954,7 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
 
     loop = asyncio.get_running_loop()
     pc_result, snkr_result = await asyncio.gather(
-        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, True, "", jp_name),
+        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, True, "", jp_name, mega_name_hint, promo_market_hint),
         loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws, True),
     )
     
