@@ -471,7 +471,7 @@ def create_premium_matplotlib_chart_b64(records, color_line='#f4d125', target_gr
         x_grid_alpha = 0.1
 
     # Use a wider/taller canvas ratio to better fill the poster chart slot.
-    fig, ax1 = plt.subplots(figsize=(8.0, 3.6), facecolor='none')
+    fig, ax1 = plt.subplots(figsize=(8.2, 3.9), facecolor='none')
     ax1.set_facecolor('none')
 
     if not sorted_dates:
@@ -536,7 +536,7 @@ def create_premium_matplotlib_chart_b64(records, color_line='#f4d125', target_gr
         t.set_fontweight('bold')
 
     # Reduce outer padding while keeping axis labels readable.
-    fig.subplots_adjust(left=0.055, right=0.985, top=0.96, bottom=0.17)
+    fig.subplots_adjust(left=0.08, right=0.985, top=0.91, bottom=0.23)
     plt.margins(x=0.01)
 
     ax1.yaxis.grid(color=grid_color, linestyle=':', linewidth=1, alpha=y_grid_alpha)
@@ -556,7 +556,7 @@ def create_premium_matplotlib_chart_b64(records, color_line='#f4d125', target_gr
         lines_1 + lines_2,
         [price_label, vol_label],
         loc='upper left',
-        bbox_to_anchor=(0.01, 0.995),
+        bbox_to_anchor=(0.015, 0.985),
         prop={'size': 11},
         frameon=False,
         labelcolor=legend_color,
@@ -564,7 +564,7 @@ def create_premium_matplotlib_chart_b64(records, color_line='#f4d125', target_gr
 
     buf = io.BytesIO()
     # Preserve predictable aspect ratio for poster slots while keeping transparent bg.
-    plt.savefig(buf, format='png', transparent=True, dpi=220, pad_inches=0)
+    plt.savefig(buf, format='png', transparent=True, dpi=220, pad_inches=0.03)
     buf.seek(0)
     plt.close(fig)
     return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
@@ -769,29 +769,29 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
 
         pc_charts_html = f"""
         <div class="w-full flex flex-col gap-6 mb-2 mt-4">
-            <div class="relative glass-panel rounded-xl border border-green-500/40 p-2 h-[220px] overflow-hidden shadow-[0_0_20px_rgba(34,197,94,0.15)]">
-                <span class="absolute top-[-14px] left-4 text-[10px] font-bold text-white tracking-widest bg-black border border-green-500/50 px-3 py-1 rounded-full z-20 shadow-lg">PSA 10 Trend</span>
-                <span class="absolute top-[-14px] right-4 text-[10px] font-bold text-white bg-black/90 px-3 py-1 rounded-full border border-green-500/50 z-20 shadow-lg">30d Vol: {v_pc_10} Set</span>
-                <img src="{c_pc_10}" class="{chart_img_class_raw}" />
+            <div class="relative glass-panel rounded-xl border border-green-500/40 p-3 pt-11 h-[248px] overflow-hidden shadow-[0_0_20px_rgba(34,197,94,0.15)]">
+                <span class="absolute top-2 left-3 text-[10px] font-bold text-white tracking-widest bg-black border border-green-500/50 px-3 py-1 rounded-full z-20 shadow-lg">PSA 10 Trend</span>
+                <span class="absolute top-2 right-3 text-[10px] font-bold text-white bg-black/90 px-3 py-1 rounded-full border border-green-500/50 z-20 shadow-lg">30d Vol: {v_pc_10} Set</span>
+                <img src="{c_pc_10}" class="{chart_img_class_raw} rounded-[10px]" />
             </div>
-            <div class="relative glass-panel rounded-xl border border-red-500/40 p-2 h-[220px] overflow-hidden shadow-[0_0_20px_rgba(239,68,68,0.15)]">
-                <span class="absolute top-[-14px] left-4 text-[10px] font-bold text-white tracking-widest bg-black border border-red-500/50 px-3 py-1 rounded-full z-20 shadow-lg">Ungraded Trend</span>
-                <span class="absolute top-[-14px] right-4 text-[10px] font-bold text-white bg-black/90 px-3 py-1 rounded-full border border-red-500/50 z-20 shadow-lg">30d Vol: {v_pc_raw} Set</span>
-                <img src="{c_pc_raw}" class="{chart_img_class_raw}" />
+            <div class="relative glass-panel rounded-xl border border-red-500/40 p-3 pt-11 h-[248px] overflow-hidden shadow-[0_0_20px_rgba(239,68,68,0.15)]">
+                <span class="absolute top-2 left-3 text-[10px] font-bold text-white tracking-widest bg-black border border-red-500/50 px-3 py-1 rounded-full z-20 shadow-lg">Ungraded Trend</span>
+                <span class="absolute top-2 right-3 text-[10px] font-bold text-white bg-black/90 px-3 py-1 rounded-full border border-red-500/50 z-20 shadow-lg">30d Vol: {v_pc_raw} Set</span>
+                <img src="{c_pc_raw}" class="{chart_img_class_raw} rounded-[10px]" />
             </div>
         </div>"""
         
         snkr_charts_html = f"""
         <div class="w-full flex flex-col gap-6 mb-2 mt-4">
-            <div class="relative glass-panel rounded-xl border border-green-500/40 p-2 h-[220px] overflow-hidden shadow-[0_0_20px_rgba(34,197,94,0.15)]">
-                <span class="absolute top-[-14px] left-4 text-[10px] font-bold text-white tracking-widest bg-black border border-green-500/50 px-3 py-1 rounded-full z-20 shadow-lg">PSA 10 Trend</span>
-                <span class="absolute top-[-14px] right-4 text-[10px] font-bold text-white bg-black/90 px-3 py-1 rounded-full border border-green-500/50 z-20 shadow-lg">30d Vol: {v_sk_10} Set</span>
-                <img src="{c_sk_10}" class="{chart_img_class_raw}" />
+            <div class="relative glass-panel rounded-xl border border-green-500/40 p-3 pt-11 h-[248px] overflow-hidden shadow-[0_0_20px_rgba(34,197,94,0.15)]">
+                <span class="absolute top-2 left-3 text-[10px] font-bold text-white tracking-widest bg-black border border-green-500/50 px-3 py-1 rounded-full z-20 shadow-lg">PSA 10 Trend</span>
+                <span class="absolute top-2 right-3 text-[10px] font-bold text-white bg-black/90 px-3 py-1 rounded-full border border-green-500/50 z-20 shadow-lg">30d Vol: {v_sk_10} Set</span>
+                <img src="{c_sk_10}" class="{chart_img_class_raw} rounded-[10px]" />
             </div>
-            <div class="relative glass-panel rounded-xl border border-red-500/40 p-2 h-[220px] overflow-hidden shadow-[0_0_20px_rgba(239,68,68,0.15)]">
-                <span class="absolute top-[-14px] left-4 text-[10px] font-bold text-white tracking-widest bg-black border border-red-500/50 px-3 py-1 rounded-full z-20 shadow-lg">Ungraded Trend</span>
-                <span class="absolute top-[-14px] right-4 text-[10px] font-bold text-white bg-black/90 px-3 py-1 rounded-full border border-red-500/50 z-20 shadow-lg">30d Vol: {v_sk_raw} Set</span>
-                <img src="{c_sk_raw}" class="{chart_img_class_raw}" />
+            <div class="relative glass-panel rounded-xl border border-red-500/40 p-3 pt-11 h-[248px] overflow-hidden shadow-[0_0_20px_rgba(239,68,68,0.15)]">
+                <span class="absolute top-2 left-3 text-[10px] font-bold text-white tracking-widest bg-black border border-red-500/50 px-3 py-1 rounded-full z-20 shadow-lg">Ungraded Trend</span>
+                <span class="absolute top-2 right-3 text-[10px] font-bold text-white bg-black/90 px-3 py-1 rounded-full border border-red-500/50 z-20 shadow-lg">30d Vol: {v_sk_raw} Set</span>
+                <img src="{c_sk_raw}" class="{chart_img_class_raw} rounded-[10px]" />
             </div>
         </div>"""
 

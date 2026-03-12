@@ -44,13 +44,17 @@ def run_health_server():
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-MAX_CONCURRENT_IMAGES = max(1, int(os.getenv("MAX_CONCURRENT_IMAGES", "3")))
+MAX_CONCURRENT_REPORTS = max(
+    1, int(os.getenv("MAX_CONCURRENT_REPORTS", os.getenv("MAX_CONCURRENT_IMAGES", "6")))
+)
+MAX_CONCURRENT_POSTERS = max(1, int(os.getenv("MAX_CONCURRENT_POSTERS", "3")))
 
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
-ANALYSIS_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_IMAGES)
+REPORT_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_REPORTS)
+POSTER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_POSTERS)
 
 
 def smart_split(text, limit=1900):
@@ -134,104 +138,107 @@ async def _handle_image_impl(attachment, message, lang="zh"):
 
     try:
         print(f"⚙️ [並發] 開始分析: {attachment.filename} (lang={lang}, 來自 {message.author})")
+        poster_data = None
 
-        market_report_vision.REPORT_ONLY = True
-        api_key = os.getenv("MINIMAX_API_KEY")
+        async with REPORT_SEMAPHORE:
+            market_report_vision.REPORT_ONLY = True
+            api_key = os.getenv("MINIMAX_API_KEY")
 
-        result = await market_report_vision.process_single_image(
-            img_path, api_key, out_dir=card_out_dir, stream_mode=True, lang=lang
-        )
-
-        # 傳送 AI 模型切換通知（如 Minimax → GPT-4o-mini 備援）
-        for _status in market_report_vision.get_and_clear_notify_msgs():
-            await thread.send(_status)
-
-        # 處理「需要版本選擇」的狀態 (航海王)
-        if isinstance(result, dict) and result.get("status") == "need_selection":
-            candidates = result["candidates"]
-            # 去重並保留順序
-            candidates = list(dict.fromkeys(candidates))
-            
-            await thread.send(f"⚠️ 偵測到**航海王**有多個候選版本，請根據下方預覽圖選擇正確的版本：")
-            
-            # 抓取每個候選版本的縮圖並以 Embed 呈現
-            loading_msg = await thread.send("🖼️ 正在抓取版本預覽中...")
-            loop = asyncio.get_running_loop()
-            
-            for i, url in enumerate(candidates, start=1):
-                # 這裡改為順序執行並加上 skip_hi_res=True 以加快速度
-                print(f"DEBUG: Fetching thumbnail for candidate {i}: {url}")
-                _re, _url, thumb_url = await loop.run_in_executor(None, lambda: market_report_vision._fetch_pc_prices_from_url(url, skip_hi_res=True))
-                slug = url.split('/')[-1]
-                
-                embed = discord.Embed(title=f"版本 #{i}", description=f"Slug: `{slug}`", url=url, color=0x3498db)
-                if thumb_url:
-                    embed.set_thumbnail(url=thumb_url)
-                else:
-                    embed.description += "\n*(無法取得預覽圖)*"
-                    print(f"DEBUG: Failed to find thumbnail for {url}")
-                await thread.send(embed=embed)
-
-            await loading_msg.delete()
-
-            ver_view = VersionSelectView(candidates)
-            await thread.send("請點選下方按鈕進行選擇：", view=ver_view)
-            selected_url = await ver_view.wait_for_choice()
-
-            if not selected_url:
-                await thread.send("⏰ 選擇逾時，已中止。")
-                return
-
-            # 使用選擇的 URL 重新抓取並完成報告
-            final_pc_res = await loop.run_in_executor(None, market_report_vision._fetch_pc_prices_from_url, selected_url)
-            pc_records, pc_url, pc_img_url = final_pc_res
-            
-            snkr_result = result["snkr_result"]
-            snkr_records, final_img_url, snkr_url = snkr_result if snkr_result else (None, None, None)
-            if not final_img_url and pc_img_url:
-                final_img_url = pc_img_url
-            
-            jpy_rate = market_report_vision.get_exchange_rate()
-            # 呼叫 helper 完成剩餘流程
-            result = await market_report_vision.finish_report_after_selection(
-                result["card_info"],
-                pc_records,
-                pc_url,
-                pc_img_url,
-                snkr_records,
-                final_img_url,
-                snkr_url,
-                jpy_rate,
-                result["out_dir"],
-                result.get("poster_version", "v3"),
-                result["lang"],
-                stream_mode=True,
+            result = await market_report_vision.process_single_image(
+                img_path, api_key, out_dir=card_out_dir, stream_mode=True, lang=lang
             )
 
-        if isinstance(result, tuple):
-            report_text, poster_data = result
-        else:
-            report_text = result
-            poster_data = None
+            # 傳送 AI 模型切換通知（如 Minimax → GPT-4o-mini 備援）
+            for _status in market_report_vision.get_and_clear_notify_msgs():
+                await thread.send(_status)
 
-        # 4. 立即傳送文字報告
-        if report_text:
-            if report_text.startswith("❌"):
-                await thread.send(report_text)
+            # 處理「需要版本選擇」的狀態 (航海王)
+            if isinstance(result, dict) and result.get("status") == "need_selection":
+                candidates = result["candidates"]
+                # 去重並保留順序
+                candidates = list(dict.fromkeys(candidates))
+                
+                await thread.send(f"⚠️ 偵測到**航海王**有多個候選版本，請根據下方預覽圖選擇正確的版本：")
+                
+                # 抓取每個候選版本的縮圖並以 Embed 呈現
+                loading_msg = await thread.send("🖼️ 正在抓取版本預覽中...")
+                loop = asyncio.get_running_loop()
+                
+                for i, url in enumerate(candidates, start=1):
+                    # 這裡改為順序執行並加上 skip_hi_res=True 以加快速度
+                    print(f"DEBUG: Fetching thumbnail for candidate {i}: {url}")
+                    _re, _url, thumb_url = await loop.run_in_executor(None, lambda: market_report_vision._fetch_pc_prices_from_url(url, skip_hi_res=True))
+                    slug = url.split('/')[-1]
+                    
+                    embed = discord.Embed(title=f"版本 #{i}", description=f"Slug: `{slug}`", url=url, color=0x3498db)
+                    if thumb_url:
+                        embed.set_thumbnail(url=thumb_url)
+                    else:
+                        embed.description += "\n*(無法取得預覽圖)*"
+                        print(f"DEBUG: Failed to find thumbnail for {url}")
+                    await thread.send(embed=embed)
+
+                await loading_msg.delete()
+
+                ver_view = VersionSelectView(candidates)
+                await thread.send("請點選下方按鈕進行選擇：", view=ver_view)
+                selected_url = await ver_view.wait_for_choice()
+
+                if not selected_url:
+                    await thread.send("⏰ 選擇逾時，已中止。")
+                    return
+
+                # 使用選擇的 URL 重新抓取並完成報告
+                final_pc_res = await loop.run_in_executor(None, market_report_vision._fetch_pc_prices_from_url, selected_url)
+                pc_records, pc_url, pc_img_url = final_pc_res
+                
+                snkr_result = result["snkr_result"]
+                snkr_records, final_img_url, snkr_url = snkr_result if snkr_result else (None, None, None)
+                if not final_img_url and pc_img_url:
+                    final_img_url = pc_img_url
+                
+                jpy_rate = market_report_vision.get_exchange_rate()
+                # 呼叫 helper 完成剩餘流程
+                result = await market_report_vision.finish_report_after_selection(
+                    result["card_info"],
+                    pc_records,
+                    pc_url,
+                    pc_img_url,
+                    snkr_records,
+                    final_img_url,
+                    snkr_url,
+                    jpy_rate,
+                    result["out_dir"],
+                    result.get("poster_version", "v3"),
+                    result["lang"],
+                    stream_mode=True,
+                )
+
+            if isinstance(result, tuple):
+                report_text, poster_data = result
             else:
-                for chunk in smart_split(report_text):
-                    await thread.send(chunk)
-        else:
-            err_msg = "❌ Analysis failed: No card info found or unknown error." if lang == "en" else "❌ 分析失敗：未發現卡片資訊或發生未知錯誤。"
-            await thread.send(err_msg)
-            return
+                report_text = result
+                poster_data = None
+
+            # 4. 立即傳送文字報告
+            if report_text:
+                if report_text.startswith("❌"):
+                    await thread.send(report_text)
+                else:
+                    for chunk in smart_split(report_text):
+                        await thread.send(chunk)
+            else:
+                err_msg = "❌ Analysis failed: No card info found or unknown error." if lang == "en" else "❌ 分析失敗：未發現卡片資訊或發生未知錯誤。"
+                await thread.send(err_msg)
+                return
 
         # 5. 生成海報
         if poster_data:
             wait_msg = "🖼️ Generating poster, please wait..." if lang == "en" else "🖼️ 海報生成中，請稍候..."
             await thread.send(wait_msg)
             try:
-                out_paths = await market_report_vision.generate_posters(poster_data)
+                async with POSTER_SEMAPHORE:
+                    out_paths = await market_report_vision.generate_posters(poster_data)
                 if out_paths:
                     for path in out_paths:
                         if os.path.exists(path):
@@ -256,14 +263,7 @@ async def _handle_image_impl(attachment, message, lang="zh"):
 
 
 async def handle_image(attachment, message, lang="zh"):
-    loop = asyncio.get_running_loop()
-    waited = ANALYSIS_SEMAPHORE.locked()
-    wait_start = loop.time()
-    async with ANALYSIS_SEMAPHORE:
-        if waited:
-            waited_sec = loop.time() - wait_start
-            print(f"⏳ 佇列等待 {waited_sec:.1f}s 後開始: {attachment.filename}")
-        await _handle_image_impl(attachment, message, lang=lang)
+    await _handle_image_impl(attachment, message, lang=lang)
 
 
 @client.event
@@ -341,9 +341,10 @@ class ManualCandidateView(discord.ui.View):
         card_out_dir = tempfile.mkdtemp(prefix=f"tcg_manual_{id(self)}_")
         try:
             # 2. Generate text report and poster_data
-            result = await market_report_vision.generate_report_from_selected(
-                self.card_info, self.selected_pc, self.selected_snkr, out_dir=card_out_dir, lang=self.lang
-            )
+            async with REPORT_SEMAPHORE:
+                result = await market_report_vision.generate_report_from_selected(
+                    self.card_info, self.selected_pc, self.selected_snkr, out_dir=card_out_dir, lang=self.lang
+                )
             
             report_text, poster_data = result if isinstance(result, tuple) else (result, None)
             
@@ -355,7 +356,8 @@ class ManualCandidateView(discord.ui.View):
             if poster_data:
                 wait_msg = "🖼️ Generating poster..." if self.lang == "en" else "🖼️ 海報生成中..."
                 await thread.send(wait_msg)
-                out_paths = await market_report_vision.generate_posters(poster_data)
+                async with POSTER_SEMAPHORE:
+                    out_paths = await market_report_vision.generate_posters(poster_data)
                 if out_paths:
                     for path in out_paths:
                         if os.path.exists(path):
@@ -492,13 +494,8 @@ async def on_message(message):
             if not valid_attachments:
                 return
 
-            if len(valid_attachments) > MAX_CONCURRENT_IMAGES:
-                await message.reply(
-                    f"📦 收到 {len(valid_attachments)} 張圖片，系統會同時處理最多 {MAX_CONCURRENT_IMAGES} 張，其餘自動排隊。"
-                )
-
             for attachment in valid_attachments:
-                # 每張圖建立獨立 Task；實際執行由 Semaphore 控制上限
+                # 每張圖建立獨立 Task；並發上限由 REPORT/POSTER 雙 Semaphore 控制
                 asyncio.create_task(handle_image(attachment, message, lang=lang))
 
 

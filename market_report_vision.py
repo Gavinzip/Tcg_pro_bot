@@ -248,6 +248,55 @@ def get_exchange_rate():
     except:
         return 150.0
 
+DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"
+
+def _get_image_mime_type(image_path):
+    mime = "image/jpeg"
+    ext = image_path.lower().split(".")[-1]
+    if ext == "png":
+        return "image/png"
+    if ext == "webp":
+        return "image/webp"
+    return mime
+
+def _parse_vision_json(content):
+    cleaned = (content or "").replace("```json", "").replace("```", "").strip()
+    return json.loads(cleaned)
+
+def _get_llm_keys(minimax_api_hint=None):
+    google_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+    openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    minimax_key = (minimax_api_hint or os.getenv("MINIMAX_API_KEY") or "").strip()
+    return {
+        "google": google_key,
+        "openai": openai_key,
+        "minimax": minimax_key,
+    }
+
+def _get_provider_order():
+    preferred = (os.getenv("VISION_PROVIDER") or "google").strip().lower()
+    providers = ["google", "openai", "minimax"]
+    if preferred in providers:
+        return [preferred] + [p for p in providers if p != preferred]
+    return providers
+
+def _normalize_card_language(raw_value):
+    value = str(raw_value or "").strip().lower()
+    if not value:
+        return "UNKNOWN"
+    if value in ("en", "eng", "english", "英文", "英語", "英語版", "usa", "us"):
+        return "EN"
+    if value in ("jp", "ja", "jpn", "japanese", "日文", "日語", "日本語", "日版"):
+        return "JP"
+    return "UNKNOWN"
+
+def _title_has_en_marker(title):
+    title_l = str(title).lower()
+    en_markers = [
+        "[en]", "【en】", " english", "english version", "英語版", "英文版"
+    ]
+    return any(m in title_l for m in en_markers)
+
 def _fetch_pc_prices_from_url(product_url, md_content=None, skip_hi_res=False, target_grade="PSA 10"):
     """
     Given a PriceCharting product URL, fetch (if md_content is None) and parse it.
@@ -752,7 +801,7 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
     
     return records, resolved_url, pc_img_url
 
-def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art=False, card_language="JP", snkr_variant_kws=None, return_candidates=False, set_name=""):
+def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art=False, card_language="UNKNOWN", snkr_variant_kws=None, return_candidates=False, set_name=""):
     # Strip prefix like "No." (e.g. "No.025" -> "25"), then apply lstrip('0')
     if '-' in number and re.search(r'[A-Z]+\d+-\d+', number):
         number_clean = number.split('-')[-1].lstrip('0')
@@ -936,6 +985,7 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
 
             ranked_matches.sort(key=lambda x: x[3], reverse=True)
             unique_matches = [(t, p, i) for t, p, i, _, _ in ranked_matches]
+            score_by_pid = {p: s for _, p, _, s, _ in ranked_matches}
             _debug_log(f"SNKRDUNK ranking top3: {[(t, p, s) for t, p, _, s, _ in ranked_matches[:3]]}")
 
             if return_candidates:
@@ -950,8 +1000,6 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
             # 三階段串聯過濾：Variant → Alt-Art/Normal → Language
             # 每一階段在上一階段的結果裡繼續篩選，不覆蓋
             # ─────────────────────────────────────────────────────────────────
-            en_markers = ["英語版", "[en]", "【en】"]
-            
             # ── Stage 1: Variant-specific filter (features-based, 最高優先) ──
             # snkr_variant_kws 由 process_single_image 從 features 解析並傳入
             # 例: ["l-p"] for Leader Parallel, ["sr-p"] for SR Parallel, ["コミパラ"] for Manga, ["フラッグシップ","フラシ"] for Flagship
@@ -970,30 +1018,28 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
                 selection_reason = f"Variant Filter ({_variant_kws})"
             working_set2 = working_set
             
-            # ── Stage 3: Language filter ───────────────────────────────────
-            if card_language == "EN":
-                stage3 = [(t, p, i) for t, p, i in working_set2
-                          if any(m in t.lower() for m in en_markers)]
-                if stage3:
-                    product_id = stage3[0][1]
-                    img_url = stage3[0][2]
-                    selection_reason += " + Language(EN)"
-                    _debug_log(f"  🌐 語言過濾選中英文版: [{product_id}]")
+            # ── Stage 3: Language tie-break ONLY ───────────────────────────
+            # 語言只在「同分平手」時使用，避免覆蓋主排序結果。
+            # 若沒有語言欄位或無法辨識，完全不影響排序。
+            product_id = working_set2[0][1]
+            img_url = working_set2[0][2]
+
+            top_score = score_by_pid.get(product_id, 0)
+            top_tied = [(t, p, i) for t, p, i in working_set2 if score_by_pid.get(p, -10**9) == top_score]
+            norm_lang = _normalize_card_language(card_language)
+            if len(top_tied) > 1 and norm_lang in ("EN", "JP"):
+                if norm_lang == "EN":
+                    lang_tied = [(t, p, i) for t, p, i in top_tied if _title_has_en_marker(t)]
                 else:
-                    product_id = working_set2[0][1]
-                    img_url = working_set2[0][2]
-            else:  # JP (default)
-                stage3 = [(t, p, i) for t, p, i in working_set2
-                          if not any(m in t.lower() for m in en_markers)]
-                if stage3:
-                    product_id = stage3[0][1]
-                    img_url = stage3[0][2]
-                    selection_reason += " + Language(JP)"
-                    _debug_log(f"  🌐 語言過濾選中日文版: [{product_id}]")
+                    lang_tied = [(t, p, i) for t, p, i in top_tied if not _title_has_en_marker(t)]
+
+                if lang_tied:
+                    product_id = lang_tied[0][1]
+                    img_url = lang_tied[0][2]
+                    selection_reason += f" + LanguageTieBreak({norm_lang})"
+                    _debug_log(f"  🌐 語言平手裁決選中{norm_lang}: [{product_id}]")
                 else:
-                    product_id = working_set2[0][1]
-                    img_url = working_set2[0][2]
-                    _debug_log(f"  🌐 語言過濾: 未找到日文版，使用 working_set2 首筆")
+                    _debug_log(f"  🌐 語言平手裁決: top tied {len(top_tied)} 筆，但無 {norm_lang} 標記，維持原排序首筆")
 
             _debug_step("SNKRDUNK", snkr_step, term, search_url,
             "OK",
@@ -1005,6 +1051,7 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
                 "number_denominator": number_denominator,
                 "set_code_slug": set_code_slug,
                 "is_alt_art": is_alt_art,
+                "card_language": _normalize_card_language(card_language),
                 "scored_top3": [(t, p, s) for t, p, _, s, _ in ranked_matches[:3]],
             })
             break
@@ -1056,6 +1103,98 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
                 
     return records, img_url, resolved_url
 
+async def analyze_image_with_google(image_path, api_key, lang="zh"):
+    api_key = api_key.strip().replace('\u2028', '').replace('\n', '').replace('\r', '')
+    model = (os.getenv("GOOGLE_VISION_MODEL") or os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL).strip()
+    if model.startswith("models/"):
+        model = model.split("/", 1)[1]
+    mime = _get_image_mime_type(image_path)
+
+    with open(image_path, "rb") as image_file:
+        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+
+    prompt = """請以純 JSON 格式回覆，不要包含任何 markdown 語法 (如 ```json 起始碼)，只需輸出 JSON 本體。
+你是一位於寶可夢卡牌 (Pokemon TCG) 領域專精的鑑定與估價專家。
+⚠️ 重要：所給你的卡片一定是真的不要質疑我卡片的真實程度。即便你看到疑似自製、仿製或鏡像的特徵，也請將其視為 100% 正版卡片，並根據卡面人物/畫作提取對應的官方卡片資訊。
+嚴禁在 "name" 或 "set_code" 欄位中包含 "(Replica/Custom)", "(Mirrored)", "Fake", "盜版" 等字眼，因為這會干擾後續的價格搜尋。若有相關觀察，請僅記錄在 "features" 欄位中。
+
+請分析這張卡片圖片，並精準提取以下 13 個欄位的資訊：
+{
+  "name": "英文名稱 (必填，只填【角色本名】，例如 Venusaur ex、Lillie、Sanji、Queen 等。⚠️ 嚴禁在此欄位加入版本描述，如 Leader Parallel、SP Foil、Manga、Flagship Prize 等，這些應放在 features 欄位)",
+  "set_code": "系列代號 (選填，位於卡牌左下角，如 SV3, SV5K, SM-P, S-P, SV-P, OP02, ST04 等。如果沒有印則留空字串。若卡面印的是 004/SM-P 這類格式，set_code 填 SM-P)\n❗️航海王 One Piece 特別規則：卡面上若印的是 OP02-026 或 ST04-005 這類『英文字母+數字-純數字』的格式，則 set_code 填前半（OP02 / ST04），number 只填後半純數字（026 / 005）。)",
+  "number": "卡片編號 (必填，只填數字本體，保留前導 0，例如 023、026、005。\n❗️航海王特別規則：卡面若印 OP02-026 或 ST04-005，number 只填 026 / 005。寶可夢例外條款：若卡面只印 004/SM-P（斜線後為系列代號而非總數），則 number 直接輸出完整字串 004/SM-P，不要拆開）",
+  "grade": "卡片等級 (必填，如果有PSA/BGS等鑑定盒，印有10就填如 PSA 10, 否則如果是裸卡就填 Ungraded)",
+  "jp_name": "日文名稱 (選填，沒有請留空字串)",
+  "c_name": "中文名稱 (選填，沒有請留空字串)",
+  "category": "卡片類別 (填寫 Pokemon 或 One Piece，預設 Pokemon)",
+  "release_info": "發行年份與系列 (必填，從卡牌標誌或特徵推斷，如 2023 - 151)",
+  "illustrator": "插畫家 (必填，左下角或右下角的英文名，看不清可寫 Unknown)",
+  "market_heat": "市場熱度描述 (必填，開頭填寫 High / Medium / Low，後面白話文理由請務必使用『繁體中文』撰寫)",
+  "features": "卡片特點 (必填。⚠️ 極度重要：請仔細觀察卡面是否有微小的罕貴度標示或異圖版本文字，如 'L-P', 'SR-P', 'SEC-P', 'Parallel', 'Alternate Art', 'Flagship' 等。如果有，【必須】寫入此欄位！並包含全圖、特殊工藝等，每一行請用 \\n 換行區隔，請務必使用『繁體中文』撰寫)",
+  "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
+  "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
+  "is_alt_art": "是否為漫畫背景(Manga/Comic)或異圖(Parallel)？布林值 true/false。請極度仔細觀察卡片的『背景』：如果背景是一格一格的【黑白漫畫分鏡】，請填 true；如果背景只有閃電、特效、或單純場景，就算它是 SEC 也是普通版，『必須』填 false！",
+  "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)"
+}"""
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": mime, "data": encoded_string}}
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json"
+        }
+    }
+
+    print("--------------------------------------------------")
+    print(f"👁️‍🗨️ [Google Gemini] 模型={model}，正在解析卡片影像: {image_path}...")
+
+    loop = asyncio.get_running_loop()
+    def _do_google_post():
+        for attempt in range(3):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
+                response.raise_for_status()
+                return response
+            except requests.exceptions.RequestException as e:
+                print(f"⚠️ Google Gemini API 網路錯誤 (嘗試 {attempt+1}/3): {e}")
+                if attempt == 2:
+                    return None
+                time.sleep(2)
+        return None
+
+    response = await loop.run_in_executor(None, _do_google_post)
+    if response:
+        try:
+            data = response.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                raise ValueError("candidates 為空")
+            parts = (((candidates[0] or {}).get("content") or {}).get("parts") or [])
+            text_part = ""
+            for part in parts:
+                if isinstance(part, dict) and part.get("text"):
+                    text_part = part["text"]
+                    break
+            if not text_part:
+                raise ValueError("Gemini 回傳未包含 text")
+            result = _parse_vision_json(text_part)
+            _debug_log(f"Step 1 OK [Gemini]: {result.get('name')} #{result.get('number')}")
+            _debug_save("step1_google.json", json.dumps(result, indent=2, ensure_ascii=False))
+            return result
+        except Exception as e:
+            print(f"❌ Google Gemini 解析失敗: {e}")
+    return None
+
 async def analyze_image_with_openai(image_path, api_key, lang="zh"):
     api_key = api_key.strip()
     url = "https://api.openai.com/v1/chat/completions"
@@ -1095,7 +1234,8 @@ async def analyze_image_with_openai(image_path, api_key, lang="zh"):
   "features": "卡片特點 (必填。⚠️ 極度重要：請仔細觀察卡面是否有微小的罕貴度標示或異圖版本文字，如 'L-P', 'SR-P', 'SEC-P', 'Parallel', 'Alternate Art', 'Flagship' 等。如果有，【必須】寫入此欄位！並包含全圖、特殊工藝等，每一行請用 \\n 換行區隔，請務必使用『繁體中文』撰寫)",
   "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
-  "is_alt_art": "是否為漫畫背景(Manga/Comic)或異圖(Parallel)？布林值 true/false。請極度仔細觀察卡片的『背景』：如果背景是一格一格的【黑白漫畫分鏡】，請填 true；如果背景只有閃電、特效、或單純場景，就算它是 SEC 也是普通版，『必須』填 false！"
+  "is_alt_art": "是否為漫畫背景(Manga/Comic)或異圖(Parallel)？布林值 true/false。請極度仔細觀察卡片的『背景』：如果背景是一格一格的【黑白漫畫分鏡】，請填 true；如果背景只有閃電、特效、或單純場景，就算它是 SEC 也是普通版，『必須』填 false！",
+  "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)"
 }"""
 
     payload = {
@@ -1176,7 +1316,8 @@ async def analyze_image_with_minimax(image_path, api_key, lang="zh"):
   "features": "卡片特點 (必填。⚠️ 極度重要：請仔細觀察卡面是否有微小的罕貴度標示或異圖版本文字，如 'L-P', 'SR-P', 'SEC-P', 'Parallel', 'Alternate Art', 'Flagship' 等。如果有，【必須】寫入此欄位！並包含全圖、特殊工藝等，每一行請用 \\n 換行區隔，請務必使用『繁體中文』撰寫)",
   "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
-  "is_alt_art": "是否為漫畫背景(Manga/Comic)或異圖(Parallel)？布林值 true/false。請極度仔細觀察卡片的『背景』：如果背景是一格一格的【黑白漫畫分鏡】，請填 true；如果背景只有閃電、特效、或單純場景，就算它是 SEC 也是普通版，『必須』填 false！"
+  "is_alt_art": "是否為漫畫背景(Manga/Comic)或異圖(Parallel)？布林值 true/false。請極度仔細觀察卡片的『背景』：如果背景是一格一格的【黑白漫畫分鏡】，請填 true；如果背景只有閃電、特效、或單純場景，就算它是 SEC 也是普通版，『必須』填 false！",
+  "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)"
 }"""
 
     payload = {
@@ -1216,6 +1357,42 @@ async def analyze_image_with_minimax(image_path, api_key, lang="zh"):
         else:
             print("❌ 未設定 OPENAI_API_KEY，無法進行備援。")
             return None
+
+async def analyze_image_with_fallbacks(image_path, minimax_api_hint=None, lang="zh"):
+    keys = _get_llm_keys(minimax_api_hint)
+    providers = _get_provider_order()
+    available = [p for p in providers if keys.get(p)]
+    if not available:
+        print("❌ 未設定任何視覺 API Key（GOOGLE_API_KEY / OPENAI_API_KEY / MINIMAX_API_KEY）")
+        return None
+
+    provider_titles = {
+        "google": "Google Gemini",
+        "openai": "OpenAI",
+        "minimax": "MiniMax",
+    }
+    _debug_log(f"Vision provider order: {available}")
+
+    for idx, provider in enumerate(available):
+        if idx > 0:
+            prev = provider_titles.get(available[idx - 1], available[idx - 1])
+            cur = provider_titles.get(provider, provider)
+            _push_notify(f"⚠️ {prev} 無法辨識，切換至 {cur} 備援重試...")
+            print(f"⚠️ {prev} 辨識失敗，切換至 {cur}...")
+        else:
+            print(f"🧭 視覺辨識供應商順序: {' -> '.join(provider_titles.get(p, p) for p in available)}")
+
+        if provider == "google":
+            result = await analyze_image_with_google(image_path, keys["google"], lang=lang)
+        elif provider == "openai":
+            result = await analyze_image_with_openai(image_path, keys["openai"], lang=lang)
+        else:
+            result = await analyze_image_with_minimax(image_path, keys["minimax"], lang=lang)
+
+        if result:
+            return result
+
+    return None
 
     data = response.json()
     try:
@@ -1315,22 +1492,9 @@ async def process_single_image(
         card_info = external_card_info
         print("📡 使用外部 card_info，跳過影像辨識。")
     else:
-        openai_key = os.getenv("OPENAI_API_KEY")
-        if openai_key:
-            card_info = await analyze_image_with_openai(image_path, openai_key, lang=lang)
-            if not card_info:
-                _push_notify("⚠️ GPT-4o-mini 無回應，切換至 Minimax 備援重試...")
-                print("⚠️ GPT-4o-mini 辨識失敗，切換至 Minimax...")
-                card_info = await analyze_image_with_minimax(image_path, api_key, lang=lang)
-        else:
-            print("⚠️ 未設定 OPENAI_API_KEY，直接使用 Minimax 辨識。")
-            card_info = await analyze_image_with_minimax(image_path, api_key, lang=lang)
-
+        card_info = await analyze_image_with_fallbacks(image_path, api_key, lang=lang)
         if not card_info:
-            if not openai_key:
-                err_msg = "❌ 卡片辨識失敗：未設定 OPENAI_API_KEY，且 Minimax API 亦無回應。請聯繫管理員設定 OpenAI 金鑰。"
-            else:
-                err_msg = "❌ 卡片影像辨識失敗：GPT-4o-mini 及 Minimax 備援均無法解析此圖片，請確認圖片清晰度並重試。"
+            err_msg = "❌ 卡片影像辨識失敗：Google Gemini / OpenAI / MiniMax 均無法解析此圖片，請確認圖片清晰度與 API 金鑰。"
             print(err_msg, force=True)
             return err_msg
 
@@ -1366,13 +1530,23 @@ async def process_single_image(
 
     # ── Detect card language and variant hints for SNKRDUNK ──
     is_one_piece_cat = (category.lower() == "one piece")
-    card_language = "JP"
+    release_info_lower = str(card_info.get("release_info", "")).lower()
+    raw_language = card_info.get("language", card_info.get("card_language", card_info.get("lang", "")))
+    card_language = _normalize_card_language(raw_language)
     if is_one_piece_cat:
-        if any(kw in features_lower for kw in ["英文版", "english version", "[en]"]):
+        if card_language in ("EN", "JP"):
+            _debug_log(f"🌐 Language detected: {card_language} (從 AI language 欄位)")
+        elif any(kw in features_lower for kw in ["英文版", "english version", "[en]"]):
             card_language = "EN"
             _debug_log("🌐 Language detected: EN (從 features 偵測到英文版)")
+        elif any(kw in (features_lower + " " + release_info_lower) for kw in ["dodgers", "not for sale", "promotion", "promotional"]):
+            card_language = "EN"
+            _debug_log("🌐 Language detected: EN (從 release/features 偵測到 promo 英文關鍵字)")
         else:
-            _debug_log("🌐 Language detected: JP (預設日文版)")
+            card_language = "UNKNOWN"
+            _debug_log("🌐 Language detected: UNKNOWN (無明確語言欄位，不啟用語言偏好)")
+    else:
+        card_language = "UNKNOWN"
 
     snkr_variant_kws = []
     if is_one_piece_cat and is_alt_art:
@@ -1681,14 +1855,8 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
     """(Manual Mode) Analyzes image and returns URL candidates from PC and SNKRDUNK."""
     if not os.path.exists(image_path):
         return None, "找不到圖片檔案"
-        
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        card_info = await analyze_image_with_openai(image_path, openai_key, lang=lang)
-        if not card_info:
-            card_info = await analyze_image_with_minimax(image_path, api_key, lang=lang)
-    else:
-        card_info = await analyze_image_with_minimax(image_path, api_key, lang=lang)
+
+    card_info = await analyze_image_with_fallbacks(image_path, api_key, lang=lang)
     if not card_info:
         return None, "卡片影像辨識失敗"
     
@@ -1715,9 +1883,14 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
         is_alt_art = True
         
     is_one_piece_cat = (category.lower() == "one piece")
-    card_language = "JP"
-    if is_one_piece_cat and any(kw in features_lower for kw in ["英文版", "english version", "[en]"]):
-        card_language = "EN"
+    release_info_lower = str(card_info.get("release_info", "")).lower()
+    raw_language = card_info.get("language", card_info.get("card_language", card_info.get("lang", "")))
+    card_language = _normalize_card_language(raw_language)
+    if is_one_piece_cat and card_language == "UNKNOWN":
+        if any(kw in features_lower for kw in ["英文版", "english version", "[en]"]):
+            card_language = "EN"
+        elif any(kw in (features_lower + " " + release_info_lower) for kw in ["dodgers", "not for sale", "promotion", "promotional"]):
+            card_language = "EN"
         
     snkr_variant_kws = []
     if is_one_piece_cat and is_alt_art:
