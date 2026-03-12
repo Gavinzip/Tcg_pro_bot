@@ -589,7 +589,7 @@ def filter_pricecharting_candidates(candidates):
         filtered.append(c)
     return filtered
 
-def search_pricecharting(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name="", mega_name_hint=False, promo_hint=False):
+def search_pricecharting(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name="", mega_name_hint=False):
     # Basic Name cleaning (strip parentheses like "Queen (Flagship Battle Top 8 Prize)")
     name_query = re.sub(r'\(.*?\)', '', name).strip()
     
@@ -780,15 +780,8 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
         selection_reason = f"Scored Best ({top_score}): {top_why}"
         _debug_log(f"PriceCharting ranking top3: {[(u, s) for u, s, _ in scored_urls[:3]]}")
         
-        # Filter based on promo/flagship/alt-art (features-based override 主導)
-        if promo_hint:
-            for u in ranked_urls:
-                lower_u = u.replace('[', '').replace(']', '').lower()
-                if any(kw in lower_u for kw in ["dodgers", "promotion", "promo", "not-for-sale", "not for sale"]):
-                    product_url = u
-                    selection_reason = "Promo Filter (偵測到 Dodgers/Promotion/Not for sale 關鍵字)"
-                    break
-        elif is_flagship:
+        # Filter based on is_flagship / is_alt_art (features-based override 主導)
+        if is_flagship:
             # 旗艦賽獎品卡：尋找包含 flagship 的 URL
             for u in ranked_urls:
                 lower_u = u.replace('[', '').replace(']', '').lower()
@@ -1564,10 +1557,6 @@ async def process_single_image(
     # ── Detect card language and variant hints for SNKRDUNK ──
     is_one_piece_cat = (category.lower() == "one piece")
     release_info_lower = str(card_info.get("release_info", "")).lower()
-    promo_market_hint = is_one_piece_cat and any(
-        kw in (features_lower + " " + release_info_lower)
-        for kw in ["dodgers", "not for sale", "promotion", "promotional"]
-    )
     raw_language = card_info.get("language", card_info.get("card_language", card_info.get("lang", "")))
     card_language = _normalize_card_language(raw_language)
     if is_one_piece_cat:
@@ -1586,10 +1575,7 @@ async def process_single_image(
         card_language = "UNKNOWN"
 
     snkr_variant_kws = []
-    if promo_market_hint:
-        snkr_variant_kws = ["dodgers", "promotion", "promotional", "not for sale", "not-for-sale"]
-        _debug_log(f"🎯 SNKR Variant: Promo ({snkr_variant_kws})")
-    elif is_one_piece_cat and is_alt_art:
+    if is_one_piece_cat and is_alt_art:
         if is_flagship:
             snkr_variant_kws = ["フラッグシップ", "フラシ", "flagship"]
             _debug_log(f"🎯 SNKR Variant: Flagship ({snkr_variant_kws})")
@@ -1611,7 +1597,7 @@ async def process_single_image(
     print(f"🌐 正在從網路(PC & SNKRDUNK)抓取市場行情 (異圖/特殊版: {is_alt_art})...")
     loop = asyncio.get_running_loop()
     pc_result, snkr_result = await asyncio.gather(
-        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, False, "", jp_name, mega_name_hint, promo_market_hint),
+        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, False, "", jp_name, mega_name_hint),
         loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws),
     )
 
@@ -1925,10 +1911,6 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
         
     is_one_piece_cat = (category.lower() == "one piece")
     release_info_lower = str(card_info.get("release_info", "")).lower()
-    promo_market_hint = is_one_piece_cat and any(
-        kw in (features_lower + " " + release_info_lower)
-        for kw in ["dodgers", "not for sale", "promotion", "promotional"]
-    )
     raw_language = card_info.get("language", card_info.get("card_language", card_info.get("lang", "")))
     card_language = _normalize_card_language(raw_language)
     if is_one_piece_cat and card_language == "UNKNOWN":
@@ -1938,9 +1920,7 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
             card_language = "EN"
         
     snkr_variant_kws = []
-    if promo_market_hint:
-        snkr_variant_kws = ["dodgers", "promotion", "promotional", "not for sale", "not-for-sale"]
-    elif is_one_piece_cat and is_alt_art:
+    if is_one_piece_cat and is_alt_art:
         if is_flagship:
             snkr_variant_kws = ["フラッグシップ", "フラシ", "flagship"]
         elif any(kw in features_lower for kw in ["sr parallel", "sr-p", "スーパーレアパラレル"]):
@@ -1954,7 +1934,7 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
 
     loop = asyncio.get_running_loop()
     pc_result, snkr_result = await asyncio.gather(
-        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, True, "", jp_name, mega_name_hint, promo_market_hint),
+        loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, True, "", jp_name, mega_name_hint),
         loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws, True),
     )
     
