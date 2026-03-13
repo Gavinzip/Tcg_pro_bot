@@ -590,8 +590,8 @@ def filter_pricecharting_candidates(candidates):
     return filtered
 
 def search_pricecharting(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name="", mega_name_hint=False):
-    # Basic Name cleaning (strip parentheses like "Queen (Flagship Battle Top 8 Prize)")
-    name_query = re.sub(r'\(.*?\)', '', name).strip()
+    # Basic Name cleaning (strip parentheses and normalize hyphens to spaces)
+    name_query = re.sub(r'\(.*?\)', '', name).replace('-', ' ').strip()
     
     # Improve number extraction for One Piece (ST04-005 -> 005)
     # If the number contains a dash and follows OP format, take the part after the dash
@@ -618,13 +618,23 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
     queries_to_try = []
     final_set_code = set_code if set_code else suffix
     
-    if final_set_code:
+    # 1. 精確搜尋 (優先)：[卡名] [Set Code] [編號]
+    if final_set_code and number_clean != '0':
         queries_to_try.append(f"{name_query} {final_set_code} {number_clean}".replace(" ", "+"))
-    
-    if set_name:
-        queries_to_try.append(f"{name_query} {set_name} {number_clean}".replace(" ", "+"))
-        
-    queries_to_try.append(f"{name_query} {number_clean}".replace(" ", "+"))
+
+    # 2. 廣泛搜尋：[卡名] [編號]
+    if number_clean != '0':
+        queries_to_try.append(f"{name_query} {number_clean}".replace(" ", "+"))
+
+    # 3. 系列備援：[卡名] [系列全名] [編號] (僅在沒找到時，且名稱不包含系列名時嘗試)
+    if set_name and number_clean != '0':
+        _sn_clean = set_name.lower().strip()
+        if _sn_clean not in name_query.lower():
+            queries_to_try.append(f"{name_query} {set_name} {number_clean}".replace(" ", "+"))
+
+    # 4. 基本搜尋：[卡名] [Set Code]
+    if final_set_code:
+        queries_to_try.append(f"{name_query} {final_set_code}".replace(" ", "+"))
 
     is_one_piece = category.lower() == "one piece"
     _debug_log(f"PriceCharting: 類別={category} ({'航海王模式' if is_one_piece else '寶可夢模式'})，共 {len(queries_to_try)} 種查詢方案: {queries_to_try}")
@@ -838,21 +848,22 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
     number_denominator = _extract_number_denominator(number)
     set_code_slug = re.sub(r'[^a-zA-Z0-9]', '', set_code).lower() if set_code else ""
 
-    en_name_query = re.sub(r'\(.*?\)', '', en_name).strip()
-    jp_name_query = re.sub(r'\(.*?\)', '', jp_name).strip() if jp_name else ""
+    # Normalize hyphens to spaces in names for better search matching (e.g. Ex-Holo -> Ex Holo)
+    en_name_query = re.sub(r'\(.*?\)', '', en_name).replace('-', ' ').strip()
+    jp_name_query = re.sub(r'\(.*?\)', '', jp_name).replace('-', ' ').strip() if jp_name else ""
 
     terms_to_try = []
     
-    # [NEW] 優化搜尋順序：越短越精確的優先，避免過長的系列名稱干擾
-    if number_padded != "000":
-        if jp_name_query:
-            terms_to_try.append(f"{jp_name_query} {number_padded}")
-        terms_to_try.append(f"{en_name_query} {number_padded}")
-
+    # [NEW] 優化搜尋順序：如果有 Set Code，優先使用精確組合，否則才用廣泛搜尋
     if set_code and number_padded != "000":
         if jp_name_query:
             terms_to_try.append(f"{jp_name_query} {set_code} {number_padded}")
         terms_to_try.append(f"{en_name_query} {set_code} {number_padded}")
+
+    if number_padded != "000":
+        if jp_name_query:
+            terms_to_try.append(f"{jp_name_query} {number_padded}")
+        terms_to_try.append(f"{en_name_query} {number_padded}")
 
     # SNKRDUNK search is highly accurate with Set Code (e.g. "ピカチュウ S8a-G", "ピカチュウ SV-P")
     if set_code:
