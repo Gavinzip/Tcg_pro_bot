@@ -8,6 +8,8 @@ import threading
 import asyncio
 import traceback
 import sys
+import json
+import requests
 import market_report_vision
 from dotenv import load_dotenv
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -72,21 +74,299 @@ def smart_split(text, limit=1900):
     return chunks
 
 
-# LangSelectView removed (defaulting to zh or command-based en)
+LANG_LABELS = {
+    "zh": "繁體中文",
+    "zhs": "简体中文",
+    "en": "English",
+    "ko": "한국어",
+}
+
+
+LANG_FLAGS = {
+    "zh": "🇹🇼",
+    "zhs": "🇨🇳",
+    "en": "🇺🇸",
+    "ko": "🇰🇷",
+}
+
+
+def _t(lang: str, zh: str, en: str, ko: str, zhs: str | None = None):
+    if lang == "en":
+        return en
+    if lang == "ko":
+        return ko
+    if lang == "zhs":
+        return zhs if zhs is not None else zh
+    return zh
+
+
+def _translation_target_name(lang: str) -> str:
+    return {
+        "zh": "Traditional Chinese",
+        "zhs": "Simplified Chinese",
+        "en": "English",
+        "ko": "Korean",
+    }.get(lang, "Traditional Chinese")
+
+
+def _parse_lang_override(content_lower: str) -> str | None:
+    if any(tok in content_lower for tok in ["!zhs", "!cn", "简体", "簡體", "簡中", "zh-cn", "zh_hans"]):
+        return "zhs"
+    if any(tok in content_lower for tok in ["!ko", " ko", "韓文", "韓語", "korean"]):
+        return "ko"
+    if any(tok in content_lower for tok in ["!en", " en", "英文", "english"]):
+        return "en"
+    if any(tok in content_lower for tok in ["!zh", " zh", "中文", "chinese"]):
+        return "zh"
+    return None
+
+
+def _json_loads_loose(text: str):
+    cleaned = (text or "").replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(cleaned[start:end + 1])
+        raise
+
+
+class LanguageSelectView(discord.ui.View):
+    def __init__(self, author_id: int, timeout_seconds: int = 10):
+        super().__init__(timeout=timeout_seconds + 1)
+        self.author_id = author_id
+        self.timeout_seconds = timeout_seconds
+        self.selected_lang = None
+        self._event = asyncio.Event()
+
+    def _disable_all(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def _choose(self, interaction: discord.Interaction, lang_code: str):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the original sender can choose language.", ephemeral=True)
+            return
+        self.selected_lang = lang_code
+        self._disable_all()
+        self._event.set()
+        await interaction.response.edit_message(
+            content=f"✅ 語言已選擇：{LANG_FLAGS.get(lang_code, '🌐')} **{LANG_LABELS.get(lang_code, '繁體中文')}**，開始分析...",
+            view=self
+        )
+        self.stop()
+
+    @discord.ui.button(label="🇹🇼 繁體中文", style=discord.ButtonStyle.primary)
+    async def choose_zh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, "zh")
+
+    @discord.ui.button(label="🇨🇳 简体中文", style=discord.ButtonStyle.primary)
+    async def choose_zhs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, "zhs")
+
+    @discord.ui.button(label="🇺🇸 English", style=discord.ButtonStyle.secondary)
+    async def choose_en(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, "en")
+
+    @discord.ui.button(label="🇰🇷 한국어", style=discord.ButtonStyle.success)
+    async def choose_ko(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, "ko")
+
+    async def wait_for_choice(self):
+        try:
+            await asyncio.wait_for(self._event.wait(), timeout=self.timeout_seconds)
+            return self.selected_lang, True
+        except asyncio.TimeoutError:
+            return "zh", False
+
+
+async def choose_language_for_message(message: discord.Message) -> str:
+    prompt = "🌐 請選擇輸出語言（10 秒內未選擇將預設 🇹🇼 繁體中文）"
+    view = LanguageSelectView(message.author.id, timeout_seconds=10)
+    choose_msg = await message.reply(prompt, view=view)
+    lang, selected = await view.wait_for_choice()
+
+    if not selected:
+        view._disable_all()
+        try:
+            await choose_msg.edit(content="⏱️ 10 秒未選擇，已使用預設語言：🇹🇼 **繁體中文**。", view=view)
+        except Exception:
+            pass
+    return lang
+
+
+def _get_translation_provider_order():
+    preferred = (os.getenv("TRANSLATION_PROVIDER") or os.getenv("VISION_PROVIDER") or "google").strip().lower()
+    providers = ["google", "openai"]
+    if preferred in providers:
+        return [preferred] + [p for p in providers if p != preferred]
+    return providers
+
+
+def _get_translation_keys():
+    return {
+        "google": (os.getenv("GOOGLE_API_KEY") or "").strip(),
+        "openai": (os.getenv("OPENAI_API_KEY") or "").strip(),
+    }
+
+
+async def _translate_json_with_google(payload: dict, target_lang: str, api_key: str):
+    model = (
+        os.getenv("GOOGLE_TEXT_MODEL")
+        or os.getenv("GOOGLE_VISION_MODEL")
+        or os.getenv("GEMINI_MODEL")
+        or market_report_vision.DEFAULT_GEMINI_MODEL
+    ).strip()
+    if model.startswith("models/"):
+        model = model.split("/", 1)[1]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    prompt = (
+        f"You are a translation engine. Translate all user-facing text in the input JSON to {_translation_target_name(target_lang)}.\n"
+        "Rules:\n"
+        "1) Keep JSON structure and keys exactly the same.\n"
+        "2) Preserve URLs, markdown links, emojis, numbers, currency values, set codes, card numbers, and grades.\n"
+        "3) For market_heat / collection_value / competitive_freq, keep the first level token exactly High or Medium or Low, then a space and translated description.\n"
+        "4) Output valid JSON only.\n\n"
+        f"Input JSON:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json"},
+    }
+
+    def _do_request():
+        try:
+            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=body, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return None
+            parts = (((candidates[0] or {}).get("content") or {}).get("parts") or [])
+            for p in parts:
+                if isinstance(p, dict) and p.get("text"):
+                    return _json_loads_loose(p["text"])
+            return None
+        except Exception:
+            return None
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _do_request)
+
+
+async def _translate_json_with_openai(payload: dict, target_lang: str, api_key: str):
+    model = (os.getenv("OPENAI_TEXT_MODEL") or "gpt-4o-mini").strip()
+    prompt = (
+        f"Translate all user-facing text in this JSON to {_translation_target_name(target_lang)}.\n"
+        "Keep keys/structure unchanged. Preserve URLs, markdown links, emojis, numbers, currency, set codes, card numbers, grades.\n"
+        "For market_heat / collection_value / competitive_freq, keep the first token exactly High/Medium/Low.\n"
+        "Return JSON only.\n\n"
+        f"JSON:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+    req_body = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "response_format": {"type": "json_object"},
+    }
+
+    def _do_request():
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=req_body,
+                timeout=60,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+            return _json_loads_loose(content)
+        except Exception:
+            return None
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _do_request)
+
+
+async def translate_report_and_poster(report_text, poster_data, lang="zh"):
+    if lang == "zh":
+        return report_text, poster_data
+
+    source_fields = {}
+    if isinstance(poster_data, dict):
+        card_info = poster_data.get("card_info") or {}
+        source_fields = {
+            "c_name": card_info.get("c_name", ""),
+            "release_info": card_info.get("release_info", ""),
+            "market_heat": card_info.get("market_heat", ""),
+            "features": card_info.get("features", ""),
+            "collection_value": card_info.get("collection_value", ""),
+            "competitive_freq": card_info.get("competitive_freq", ""),
+            "illustrator": card_info.get("illustrator", ""),
+        }
+
+    payload = {
+        "report_text": report_text or "",
+        "poster_fields": source_fields,
+    }
+
+    keys = _get_translation_keys()
+    translated = None
+    for provider in _get_translation_provider_order():
+        api_key = keys.get(provider, "")
+        if not api_key:
+            continue
+        if provider == "google":
+            translated = await _translate_json_with_google(payload, lang, api_key)
+        elif provider == "openai":
+            translated = await _translate_json_with_openai(payload, lang, api_key)
+        if translated:
+            break
+
+    if not isinstance(translated, dict):
+        return report_text, poster_data
+
+    new_report = translated.get("report_text", report_text) or report_text
+    if not isinstance(poster_data, dict):
+        return new_report, poster_data
+
+    poster_fields = translated.get("poster_fields") if isinstance(translated.get("poster_fields"), dict) else {}
+    new_poster = dict(poster_data)
+    new_card_info = dict(new_poster.get("card_info") or {})
+    for k, v in poster_fields.items():
+        if isinstance(v, str) and v.strip():
+            new_card_info[k] = v.strip()
+    if lang == "en":
+        new_card_info["c_name"] = poster_fields.get("c_name") or new_card_info.get("name") or new_card_info.get("c_name", "")
+    elif lang == "ko":
+        new_card_info["c_name"] = poster_fields.get("c_name") or new_card_info.get("c_name") or new_card_info.get("name", "")
+    elif lang == "zhs":
+        new_card_info["c_name"] = poster_fields.get("c_name") or new_card_info.get("c_name") or new_card_info.get("name", "")
+
+    new_card_info["ui_lang"] = lang
+    new_poster["card_info"] = new_card_info
+    return new_report, new_poster
 
 class VersionSelectView(discord.ui.View):
     """
     版本選擇按鈕 View (航海王專用)。
     """
-    def __init__(self, candidates):
+    def __init__(self, candidates, lang="zh"):
         super().__init__(timeout=180)  # 3 分鐘超時
         self.chosen_url = None
         self._event = asyncio.Event()
         self.candidates = candidates
+        self.lang = lang
         
         # 動態建立按鈕
         for i, url in enumerate(candidates, start=1):
-            btn = discord.ui.Button(label=f"選擇版本 {i}", style=discord.ButtonStyle.primary, custom_id=f"ver_{i}")
+            btn_label = _t(lang, f"選擇版本 {i}", f"Select Version {i}", f"버전 {i} 선택", f"选择版本 {i}")
+            btn = discord.ui.Button(label=btn_label, style=discord.ButtonStyle.primary, custom_id=f"ver_{i}")
             btn.callback = self.make_callback(url, i)
             self.add_item(btn)
 
@@ -94,7 +374,14 @@ class VersionSelectView(discord.ui.View):
         async def callback(interaction: discord.Interaction):
             self.chosen_url = url
             self._event.set()
-            await interaction.response.edit_message(content=f"✅ 已選擇 **第 {idx} 個版本**，繼續生成報告...", view=None)
+            done_msg = _t(
+                self.lang,
+                f"✅ 已選擇 **第 {idx} 個版本**，繼續生成報告...",
+                f"✅ Selected **Version {idx}**, continuing report generation...",
+                f"✅ **버전 {idx}** 선택 완료, 리포트를 계속 생성합니다...",
+                f"✅ 已选择 **第 {idx} 个版本**，继续生成报告..."
+            )
+            await interaction.response.edit_message(content=done_msg, view=None)
         return callback
 
     async def wait_for_choice(self) -> str | None:
@@ -116,11 +403,19 @@ async def _handle_image_impl(attachment, message, lang="zh"):
     4. （非同步）生成海報 → 生成完成後補傳
     """
     # 根據語言設定討論串名稱
-    thread_name = "卡片分析報表" if lang == "zh" else "Card Analysis Report"
+    thread_name = _t(lang, "卡片分析報表", "Card Analysis Report", "카드 분석 리포트", "卡片分析报表")
     
     # 1. 建立討論串並加入使用者
     # 先發送一個初始訊息作為討論串的起點
-    init_msg = await message.reply(f"🃏 收到圖片，分析語言：**{'中文' if lang == 'zh' else 'English'}**...")
+    init_msg = await message.reply(
+        _t(
+            lang,
+            f"🃏 收到圖片，分析語言：{LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '繁體中文')}**...",
+            f"🃏 Image received. Analysis language: {LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, 'English')}**...",
+            f"🃏 이미지를 받았습니다. 분석 언어: {LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '한국어')}**...",
+            f"🃏 收到图片，分析语言：{LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '简体中文')}**..."
+        )
+    )
     
     thread = await init_msg.create_thread(name=thread_name, auto_archive_duration=60)
     
@@ -128,7 +423,13 @@ async def _handle_image_impl(attachment, message, lang="zh"):
     await thread.add_user(message.author)
 
     # 立即傳送第一則訊息，提供即時回饋
-    analyzing_msg = "🔍 Analyzing image, please wait..." if lang == "en" else "🔍 正在分析圖片中，請稍候..."
+    analyzing_msg = _t(
+        lang,
+        "🔍 正在分析圖片中，請稍候...",
+        "🔍 Analyzing image, please wait...",
+        "🔍 이미지를 분석 중입니다. 잠시만 기다려주세요...",
+        "🔍 正在分析图片，请稍候..."
+    )
     await thread.send(analyzing_msg)
 
     # 3. 建立暫存資料夾（海報存這裡）
@@ -144,8 +445,9 @@ async def _handle_image_impl(attachment, message, lang="zh"):
             market_report_vision.REPORT_ONLY = True
             api_key = os.getenv("MINIMAX_API_KEY")
 
+            # 統一先用中文產出，再針對使用者語言做後置翻譯（確保報告格式穩定）。
             result = await market_report_vision.process_single_image(
-                img_path, api_key, out_dir=card_out_dir, stream_mode=True, lang=lang
+                img_path, api_key, out_dir=card_out_dir, stream_mode=True, lang="zh"
             )
 
             # 傳送 AI 模型切換通知（如 Minimax → GPT-4o-mini 備援）
@@ -158,10 +460,26 @@ async def _handle_image_impl(attachment, message, lang="zh"):
                 # 去重並保留順序
                 candidates = list(dict.fromkeys(candidates))
                 
-                await thread.send(f"⚠️ 偵測到**航海王**有多個候選版本，請根據下方預覽圖選擇正確的版本：")
+                await thread.send(
+                    _t(
+                        lang,
+                        "⚠️ 偵測到**航海王**有多個候選版本，請根據下方預覽圖選擇正確的版本：",
+                        "⚠️ Multiple **One Piece** candidates found. Please choose the correct version from the previews below:",
+                        "⚠️ **원피스** 후보가 여러 개 감지되었습니다. 아래 미리보기에서 올바른 버전을 선택해주세요:",
+                        "⚠️ 检测到**航海王**有多个候选版本，请根据下方预览图选择正确版本："
+                    )
+                )
                 
                 # 抓取每個候選版本的縮圖並以 Embed 呈現
-                loading_msg = await thread.send("🖼️ 正在抓取版本預覽中...")
+                loading_msg = await thread.send(
+                    _t(
+                        lang,
+                        "🖼️ 正在抓取版本預覽中...",
+                        "🖼️ Fetching candidate previews...",
+                        "🖼️ 후보 미리보기를 불러오는 중...",
+                        "🖼️ 正在抓取版本预览中..."
+                    )
+                )
                 loop = asyncio.get_running_loop()
                 
                 for i, url in enumerate(candidates, start=1):
@@ -180,12 +498,23 @@ async def _handle_image_impl(attachment, message, lang="zh"):
 
                 await loading_msg.delete()
 
-                ver_view = VersionSelectView(candidates)
-                await thread.send("請點選下方按鈕進行選擇：", view=ver_view)
+                ver_view = VersionSelectView(candidates, lang=lang)
+                await thread.send(
+                    _t(
+                        lang,
+                        "請點選下方按鈕進行選擇：",
+                        "Please choose by clicking one of the buttons below:",
+                        "아래 버튼 중 하나를 눌러 선택해주세요:",
+                        "请点击下方按钮进行选择："
+                    ),
+                    view=ver_view
+                )
                 selected_url = await ver_view.wait_for_choice()
 
                 if not selected_url:
-                    await thread.send("⏰ 選擇逾時，已中止。")
+                    await thread.send(
+                        _t(lang, "⏰ 選擇逾時，已中止。", "⏰ Selection timed out. Stopped.", "⏰ 선택 시간이 초과되어 중단되었습니다.", "⏰ 选择超时，已中止。")
+                    )
                     return
 
                 # 使用選擇的 URL 重新抓取並完成報告
@@ -220,6 +549,26 @@ async def _handle_image_impl(attachment, message, lang="zh"):
                 report_text = result
                 poster_data = None
 
+            if isinstance(poster_data, dict):
+                ci = dict(poster_data.get("card_info") or {})
+                ci["ui_lang"] = lang
+                poster_data["card_info"] = ci
+
+            if report_text and lang in ("en", "ko", "zhs"):
+                try:
+                    report_text, poster_data = await translate_report_and_poster(report_text, poster_data, lang=lang)
+                except Exception as translate_err:
+                    print(f"⚠️ 翻譯失敗，回退原始中文: {translate_err}")
+                    await thread.send(
+                        _t(
+                            lang,
+                            "⚠️ 翻譯失敗，已改用中文原文輸出。",
+                            "⚠️ Translation failed. Falling back to Chinese output.",
+                            "⚠️ 번역에 실패하여 중국어 원문으로 출력합니다.",
+                            "⚠️ 翻译失败，已改用繁体中文原文输出。"
+                        )
+                    )
+
             # 4. 立即傳送文字報告
             if report_text:
                 if report_text.startswith("❌"):
@@ -228,13 +577,25 @@ async def _handle_image_impl(attachment, message, lang="zh"):
                     for chunk in smart_split(report_text):
                         await thread.send(chunk)
             else:
-                err_msg = "❌ Analysis failed: No card info found or unknown error." if lang == "en" else "❌ 分析失敗：未發現卡片資訊或發生未知錯誤。"
+                err_msg = _t(
+                    lang,
+                    "❌ 分析失敗：未發現卡片資訊或發生未知錯誤。",
+                    "❌ Analysis failed: No card info found or unknown error.",
+                    "❌ 분석 실패: 카드 정보를 찾지 못했거나 알 수 없는 오류가 발생했습니다.",
+                    "❌ 分析失败：未发现卡片信息或发生未知错误。"
+                )
                 await thread.send(err_msg)
                 return
 
         # 5. 生成海報
         if poster_data:
-            wait_msg = "🖼️ Generating poster, please wait..." if lang == "en" else "🖼️ 海報生成中，請稍候..."
+            wait_msg = _t(
+                lang,
+                "🖼️ 海報生成中，請稍候...",
+                "🖼️ Generating poster, please wait...",
+                "🖼️ 포스터 생성 중입니다. 잠시만 기다려주세요...",
+                "🖼️ 海报生成中，请稍候..."
+            )
             await thread.send(wait_msg)
             try:
                 async with POSTER_SEMAPHORE:
@@ -244,10 +605,22 @@ async def _handle_image_impl(attachment, message, lang="zh"):
                         if os.path.exists(path):
                             await thread.send(file=discord.File(path))
                 else:
-                    fail_msg = "⚠️ Poster generation failed, but the text report is complete." if lang == "en" else "⚠️ 海報生成失敗，但文字報告已完成。"
+                    fail_msg = _t(
+                        lang,
+                        "⚠️ 海報生成失敗，但文字報告已完成。",
+                        "⚠️ Poster generation failed, but the text report is complete.",
+                        "⚠️ 포스터 생성은 실패했지만 텍스트 리포트는 완료되었습니다.",
+                        "⚠️ 海报生成失败，但文字报告已完成。"
+                    )
                     await thread.send(fail_msg)
             except Exception as poster_err:
-                err_msg = f"⚠️ Poster generation error: {poster_err}" if lang == "en" else f"⚠️ 海報生成時發生錯誤：{poster_err}"
+                err_msg = _t(
+                    lang,
+                    f"⚠️ 海報生成時發生錯誤：{poster_err}",
+                    f"⚠️ Poster generation error: {poster_err}",
+                    f"⚠️ 포스터 생성 중 오류가 발생했습니다: {poster_err}",
+                    f"⚠️ 海报生成时发生错误：{poster_err}"
+                )
                 await thread.send(err_msg)
 
     except Exception as e:
@@ -480,19 +853,20 @@ async def on_message(message):
 
         # 原本的圖片處理邏輯
         if message.attachments:
-            # 偵測語言指令
             content_lower = message.content.lower()
-            if "!en" in content_lower or " en" in content_lower or content_lower.endswith("en"):
-                lang = "en"
-            else:
-                lang = "zh"
-
             valid_attachments = [
                 a for a in message.attachments
                 if any(a.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp'])
             ]
             if not valid_attachments:
                 return
+
+            # 可用 !zh / !zhs(!cn) / !en / !ko 強制指定；未指定時用按鈕詢問，5 秒逾時預設繁中。
+            lang_override = _parse_lang_override(content_lower)
+            if lang_override:
+                lang = lang_override
+            else:
+                lang = await choose_language_for_message(message)
 
             for attachment in valid_attachments:
                 # 每張圖建立獨立 Task；並發上限由 REPORT/POSTER 雙 Semaphore 控制
