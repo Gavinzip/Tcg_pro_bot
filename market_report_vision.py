@@ -1567,7 +1567,6 @@ async def process_single_image(
 
     # ── Detect card language and variant hints for SNKRDUNK ──
     is_one_piece_cat = (category.lower() == "one piece")
-    release_info_lower = str(card_info.get("release_info", "")).lower()
     raw_language = card_info.get("language", card_info.get("card_language", card_info.get("lang", "")))
     card_language = _normalize_card_language(raw_language)
     if is_one_piece_cat:
@@ -1576,9 +1575,6 @@ async def process_single_image(
         elif any(kw in features_lower for kw in ["英文版", "english version", "[en]"]):
             card_language = "EN"
             _debug_log("🌐 Language detected: EN (從 features 偵測到英文版)")
-        elif any(kw in (features_lower + " " + release_info_lower) for kw in ["dodgers", "not for sale", "promotion", "promotional"]):
-            card_language = "EN"
-            _debug_log("🌐 Language detected: EN (從 release/features 偵測到 promo 英文關鍵字)")
         else:
             card_language = "UNKNOWN"
             _debug_log("🌐 Language detected: UNKNOWN (無明確語言欄位，不啟用語言偏好)")
@@ -1921,13 +1917,10 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
         is_alt_art = True
         
     is_one_piece_cat = (category.lower() == "one piece")
-    release_info_lower = str(card_info.get("release_info", "")).lower()
     raw_language = card_info.get("language", card_info.get("card_language", card_info.get("lang", "")))
     card_language = _normalize_card_language(raw_language)
     if is_one_piece_cat and card_language == "UNKNOWN":
         if any(kw in features_lower for kw in ["英文版", "english version", "[en]"]):
-            card_language = "EN"
-        elif any(kw in (features_lower + " " + release_info_lower) for kw in ["dodgers", "not for sale", "promotion", "promotional"]):
             card_language = "EN"
         
     snkr_variant_kws = []
