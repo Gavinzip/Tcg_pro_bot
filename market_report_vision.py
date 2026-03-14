@@ -16,6 +16,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import contextvars
+import traceback
 
 load_dotenv()
 
@@ -66,6 +67,29 @@ def _debug_log(msg):
     _original_print(f"  📍 [DEBUG] {msg}")
     with open(os.path.join(debug_dir, 'debug_log.txt'), 'a', encoding='utf-8') as f:
         f.write(line)
+
+
+def _debug_save_with_dir(filename, content, debug_dir=None):
+    if debug_dir:
+        os.makedirs(debug_dir, exist_ok=True)
+        filepath = os.path.join(debug_dir, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content)
+        _original_print(f"  💾 [DEBUG] 存檔: {filepath}")
+        return
+    _debug_save(filename, content)
+
+
+def _debug_log_with_dir(msg, debug_dir=None):
+    if debug_dir:
+        os.makedirs(debug_dir, exist_ok=True)
+        timestamp = time.strftime('%H:%M:%S')
+        line = f"[{timestamp}] {msg}\n"
+        _original_print(f"  📍 [DEBUG] {msg}")
+        with open(os.path.join(debug_dir, 'debug_log.txt'), 'a', encoding='utf-8') as f:
+            f.write(line)
+        return
+    _debug_log(msg)
 
 def _debug_step(source: str, step_num: int, query: str, url: str,
                 status: str, candidate_urls: list = None,
@@ -248,6 +272,514 @@ def get_exchange_rate():
     except:
         return 150.0
 
+def _to_int_safe(value, default=0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        txt = str(value).strip().replace(",", "")
+        if not txt:
+            return default
+        return int(float(txt))
+    except Exception:
+        return default
+
+def _extract_year_safe(text):
+    match = re.search(r'(19|20)\d{2}', str(text or ""))
+    return match.group(0) if match else ""
+
+def _normalize_gemrate_language(raw_value, release_info=""):
+    value = str(raw_value or "").strip().lower()
+    if value in {"jp", "ja", "jpn", "japanese", "日文", "日語", "日本語", "日版"}:
+        return "Japanese"
+    if value in {"en", "eng", "english", "英文", "英語", "英語版", "usa", "us"}:
+        return "English"
+    if value in {"kr", "ko", "kor", "korean", "韓文", "韓語"}:
+        return "Korean"
+    if value in {"tc", "zh-tw", "zh-hant", "traditional chinese", "繁中", "繁體中文"}:
+        return "Traditional Chinese"
+    if value in {"sc", "zh-cn", "zh-hans", "simplified chinese", "簡中", "简体中文"}:
+        return "Simplified Chinese"
+
+    release_text = str(release_info or "")
+    release_lower = release_text.lower()
+    if "japanese" in release_lower or "日文" in release_text or "日語" in release_text:
+        return "Japanese"
+    if "english" in release_lower or "英文" in release_text:
+        return "English"
+    if "korean" in release_lower or "韓文" in release_text:
+        return "Korean"
+    return ""
+
+
+def _extract_release_hint(text):
+    src = str(text or "").strip()
+    if not src:
+        return ""
+    src = re.sub(r"^\s*(19|20)\d{2}\s*[-–—]\s*", "", src).strip()
+    src = src.replace("_", " ").replace("/", " ").replace("|", " ")
+    src = re.sub(r"\s+", " ", src).strip()
+    return src
+
+
+def _derive_gemrate_rarity_hint(features_text):
+    text = str(features_text or "").lower()
+    if any(k in text for k in ["special art rare", "sar", "特殊藝術"]):
+        return "Special Art Rare"
+    if any(k in text for k in ["illustration rare", "ir", "插畫罕貴", "插画罕贵"]):
+        return "Illustration Rare"
+    if any(k in text for k in ["art rare", " ar ", "(ar)", "（ar）", "藝術罕貴", "艺术罕贵"]):
+        return "Art Rare"
+    return ""
+
+
+def _has_missing_texture_hint(card_info):
+    blob = " ".join(
+        str(card_info.get(k, "") or "")
+        for k in ("name", "jp_name", "c_name", "features", "release_info", "set_name")
+    ).lower()
+    markers = [
+        "missing texture",
+        "missing-texture",
+        "ミッシングテクスチャ",
+        "缺紋理",
+        "缺纹理",
+        "紋理缺失",
+        "纹理缺失",
+    ]
+    return any(m in blob for m in markers)
+
+
+def _build_gemrate_queries(card_info):
+    primary_name = ""
+    for key in ("name", "c_name", "jp_name"):
+        raw = str(card_info.get(key, "") or "").strip()
+        raw = re.sub(r"\(.*?\)", "", raw).replace("-", " ").strip()
+        if raw:
+            primary_name = raw
+            break
+    names = [primary_name] if primary_name else []
+
+    number_raw = str(card_info.get("number", "") or "").strip().lstrip("#")
+    # Gemrate policy: keep the numerator token as-is (do not zfill / do not strip prefixes like GG)
+    number_token = number_raw.split("/", 1)[0].strip() if number_raw else ""
+    if not number_token:
+        number_token = number_raw
+    set_code = str(card_info.get("set_code", "") or "").strip()
+    set_code_query = set_code.replace("-", " ").strip()
+    release_info = str(card_info.get("release_info", "") or "").strip()
+    year = _extract_year_safe(release_info)
+    category = str(card_info.get("category", "Pokemon") or "Pokemon").strip()
+    raw_language = str(card_info.get("language", "") or card_info.get("card_language", "") or "").strip()
+    language = _normalize_gemrate_language(raw_language, release_info)
+
+    category_token = "Pokemon" if category.lower() == "pokemon" else category
+
+    prefix_tokens = [tok for tok in (year, category_token, language) if tok]
+    queries = []
+
+    def _push_unique(query):
+        q = re.sub(r"\s+", " ", str(query or "")).strip()
+        if q and q not in queries:
+            queries.append(q)
+
+    for nm in names:
+        # Gemrate query policy (strict): only two patterns
+        # 1) year+category+language + name+set_code+number
+        # 2) year+category+language + name+number
+        include_set_code = bool(set_code_query)
+        if include_set_code and number_token:
+            include_set_code = not number_token.lower().startswith(set_code_query.lower())
+        q1_parts = [nm]
+        if include_set_code:
+            q1_parts.append(set_code_query)
+        if number_token:
+            q1_parts.append(number_token)
+        q1_core = " ".join(x for x in q1_parts if x)
+        q2_core = " ".join(x for x in [nm, number_token] if x)
+        q1 = " ".join(prefix_tokens + [q1_core]) if prefix_tokens else q1_core
+        q2 = " ".join(prefix_tokens + [q2_core]) if prefix_tokens else q2_core
+        _push_unique(q1)
+        _push_unique(q2)
+
+    if not queries and names:
+        # Last-resort fallback when year/language/set_code are unavailable.
+        for nm in names:
+            _push_unique(" ".join(x for x in [nm, number_token] if x))
+    return queries
+
+
+def _gemrate_candidate_label(candidate):
+    if not isinstance(candidate, dict):
+        return ""
+    for key in ("title", "name", "display_name", "card_name", "label", "item_name", "product_name", "search_result_name", "description"):
+        txt = str(candidate.get(key, "") or "").strip()
+        if txt:
+            return txt
+    set_name = str(candidate.get("set_name", "") or "").strip()
+    card_num = str(candidate.get("number", "") or candidate.get("card_number", "") or "").strip()
+    name = str(candidate.get("name", "") or "").strip()
+    combo = " ".join(x for x in [name, set_name, card_num] if x).strip()
+    return combo
+
+
+def _gemrate_candidate_has_required_number(candidate, card_info):
+    label = _gemrate_candidate_label(candidate)
+    desc = str(candidate.get("description", "") or label or "").lower()
+    desc_norm = re.sub(r"\s+", " ", desc).strip()
+
+    number_raw = str(card_info.get("number", "") or "").strip().lstrip("#")
+    number_num = number_raw.split("/", 1)[0].strip() if number_raw else ""
+    number_num_l = number_num.lower()
+    if not number_num_l:
+        return False
+    # Alphanumeric identifiers (e.g. GG36) should be matched as-is, case-insensitive.
+    if re.match(r"^[a-z]+\d+$", number_num_l):
+        return re.search(rf"(?<![a-z0-9]){re.escape(number_num_l)}(?![a-z0-9])", desc_norm) is not None
+    # Pure numeric identifiers keep tolerant leading-zero matching.
+    if re.match(r"^\d+$", number_num_l):
+        num_i = int(number_num_l)
+        return re.search(rf"(?<!\d)0*{num_i}(?!\d)", desc_norm) is not None
+    return number_num_l in desc_norm
+
+
+def _score_gemrate_candidate(candidate, card_info):
+    desc = str(candidate.get("description", "") or _gemrate_candidate_label(candidate) or "").lower()
+    desc_norm = re.sub(r"\s+", " ", desc).strip()
+    score = 0
+    reasons = []
+
+    release_info = str(card_info.get("release_info", "") or "")
+    raw_language = str(card_info.get("language", "") or card_info.get("card_language", "") or "").strip()
+    preferred_lang = _normalize_gemrate_language(raw_language, release_info)
+    if preferred_lang:
+        if preferred_lang.lower() in desc_norm:
+            score += 220
+            reasons.append(f"language={preferred_lang}")
+        else:
+            reasons.append(f"language_miss={preferred_lang}")
+
+    if preferred_lang == "Japanese":
+        for token in ["korean", "indonesian", "thai", "traditional chinese", "simplified chinese", "english"]:
+            if token in desc_norm:
+                score -= 120
+                reasons.append(f"penalty_{token}")
+                break
+    elif preferred_lang == "Korean":
+        for token in ["japanese", "indonesian", "thai", "traditional chinese", "english"]:
+            if token in desc_norm:
+                score -= 120
+                reasons.append(f"penalty_{token}")
+                break
+    elif preferred_lang == "English":
+        for token in ["japanese", "korean", "indonesian", "thai", "traditional chinese"]:
+            if token in desc_norm:
+                score -= 120
+                reasons.append(f"penalty_{token}")
+                break
+
+    set_code = str(card_info.get("set_code", "") or "").lower()
+    if set_code and set_code in desc_norm:
+        score += 90
+        reasons.append("set_code")
+
+    number_raw = str(card_info.get("number", "") or "").strip().lstrip("#")
+    number_num = number_raw.split("/", 1)[0].strip() if number_raw else ""
+    number_num_l = number_num.lower()
+    number_den = number_raw.split("/", 1)[1].strip() if "/" in number_raw else ""
+    if number_num_l:
+        if re.match(r"^\d+$", number_num_l):
+            num_i = int(number_num_l)
+            if re.search(rf"(?<!\d)0*{num_i}(?!\d)", desc_norm):
+                score += 80
+                reasons.append("number_numerator")
+        elif re.match(r"^[a-z]+\d+$", number_num_l):
+            if re.search(rf"(?<![a-z0-9]){re.escape(number_num_l)}(?![a-z0-9])", desc_norm):
+                score += 80
+                reasons.append("number_numerator_alnum")
+        elif number_num_l in desc_norm:
+            score += 60
+            reasons.append("number_numerator_text")
+    if number_den and f"{number_num_l}/{number_den.lower()}" in desc_norm:
+        score += 35
+        reasons.append("number_fraction")
+
+    name_candidates = []
+    for key in ("name", "jp_name", "c_name"):
+        txt = str(card_info.get(key, "") or "").strip().lower()
+        if txt and txt not in name_candidates:
+            name_candidates.append(txt)
+    generic_name_tokens = {
+        "gx", "ex", "v", "vmax", "vstar", "tag team", "tagteam",
+        "ar", "sar", "sr", "ur", "hr", "chr", "csr", "alt art",
+    }
+    for nm in name_candidates:
+        nm_norm = re.sub(r"[^a-z0-9]+", " ", nm).strip()
+        if nm_norm and nm_norm in generic_name_tokens:
+            continue
+        if nm_norm and nm_norm in desc_norm:
+            score += 70
+            reasons.append(f"name={nm_norm}")
+            break
+        if nm and nm in desc_norm:
+            score += 60
+            reasons.append(f"name_raw={nm}")
+            break
+
+    rarity_hint = _derive_gemrate_rarity_hint(card_info.get("features", ""))
+    if rarity_hint and rarity_hint.lower() in desc_norm:
+        score += 30
+        reasons.append(f"rarity={rarity_hint}")
+
+    wants_missing_texture = _has_missing_texture_hint(card_info)
+    is_missing_texture_candidate = ("missing texture" in desc_norm) or ("missing" in desc_norm and "texture" in desc_norm)
+    if is_missing_texture_candidate and not wants_missing_texture:
+        score -= 140
+        reasons.append("penalty_missing_texture_unrequested")
+    elif is_missing_texture_candidate and wants_missing_texture:
+        score += 90
+        reasons.append("missing_texture_expected")
+    elif wants_missing_texture:
+        score -= 60
+        reasons.append("penalty_missing_texture_expected_but_absent")
+
+    release_hint = _extract_release_hint(release_info).lower()
+    if release_hint:
+        release_tokens = [t for t in re.findall(r"[a-z0-9]+", release_hint) if len(t) >= 2]
+        matched = 0
+        for tok in release_tokens[:4]:
+            if tok in {"pokemon", "card"}:
+                continue
+            if tok in desc_norm:
+                matched += 1
+        if matched:
+            add = matched * 15
+            score += add
+            reasons.append(f"release_tokens={matched}")
+
+    return score, reasons
+
+def _parse_gemrate_psa_stats(detail_data, candidate):
+    population_data = detail_data.get("population_data")
+    psa_entry = None
+    if isinstance(population_data, list):
+        for row in population_data:
+            grader = str(row.get("grader", "")).strip().upper()
+            if grader == "PSA":
+                psa_entry = row
+                break
+
+    if not psa_entry:
+        return None
+
+    grades = psa_entry.get("grades") if isinstance(psa_entry.get("grades"), dict) else {}
+    psa10 = _to_int_safe(grades.get("g10"))
+    psa9 = _to_int_safe(grades.get("g9"))
+    psa8_below = sum(_to_int_safe(grades.get(f"g{i}")) for i in range(1, 9))
+    auth_cnt = _to_int_safe(grades.get("auth"))
+
+    total = _to_int_safe(psa_entry.get("card_total_grades"))
+    if total <= 0:
+        total = psa10 + psa9 + psa8_below + auth_cnt
+    if total <= 0:
+        total = _to_int_safe(detail_data.get("total_population"))
+    if total <= 0:
+        total = _to_int_safe(candidate.get("total_population"))
+
+    gem_mint_rate = (psa10 / total * 100.0) if total > 0 else 0.0
+    gemrate_id = detail_data.get("gemrate_id") or candidate.get("gemrate_id")
+    gemrate_url = f"https://www.gemrate.com/universal-search?gemrate_id={gemrate_id}" if gemrate_id else ""
+
+    return {
+        "total_population": total,
+        "psa10_count": psa10,
+        "psa9_count": psa9,
+        "psa8_below_count": psa8_below,
+        "gem_mint_rate": round(gem_mint_rate, 2),
+        "gemrate_id": gemrate_id,
+        "gemrate_url": gemrate_url,
+    }
+
+def fetch_gemrate_psa_stats(card_info, debug_dir=None):
+    queries = _build_gemrate_queries(card_info)
+    if not queries:
+        return None
+    trace = {
+        "queries": queries[:8],
+        "attempts": [],
+        "selected": None,
+    }
+    _debug_log_with_dir(f"Gemrate: 共 {len(queries[:8])} 種查詢方案: {queries[:8]}", debug_dir)
+
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Origin": "https://www.gemrate.com",
+        "Referer": "https://www.gemrate.com/",
+    })
+
+    for step_idx, query in enumerate(queries[:8], start=1):
+        attempt = {
+            "step": step_idx,
+            "query": query,
+            "search_status": "",
+            "search_count": 0,
+            "candidates": [],
+            "ranked_top3": [],
+            "error": "",
+        }
+        try:
+            _debug_log_with_dir(f"Gemrate Step {step_idx}: 查詢={query!r}", debug_dir)
+            resp = session.post(
+                "https://www.gemrate.com/universal-search-query",
+                json={"query": query},
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                attempt["search_status"] = f"http_{resp.status_code}"
+                trace["attempts"].append(attempt)
+                _debug_log_with_dir(f"Gemrate Step {step_idx}: API status={resp.status_code}", debug_dir)
+                continue
+            raw = resp.json()
+            results = raw if isinstance(raw, list) else raw.get("results", [])
+            if not isinstance(results, list) or not results:
+                attempt["search_status"] = "no_results"
+                trace["attempts"].append(attempt)
+                _debug_log_with_dir(f"Gemrate Step {step_idx}: 無候選結果", debug_dir)
+                continue
+            attempt["search_status"] = "ok"
+            attempt["search_count"] = len(results)
+            _debug_log_with_dir(f"Gemrate Step {step_idx}: 搜尋命中 {len(results)} 筆候選", debug_dir)
+
+            ranked = []
+            for candidate in results[:10]:
+                gemrate_id = str(candidate.get("gemrate_id", "") or "").strip()
+                cand_label = _gemrate_candidate_label(candidate)
+                if not cand_label:
+                    cand_label = f"gemrate_id={gemrate_id or 'unknown'}"
+                score, score_reasons = _score_gemrate_candidate(candidate, card_info)
+                pop_type = str(candidate.get("population_type", "") or "").strip().upper()
+                number_match = _gemrate_candidate_has_required_number(candidate, card_info)
+                cand_trace = {
+                    "gemrate_id": gemrate_id,
+                    "label": cand_label,
+                    "status": "pending",
+                    "score": score,
+                    "population_type": pop_type,
+                    "number_match": number_match,
+                    "score_reasons": score_reasons,
+                    "raw": candidate,
+                }
+                attempt["candidates"].append(cand_trace)
+                if pop_type != "UNIVERSAL":
+                    cand_trace["status"] = "skip_non_universal_population"
+                    continue
+                if not number_match:
+                    cand_trace["status"] = "skip_number_mismatch"
+                    continue
+                ranked.append((score, _to_int_safe(candidate.get("total_population", 0)), candidate, cand_trace))
+
+            if not ranked:
+                _debug_log_with_dir("Gemrate: 無可用候選（需 UNIVERSAL 且編號命中），改試下一個 query", debug_dir)
+                trace["attempts"].append(attempt)
+                continue
+
+            ranked.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            attempt["ranked_top3"] = [
+                {
+                    "gemrate_id": str(item[2].get("gemrate_id", "") or ""),
+                    "label": item[3].get("label", ""),
+                    "score": item[0],
+                    "total_population": item[1],
+                }
+                for item in ranked[:3]
+            ]
+            _debug_log_with_dir(
+                f"Gemrate ranking top3: {[(r[3].get('label'), r[3].get('score')) for r in ranked[:3]]}",
+                debug_dir,
+            )
+
+            for score, _, candidate, cand_trace in ranked:
+                gemrate_id = str(candidate.get("gemrate_id", "") or "").strip()
+                cand_label = cand_trace.get("label", "")
+                if not gemrate_id:
+                    cand_trace["status"] = "skip_no_gemrate_id"
+                    _debug_log_with_dir(f"  ❌ Gemrate 候選缺 gemrate_id: {cand_label}", debug_dir)
+                    continue
+
+                _debug_log_with_dir(
+                    f"  🔍 Gemrate 候選: [{gemrate_id}] {cand_label} (score={score})",
+                    debug_dir,
+                )
+                page_resp = session.get(f"https://www.gemrate.com/universal-search?gemrate_id={gemrate_id}", timeout=20)
+                if page_resp.status_code != 200:
+                    cand_trace["status"] = f"skip_page_http_{page_resp.status_code}"
+                    _debug_log_with_dir(f"  ❌ Gemrate 候選頁讀取失敗: [{gemrate_id}] status={page_resp.status_code}", debug_dir)
+                    continue
+                token_match = re.search(r'(?:var|const)\s+cardDetailsToken\s*=\s*["\']([^"\']+)["\']', page_resp.text)
+                token = token_match.group(1) if token_match else ""
+                if not token:
+                    cand_trace["status"] = "skip_no_token"
+                    _debug_log_with_dir(f"  ❌ Gemrate 候選無 cardDetailsToken: [{gemrate_id}]", debug_dir)
+                    continue
+
+                detail_resp = session.get(
+                    f"https://www.gemrate.com/card-details?gemrate_id={gemrate_id}",
+                    headers={"X-Card-Details-Token": token, "Accept": "application/json"},
+                    timeout=20,
+                )
+                if detail_resp.status_code != 200:
+                    cand_trace["status"] = f"skip_detail_http_{detail_resp.status_code}"
+                    _debug_log_with_dir(f"  ❌ Gemrate card-details 失敗: [{gemrate_id}] status={detail_resp.status_code}", debug_dir)
+                    continue
+                detail_data = detail_resp.json()
+                stats = _parse_gemrate_psa_stats(detail_data, candidate)
+                if stats:
+                    stats["query"] = query
+                    cand_trace["status"] = "matched"
+                    cand_trace["stats"] = {
+                        "total_population": stats.get("total_population", 0),
+                        "psa10_count": stats.get("psa10_count", 0),
+                        "psa9_count": stats.get("psa9_count", 0),
+                        "psa8_below_count": stats.get("psa8_below_count", 0),
+                        "gem_mint_rate": stats.get("gem_mint_rate", 0.0),
+                    }
+                    trace["attempts"].append(attempt)
+                    trace["selected"] = {
+                        "step": step_idx,
+                        "query": query,
+                        "gemrate_id": gemrate_id,
+                        "label": cand_label,
+                        "score": score,
+                        "score_reasons": cand_trace.get("score_reasons", []),
+                        "stats": cand_trace["stats"],
+                    }
+                    _debug_log_with_dir(
+                        f"  ✅ Gemrate 命中: [{gemrate_id}] {cand_label} "
+                        f"(total={stats.get('total_population', 0)}, "
+                        f"psa10={stats.get('psa10_count', 0)}, "
+                        f"rate={stats.get('gem_mint_rate', 0)}%)",
+                        debug_dir,
+                    )
+                    _debug_save_with_dir("step2_gemrate.json", json.dumps(trace, ensure_ascii=False, indent=2), debug_dir)
+                    return stats
+                cand_trace["status"] = "skip_no_psa_population"
+                _debug_log_with_dir(f"  ❌ Gemrate 無 PSA population: [{gemrate_id}] {cand_label}", debug_dir)
+            trace["attempts"].append(attempt)
+        except Exception:
+            attempt["search_status"] = "error"
+            attempt["error"] = traceback.format_exc()
+            trace["attempts"].append(attempt)
+            _debug_log_with_dir(f"Gemrate Step {step_idx}: 發生例外，已跳過此查詢", debug_dir)
+            continue
+    _debug_save_with_dir("step2_gemrate.json", json.dumps(trace, ensure_ascii=False, indent=2), debug_dir)
+    return None
+
 DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"
 
 def _get_image_mime_type(image_path):
@@ -322,9 +854,35 @@ def _fetch_pc_prices_from_url(product_url, md_content=None, skip_hi_res=False, t
         return [], product_url, None
 
     print(f"DEBUG: Parsing PriceCharting page: {product_url} (length: {len(md_content)})")
+    _debug_save("step2_pc_source.md", md_content)
 
     lines = md_content.split('\n')
     records = []
+
+    def _detect_pc_grade(text):
+        t = str(text or "").lower()
+        # Normalize tight forms like "PSA10"/"CGC9.5"
+        t = re.sub(r'(?i)\b(psa|bgs|cgc|sgc)\s*([0-9](?:\.5)?)\b', r'\1 \2', t)
+        t = re.sub(r'\s+', ' ', t).strip()
+
+        if re.search(r'\bbgs\s*9\.5\b', t):
+            return "BGS 9.5"
+        # Strict PSA 10 only: avoid mixing CGC/BGS/SGC 10 into PSA10.
+        if re.search(r'\bpsa\s*10\b', t) or ("psa" in t and re.search(r'\b(?:gem\s*mint|mint|pristine)\s*10\b', t)):
+            return "PSA 10"
+        if re.search(r'\bpsa\s*9\b', t):
+            return "PSA 9"
+        if re.search(r'\bpsa\s*8\b', t):
+            return "PSA 8"
+        if re.search(r'\bbgs\s*10\b', t):
+            return "BGS 10"
+        if re.search(r'\bcgc\s*10\b', t):
+            return "CGC 10"
+        if re.search(r'\bsgc\s*10\b', t):
+            return "SGC 10"
+        if not re.search(r'\b(psa|bgs|cgc|sgc|grade|gem|mint|pristine)\b', t):
+            return "Ungraded"
+        return None
     
     # Parser 1: 嘗試原本的 Markdown Table 格式 (每行有 | 分隔)
     date_regex_md = r'\|\s*(\d{4}-\d{2}-\d{2}|[A-Z][a-z]{2}\s\d{1,2},\s\d{4})\s*\|'
@@ -339,19 +897,8 @@ def _fetch_pc_prices_from_url(product_url, md_content=None, skip_hi_res=False, t
                 if not real_prices: continue
                 
                 price_usd = float(real_prices[-1].replace(',', ''))
-                title_clean = line.replace(" ", "").lower()
-                
-                detected_grade = None
-                if re.search(r'(psa|cgc|bgs|grade|gem)10', title_clean) or ("psa" in title_clean and "10" in title_clean):
-                    detected_grade = "PSA 10"
-                elif re.search(r'bgs\s*9\.5', title_clean):
-                    detected_grade = "BGS 9.5"
-                elif re.search(r'(psa|cgc|bgs|grade|gem)9', title_clean) or ("psa" in title_clean and "9" in title_clean):
-                    detected_grade = "PSA 9"
-                elif re.search(r'(psa|cgc|bgs|grade|gem)8', title_clean) or ("psa" in title_clean and "8" in title_clean):
-                    detected_grade = "PSA 8"
-                elif not re.search(r'(psa|bgs|cgc|grade|gem)', title_clean):
-                    detected_grade = "Ungraded"
+                title_text = parts[3] if len(parts) > 3 else line
+                detected_grade = _detect_pc_grade(title_text)
                         
                 if detected_grade:
                     records.append({
@@ -376,16 +923,7 @@ def _fetch_pc_prices_from_url(product_url, md_content=None, skip_hi_res=False, t
                 real_prices = [p for p in all_prices if p not in ('6.00',)]
                 if not real_prices: continue
                 price_usd = float(real_prices[-1].replace(',', ''))
-                title_clean = line.replace(" ", "").lower()
-                detected_grade = None
-                if re.search(r'(psa|cgc|bgs|grade|gem)10', title_clean) or ("psa" in title_clean and "10" in title_clean):
-                    detected_grade = "PSA 10"
-                elif re.search(r'bgs\s*9\.5', title_clean):
-                    detected_grade = "BGS 9.5"
-                elif re.search(r'(psa|cgc|bgs|grade|gem)9', title_clean) or ("psa" in title_clean and "9" in title_clean):
-                    detected_grade = "PSA 9"
-                elif not re.search(r'(psa|bgs|cgc|grade|gem)', title_clean):
-                    detected_grade = "Ungraded"
+                detected_grade = _detect_pc_grade(line)
                 if detected_grade:
                     records.append({
                         "date": current_date,
@@ -1740,6 +2278,27 @@ async def finish_report_after_selection(
         else "航海王卡牌" if category.lower() == "one piece"
         else category
     )
+    gemrate_stats = None
+    try:
+        loop = asyncio.get_running_loop()
+        current_debug_dir = _get_debug_dir()
+        gemrate_stats = await asyncio.wait_for(
+            loop.run_in_executor(None, fetch_gemrate_psa_stats, card_info, current_debug_dir),
+            timeout=25,
+        )
+        if gemrate_stats:
+            _debug_log(
+                "Gemrate: matched "
+                f"id={gemrate_stats.get('gemrate_id')} "
+                f"total={gemrate_stats.get('total_population', 0)} "
+                f"psa10={gemrate_stats.get('psa10_count', 0)} "
+                f"rate={gemrate_stats.get('gem_mint_rate', 0)}%"
+            )
+        else:
+            _debug_log("Gemrate: no PSA population match found")
+    except Exception as e:
+        _debug_log(f"Gemrate fetch failed: {e}")
+        gemrate_stats = None
 
     report_lines = []
     report_lines.append("# MARKET REPORT GENERATED")
@@ -1813,12 +2372,29 @@ async def finish_report_after_selection(
     else:
         report_lines.append(f"SNKRDUNK: 無 {grade} 等級的成交紀錄")
 
+    report_lines.append("\n---\n🧬 Gemrate PSA")
+    if gemrate_stats:
+        total_pop = _to_int_safe(gemrate_stats.get("total_population"))
+        psa10_cnt = _to_int_safe(gemrate_stats.get("psa10_count"))
+        psa9_cnt = _to_int_safe(gemrate_stats.get("psa9_count"))
+        psa8_below_cnt = _to_int_safe(gemrate_stats.get("psa8_below_count"))
+        gem_rate = float(gemrate_stats.get("gem_mint_rate", 0.0) or 0.0)
+        report_lines.append(f"　📦 總數量：{total_pop:,} 筆")
+        report_lines.append(f"　🔟 PSA 10：{psa10_cnt:,} 筆")
+        report_lines.append(f"　9️⃣ PSA 9：{psa9_cnt:,} 筆")
+        report_lines.append(f"　8️⃣ PSA 8 以下：{psa8_below_cnt:,} 筆")
+        report_lines.append(f"　💎 滿分率：{gem_rate:.2f}%")
+    else:
+        report_lines.append("Gemrate: 無法取得 PSA 人口資料")
+
     report_lines.append("\n---")
     if pc_url:
         report_lines.append(f"🔗 [查看 PriceCharting]({pc_url})")
     if snkr_url:
         report_lines.append(f"🔗 [查看 SNKRDUNK]({snkr_url})")
         report_lines.append(f"🔗 [查看 SNKRDUNK 銷售歷史]({snkr_url}/sales-histories)")
+    if gemrate_stats and gemrate_stats.get("gemrate_url"):
+        report_lines.append(f"🔗 [查看 Gemrate]({gemrate_stats.get('gemrate_url')})")
 
     final_report = "\n".join(report_lines)
     print(final_report, force=True)
@@ -1839,6 +2415,13 @@ async def finish_report_after_selection(
     # 海報生成需要卡圖 URL
     card_info_for_poster = dict(card_info)
     card_info_for_poster["img_url"] = img_url
+    card_info_for_poster["gemrate_stats"] = gemrate_stats or {
+        "total_population": 0,
+        "psa10_count": 0,
+        "psa9_count": 0,
+        "psa8_below_count": 0,
+        "gem_mint_rate": 0.0,
+    }
 
     if stream_mode:
         return (

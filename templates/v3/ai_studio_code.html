@@ -157,9 +157,7 @@
                 <div class="glass-panel rounded-xl p-2 mb-4">
                     {{ pc_charts_html }}
                 </div>
-                <div class="glass-panel rounded-xl p-4 flex-1">
-                    {{ pc_table_html }}
-                </div>
+                {{ pc_table_html }}
             </div>
 
             <!-- Right Column: SNKRDUNK -->
@@ -177,49 +175,53 @@
                 <div class="glass-panel rounded-xl p-2 mb-4">
                     {{ snkr_charts_html }}
                 </div>
-                <div class="glass-panel rounded-xl p-4 flex-1">
-                    {{ snkr_table_html }}
-                </div>
+                {{ snkr_table_html }}
             </div>
         </div>
 
-        <!-- Footer: Aggregated Stats -->
+        <!-- Footer: Shared Stats Container (PSA + Global) -->
         <div class="relative z-10 p-8 border-t border-white/80 bg-white/50 shadow-[inset_0_10px_30px_rgba(255,255,255,0.8)]">
-            <h3 class="text-sm font-black uppercase tracking-[0.3em] text-text-muted mb-6 flex items-center gap-3">
-                <span class="w-2 h-2 rounded-full bg-premium-gold shadow-[0_0_8px_rgba(212,175,55,0.8)] animate-pulse"></span>
-                Global Aggregated Market Stats
-            </h3>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
+            <div class="glass-panel rounded-2xl p-5 md:p-6">
+                {{ psa_stats_panel_html }}
 
-                <!-- Stat Card 1 -->
-                <div class="glass-panel flex flex-col gap-1 p-5 rounded-xl">
-                    <span class="text-text-muted text-xs font-bold uppercase tracking-widest">{{ stat_1_title }}</span>
-                    <span class="text-4xl font-black text-text-main tracking-tight mt-1">{{ stat_1_val }}</span>
-                    <div class="w-full h-1 bg-gradient-to-r from-gray-300 to-transparent mt-3 rounded-full"></div>
+                <div class="mt-8">
+                    <h3 class="text-sm font-black uppercase tracking-[0.3em] text-text-muted mb-6 flex items-center gap-3">
+                        <span class="w-2 h-2 rounded-full bg-premium-gold shadow-[0_0_8px_rgba(212,175,55,0.8)] animate-pulse"></span>
+                        Global Aggregated Market Stats
+                    </h3>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+
+                        <!-- Stat Card 1 -->
+                        <div class="flex flex-col gap-1 p-5 rounded-xl bg-white/85 border border-white/90 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
+                            <span class="text-text-muted text-xs font-bold uppercase tracking-widest">{{ stat_1_title }}</span>
+                            <span class="text-4xl font-black text-text-main tracking-tight mt-1">{{ stat_1_val }}</span>
+                            <div class="w-full h-1 bg-gradient-to-r from-gray-300 to-transparent mt-3 rounded-full"></div>
+                        </div>
+
+                        <!-- Stat Card 2 -->
+                        <div class="flex flex-col gap-1 p-5 rounded-xl bg-white/85 border border-white/90 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
+                            <span class="text-text-muted text-xs font-bold uppercase tracking-widest">{{ stat_2_title }}</span>
+                            <span class="text-4xl font-black text-text-main tracking-tight mt-1">{{ stat_2_val }}</span>
+                            <div class="w-full h-1 bg-gradient-to-r from-gray-300 to-transparent mt-3 rounded-full"></div>
+                        </div>
+
+                        <!-- Stat Card 3 (Highlight - Gold) -->
+                        <div class="flex flex-col gap-1 p-5 rounded-xl bg-white/85 border-2 border-premium-gold/40 relative overflow-hidden group shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
+                            <div class="absolute inset-0 bg-gradient-to-br from-premium-gold/10 to-transparent pointer-events-none"></div>
+                            <span class="text-premium-gold-dark text-xs font-bold uppercase tracking-widest relative z-10">{{ stat_3_title }}</span>
+                            <span class="dark-metal-text text-4xl font-black mt-1 relative z-10">{{ stat_3_val }}</span>
+                            <div class="w-full h-1 bg-gradient-to-r from-premium-gold to-transparent mt-2 rounded-full relative z-10 shadow-sm"></div>
+                        </div>
+
+                        <!-- Stat Card 4 -->
+                        <div class="flex flex-col gap-1 p-5 rounded-xl bg-white/85 border border-white/90 shadow-[0_8px_20px_rgba(15,23,42,0.04)]">
+                            <span class="text-text-muted text-xs font-bold uppercase tracking-widest">{{ stat_4_title }}</span>
+                            <span class="text-4xl font-black text-text-main tracking-tight mt-1">{{ stat_4_val }}</span>
+                            <div class="w-full h-1 bg-gradient-to-r from-gray-300 to-transparent mt-3 rounded-full"></div>
+                        </div>
+
+                    </div>
                 </div>
-
-                <!-- Stat Card 2 -->
-                <div class="glass-panel flex flex-col gap-1 p-5 rounded-xl">
-                    <span class="text-text-muted text-xs font-bold uppercase tracking-widest">{{ stat_2_title }}</span>
-                    <span class="text-4xl font-black text-text-main tracking-tight mt-1">{{ stat_2_val }}</span>
-                    <div class="w-full h-1 bg-gradient-to-r from-gray-300 to-transparent mt-3 rounded-full"></div>
-                </div>
-
-                <!-- Stat Card 3 (Highlight - Gold) -->
-                <div class="glass-panel flex flex-col gap-1 p-5 rounded-xl border-2 border-premium-gold/40 relative overflow-hidden group">
-                    <div class="absolute inset-0 bg-gradient-to-br from-premium-gold/10 to-transparent pointer-events-none"></div>
-                    <span class="text-premium-gold-dark text-xs font-bold uppercase tracking-widest relative z-10">{{ stat_3_title }}</span>
-                    <span class="dark-metal-text text-4xl font-black mt-1 relative z-10">{{ stat_3_val }}</span>
-                    <div class="w-full h-1 bg-gradient-to-r from-premium-gold to-transparent mt-2 rounded-full relative z-10 shadow-sm"></div>
-                </div>
-
-                <!-- Stat Card 4 -->
-                <div class="glass-panel flex flex-col gap-1 p-5 rounded-xl">
-                    <span class="text-text-muted text-xs font-bold uppercase tracking-widest">{{ stat_4_title }}</span>
-                    <span class="text-4xl font-black text-text-main tracking-tight mt-1">{{ stat_4_val }}</span>
-                    <div class="w-full h-1 bg-gradient-to-r from-gray-300 to-transparent mt-3 rounded-full"></div>
-                </div>
-
             </div>
         </div>
     </div>

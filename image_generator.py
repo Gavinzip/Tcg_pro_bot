@@ -356,7 +356,7 @@ def generate_features_html(features_text, theme="dark", ui_lang="zh"):
 """
     return html
 
-def generate_table_rows(records, is_jpy=False, target_grade=None, theme="dark", ui_lang="zh"):
+def generate_table_rows(records, is_jpy=False, target_grade=None, theme="dark", ui_lang="zh", max_rows=10):
     lang = _normalize_ui_lang(ui_lang)
     is_light = (theme == "light")
     if is_light:
@@ -391,7 +391,7 @@ def generate_table_rows(records, is_jpy=False, target_grade=None, theme="dark", 
         filtered_records = records
 
     html = ""
-    for r in filtered_records[:10]:
+    for r in filtered_records[:max_rows]:
         date = r['date']
         grade = r.get('grade', 'Ungraded')
         if is_jpy:
@@ -409,6 +409,94 @@ def generate_table_rows(records, is_jpy=False, target_grade=None, theme="dark", 
 </tr>
 """
     return html
+
+
+def _normalize_gemrate_stats(gemrate_stats):
+    def _to_int(v):
+        try:
+            return int(float(v or 0))
+        except Exception:
+            return 0
+
+    def _to_float(v):
+        try:
+            return float(v or 0.0)
+        except Exception:
+            return 0.0
+
+    src = gemrate_stats if isinstance(gemrate_stats, dict) else {}
+    return {
+        "total_population": _to_int(src.get("total_population", 0)),
+        "psa10_count": _to_int(src.get("psa10_count", 0)),
+        "psa9_count": _to_int(src.get("psa9_count", 0)),
+        "psa8_below_count": _to_int(src.get("psa8_below_count", 0)),
+        "gem_mint_rate": _to_float(src.get("gem_mint_rate", 0.0)),
+    }
+
+
+def generate_psa_stats_panel_html(gemrate_stats, theme="light", ui_lang="zh"):
+    lang = _normalize_ui_lang(ui_lang)
+    stats = _normalize_gemrate_stats(gemrate_stats)
+
+    title = "PSA"
+    item_total = _lt(lang, "總數量", "Total Population", "총 개체수", "总数量")
+    item_psa10 = _lt(lang, "PSA 10 / 滿分率", "PSA 10 / Gem Rate", "PSA 10 / 젬레이트", "PSA 10 / 满分率")
+    item_psa9 = _lt(lang, "PSA 9", "PSA 9", "PSA 9", "PSA 9")
+    item_psa8 = _lt(lang, "PSA 8以下", "PSA 8 and Below", "PSA 8 이하", "PSA 8以下")
+
+    value_total = f"{stats['total_population']:,}"
+    value_psa10_main = f"{stats['psa10_count']:,}"
+    value_psa10_rate = f"{stats['gem_mint_rate']:.2f}%"
+    value_psa9 = f"{stats['psa9_count']:,}"
+    value_psa8 = f"{stats['psa8_below_count']:,}"
+
+    if theme == "light":
+        title_html = f"""
+        <h3 class="text-sm font-black uppercase tracking-[0.3em] text-text-muted mb-6 flex items-center gap-3">
+            <span class="w-2 h-2 rounded-full bg-premium-gold shadow-[0_0_8px_rgba(212,175,55,0.8)] animate-pulse"></span>
+            {title}
+        </h3>"""
+        card_cls = "flex flex-col gap-1 p-5 rounded-xl bg-white/85 border border-white/90 shadow-[0_8px_20px_rgba(15,23,42,0.04)]"
+        label_cls = "text-text-muted text-xs font-bold uppercase tracking-widest"
+        value_cls = "text-4xl font-black text-text-main tracking-tight mt-1"
+        line_cls = "w-full h-1 bg-gradient-to-r from-gray-300 to-transparent mt-3 rounded-full"
+    else:
+        title_html = f"""
+        <h3 class="text-sm font-black uppercase tracking-[0.3em] text-slate-300 mb-6 flex items-center gap-3">
+            <span class="w-2 h-2 rounded-full bg-primary shadow-[0_0_8px_rgba(212,175,55,0.8)]"></span>
+            {title}
+        </h3>"""
+        card_cls = "flex flex-col gap-1 p-5 rounded-xl bg-white/10 border border-white/15"
+        label_cls = "text-slate-300 text-xs font-bold uppercase tracking-widest"
+        value_cls = "text-4xl font-black text-white tracking-tight mt-1"
+        line_cls = "w-full h-1 bg-gradient-to-r from-primary/60 to-transparent mt-3 rounded-full"
+
+    cards = [
+        (item_total, f'<div class="{value_cls}">{value_total}</div>'),
+        (
+            item_psa10,
+            f'<div class="{value_cls} leading-none flex items-end gap-1">{value_psa10_main}'
+            f'<span class="text-2xl leading-none pb-[2px]">({value_psa10_rate})</span>'
+            f'</div>',
+        ),
+        (item_psa9, f'<div class="{value_cls}">{value_psa9}</div>'),
+        (item_psa8, f'<div class="{value_cls}">{value_psa8}</div>'),
+    ]
+
+    card_html = ""
+    for label, value_html in cards:
+        card_html += f"""
+        <div class="{card_cls}">
+            <span class="{label_cls}">{label}</span>
+            {value_html}
+            <div class="{line_cls}"></div>
+        </div>"""
+
+    return f"""
+    {title_html}
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {card_html}
+    </div>"""
 
 def get_badge_html(grade):
     grade_upper = grade.upper()
@@ -721,6 +809,7 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
     
     p_prices = [r['price'] for r in pc_records] if pc_records else [0]
     total_entries = (len(snkr_records) if snkr_records else 0) + (len(pc_records) if pc_records else 0)
+    gemrate_stats = card_data.get("gemrate_stats") or {}
     
     avg_10, avg_9, avg_raw, profit, max_10 = calculate_arbitrage_stats(pc_records, snkr_records) if pc_records else (0,0,0,0,0)
     
@@ -805,6 +894,7 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
 
     # --- Dynamic Charts and Stats Construction ---
     target_grade = card_data.get('grade', 'Ungraded')
+    psa_stats_panel_html = generate_psa_stats_panel_html(gemrate_stats, theme=market_theme, ui_lang=ui_lang)
 
     # Calculate time span for Total Entries
     all_dates = []
@@ -927,7 +1017,7 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
                             </tr>
                         </thead>
                         <tbody class="text-sm divide-y {table_body_divider}">
-                            {generate_table_rows(pc_records, is_jpy=False, target_grade=card_data.get('grade', ''), theme=market_theme, ui_lang=ui_lang)}
+                            {generate_table_rows(pc_records, is_jpy=False, target_grade=card_data.get('grade', ''), theme=market_theme, ui_lang=ui_lang, max_rows=6)}
                         </tbody>
                     </table>
                 </div>"""
@@ -948,7 +1038,7 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
                             </tr>
                         </thead>
                         <tbody class="text-sm divide-y {table_body_divider}">
-                            {generate_table_rows(snkr_target_records, is_jpy=True, theme=market_theme, ui_lang=ui_lang)}
+                            {generate_table_rows(snkr_target_records, is_jpy=True, theme=market_theme, ui_lang=ui_lang, max_rows=6)}
                         </tbody>
                     </table>
                 </div>"""
@@ -996,7 +1086,8 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
         "{{ pc_charts_html }}": pc_charts_html,
         "{{ pc_table_html }}": pc_table_html,
         "{{ snkr_charts_html }}": snkr_charts_html,
-        "{{ snkr_table_html }}": snkr_table_html
+        "{{ snkr_table_html }}": snkr_table_html,
+        "{{ psa_stats_panel_html }}": psa_stats_panel_html,
     }
     
     for k, v in replacements_2.items():
