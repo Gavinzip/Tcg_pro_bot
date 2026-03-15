@@ -11,6 +11,7 @@ import os
 import base64
 import threading
 import tempfile
+import html
 import image_generator
 from collections import deque
 from datetime import datetime, timedelta
@@ -194,6 +195,337 @@ def fetch_jina_markdown(target_url):
             return ""
             
     return ""
+
+
+YUYUTEI_BOX_SOURCE_DEFAULTS = {
+    "pokemon": "https://yuyu-tei.jp/buy/poc/s/search?search_word={series_code}",
+    "one_piece": "https://yuyu-tei.jp/sell/opc/s/search?search_word={series_code}",
+    "yugioh": "https://yuyu-tei.jp/buy/ygo/s/search?search_word={series_code}",
+}
+
+
+def _normalize_box_category(raw_category):
+    text = str(raw_category or "").strip().lower()
+    if any(k in text for k in ("one piece", "航海王", "opc", "ワンピース")):
+        return "one_piece"
+    if any(k in text for k in ("yu-gi-oh", "yugioh", "遊戲王", "ygo")):
+        return "yugioh"
+    return "pokemon"
+
+
+def _find_cardlist_path():
+    env_path = (os.getenv("CARDLIST_PATH") or "").strip()
+    if env_path and os.path.isfile(env_path):
+        return env_path
+
+    cur = os.path.abspath(os.getcwd())
+    for _ in range(6):
+        candidate = os.path.join(cur, "cardlist")
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return None
+
+
+def _load_yuyutei_series_sources():
+    sources = dict(YUYUTEI_BOX_SOURCE_DEFAULTS)
+    cardlist_path = _find_cardlist_path()
+    if not cardlist_path:
+        return sources
+
+    try:
+        with open(cardlist_path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line.startswith("http"):
+                    continue
+                # Allow inline labels like: "https://... (航海王)"
+                url_only = re.split(r"\s+", line, maxsplit=1)[0]
+                category_key = _normalize_box_category(line)
+                templ = url_only
+                if "search_word=" in templ:
+                    templ = re.sub(
+                        r"(search_word=)[^&#\s]*",
+                        lambda m: f"{m.group(1)}{{series_code}}",
+                        templ,
+                        flags=re.I,
+                    )
+                elif "{series_code}" not in templ:
+                    sep = "&" if "?" in templ else "?"
+                    templ = f"{templ}{sep}search_word={{series_code}}"
+                sources[category_key] = templ
+    except Exception as e:
+        _debug_log(f"讀取 cardlist 失敗，改用預設來源: {e}")
+    return sources
+
+
+def _extract_series_code(card_info):
+    series_code = str(
+        card_info.get("series_code")
+        or card_info.get("set_code")
+        or ""
+    ).strip()
+    if series_code:
+        series_code = series_code.strip("[](){} ").replace(" ", "")
+        return series_code
+
+    number_text = str(card_info.get("number", "") or "").strip()
+    m = re.match(r"([A-Za-z]{1,6}\d{1,4})-\d{1,4}", number_text)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _looks_like_series_box(card_info):
+    item_type = str(card_info.get("item_type", "") or card_info.get("product_type", "")).strip().lower()
+    if item_type in {"series_box", "booster_box", "box", "pack_box"}:
+        return True
+
+    blob = " ".join(
+        str(card_info.get(k, "") or "")
+        for k in ("name", "jp_name", "c_name", "features", "release_info")
+    ).lower()
+    box_keywords = [
+        "卡盒", "卡包盒", "盒裝", "盒", "booster box", "box",
+        "拡張パック", "ハイクラスパック", "ブースターボックス",
+        "collection box", "premium collection", "スターター",
+    ]
+    if any(k in blob for k in box_keywords):
+        return True
+    return False
+
+
+def _sanitize_price_to_int(price_text):
+    only_digits = re.sub(r"[^0-9]", "", str(price_text or ""))
+    if not only_digits:
+        return 0
+    try:
+        return int(only_digits)
+    except Exception:
+        return 0
+
+
+def _extract_card_no(text):
+    raw = str(text or "")
+    patterns = [
+        r"([A-Z]{1,8}-JP\d{3})",
+        r"([A-Z]{1,8}\d{1,4}-\d{1,4})",
+        r"(\d{1,4}/\d{1,4})",
+        r"([A-Za-z]{1,5}\d{1,4}[a-z]?-[a-z]?\d{1,4})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, raw, re.I)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def _clean_text(raw):
+    text = html.unescape(str(raw or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _parse_yuyutei_cards_from_html(raw_html, limit=400):
+    if not raw_html:
+        return []
+
+    href_pattern = re.compile(r'href="(https://yuyu-tei\.jp/(?:buy|sell)/[a-z0-9]+/card/[^"]+)"', re.I)
+    matches = list(href_pattern.finditer(raw_html))
+    seen = set()
+    items = []
+
+    for m in matches:
+        detail_url = m.group(1)
+        if detail_url in seen:
+            continue
+        seen.add(detail_url)
+
+        chunk = raw_html[m.start():m.start() + 2400]
+        img_m = re.search(r'src="(https://card\.yuyu-tei\.jp/[^"]+)"', chunk, re.I)
+        alt_m = re.search(r'alt="([^"]*)"', chunk, re.I)
+        title_m = re.search(r"<h4[^>]*>([^<]+)</h4>", chunk, re.I)
+        price_m = re.search(r"([0-9][0-9,]{0,12})\s*円", chunk)
+        if not price_m:
+            continue
+
+        alt_text = _clean_text(alt_m.group(1) if alt_m else "")
+        title_text = _clean_text(title_m.group(1) if title_m else "") or alt_text or "Unknown"
+        card_no = _extract_card_no(alt_text) or _extract_card_no(title_text)
+        price_text = f"{price_m.group(1)} 円"
+        items.append({
+            "name": title_text,
+            "card_no": card_no,
+            "price_jpy": _sanitize_price_to_int(price_m.group(1)),
+            "price_text": price_text,
+            "image_url": img_m.group(1) if img_m else "",
+            "detail_url": detail_url,
+        })
+        if len(items) >= limit:
+            break
+
+    return items
+
+
+def _parse_yuyutei_cards_from_markdown(md_text, limit=400):
+    if not md_text:
+        return []
+
+    # Expected line style from r.jina.ai:
+    # [![Image N: ...](IMG_URL) TITLE](DETAIL_URL)****9,980 円****[詳細を見る](...)
+    row_re = re.compile(
+        r"\[!\[Image\s+\d+:\s*(?P<alt>.*?)\]\((?P<img>https://card\.yuyu-tei\.jp/[^\)]+)\)\s*(?P<title>[^\]]*)\]\((?P<detail>https://yuyu-tei\.jp/(?:buy|sell)/[a-z0-9]+/card/[^\)]+)\)\*{2,}\s*(?P<price>[0-9,]+)\s*円",
+        re.I | re.S,
+    )
+    seen = set()
+    items = []
+    for m in row_re.finditer(md_text):
+        detail_url = _clean_text(m.group("detail"))
+        if detail_url in seen:
+            continue
+        seen.add(detail_url)
+        alt_text = _clean_text(m.group("alt"))
+        title_text = _clean_text(m.group("title")) or alt_text or "Unknown"
+        price_raw = _clean_text(m.group("price"))
+        items.append({
+            "name": title_text,
+            "card_no": _extract_card_no(alt_text) or _extract_card_no(title_text),
+            "price_jpy": _sanitize_price_to_int(price_raw),
+            "price_text": f"{price_raw} 円",
+            "image_url": _clean_text(m.group("img")),
+            "detail_url": detail_url,
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+
+def fetch_yuyutei_series_cards(card_info, series_code):
+    category_key = _normalize_box_category(card_info.get("category", "pokemon"))
+    sources = _load_yuyutei_series_sources()
+    template = sources.get(category_key) or YUYUTEI_BOX_SOURCE_DEFAULTS.get(category_key)
+    if not template:
+        return {
+            "ok": False,
+            "error": f"找不到類別 {category_key} 的來源網址模板",
+            "items": [],
+            "source_url": "",
+            "method": "",
+            "fallback_used": False,
+        }
+
+    encoded_code = urllib.parse.quote_plus(str(series_code or "").strip())
+    if "{series_code}" in template:
+        source_url = template.format(series_code=encoded_code)
+    else:
+        sep = "&" if "?" in template else "?"
+        source_url = f"{template}{sep}search_word={encoded_code}"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    }
+
+    raw_html = ""
+    method = ""
+    fallback_used = False
+    items = []
+    err_msg = ""
+
+    try:
+        resp = requests.get(source_url, headers=headers, timeout=25)
+        if resp.status_code == 200 and ("card.yuyu-tei.jp" in resp.text and "円" in resp.text):
+            raw_html = resp.text
+            items = _parse_yuyutei_cards_from_html(raw_html)
+            method = "direct_html"
+        else:
+            err_msg = f"HTTP={resp.status_code}"
+    except Exception as e:
+        err_msg = str(e)
+
+    if not items:
+        fallback_used = True
+        jina_text = fetch_jina_markdown(source_url)
+        items = _parse_yuyutei_cards_from_markdown(jina_text) or _parse_yuyutei_cards_from_html(jina_text)
+        method = "jina_markdown" if items else "jina_failed"
+
+    if items:
+        series_l = str(series_code or "").strip().lower()
+        if series_l:
+            narrowed = []
+            for item in items:
+                detail_l = str(item.get("detail_url", "")).lower()
+                card_no_l = str(item.get("card_no", "")).lower()
+                if detail_l:
+                    if f"/card/{series_l}/" in detail_l:
+                        narrowed.append(item)
+                elif card_no_l.startswith(series_l):
+                    narrowed.append(item)
+            if narrowed:
+                items = narrowed
+        items.sort(key=lambda x: x.get("price_jpy", 0), reverse=True)
+        return {
+            "ok": True,
+            "error": "",
+            "items": items,
+            "source_url": source_url,
+            "method": method,
+            "fallback_used": fallback_used,
+            "category_key": category_key,
+            "series_code": series_code,
+        }
+
+    return {
+        "ok": False,
+        "error": err_msg or "無法解析卡片列表",
+        "items": [],
+        "source_url": source_url,
+        "method": method,
+        "fallback_used": fallback_used,
+        "category_key": category_key,
+        "series_code": series_code,
+    }
+
+
+def build_series_box_report(card_info, series_result, max_lines=120):
+    series_code = series_result.get("series_code", "") or _extract_series_code(card_info)
+    box_label = (series_code or "Unknown").upper()
+    category = card_info.get("category", "Pokemon")
+    category_display_map = {
+        "pokemon": "寶可夢",
+        "one piece": "航海王",
+        "yu-gi-oh": "遊戲王",
+        "yugioh": "遊戲王",
+    }
+    category_display = category_display_map.get(str(category).strip().lower(), str(category))
+
+    lines = []
+    lines.append("# BOX SERIES REPORT")
+    lines.append("")
+    lines.append(f"📦 系列卡盒：{box_label}")
+    lines.append(f"🏷️ 類別：{category_display}")
+
+    src_url = series_result.get("source_url", "")
+    if src_url:
+        lines.append(f"🔗 資料來源：[YUYU-TEI 搜尋頁]({src_url})")
+    lines.append("---")
+
+    if not series_result.get("ok"):
+        lines.append("❌ 無法抓到系列卡片資料。")
+        if series_result.get("error"):
+            lines.append(f"原因：{series_result.get('error')}")
+        return "\n".join(lines)
+
+    items = series_result.get("items", [])
+    if items:
+        lines.append("🖼️ 卡片明細請查看海報（Top 10 Prize List）。")
+    else:
+        lines.append("⚠️ 未取得卡片明細，請稍後重試。")
+
+    return "\n".join(lines)
 
 # v1.1 變更註解:
 # 1) SNKRDUNK 搜尋從 Jina HTML 解析改為原生 API (/en/v1/search)。
@@ -1698,7 +2030,7 @@ async def analyze_image_with_google(image_path, api_key, lang="zh"):
   "grade": "卡片等級 (必填，如果有PSA/BGS等鑑定盒，印有10就填如 PSA 10, 否則如果是裸卡就填 Ungraded)",
   "jp_name": "日文名稱 (選填，沒有請留空字串)",
   "c_name": "中文名稱 (選填，沒有請留空字串)",
-  "category": "卡片類別 (填寫 Pokemon 或 One Piece，預設 Pokemon)",
+  "category": "卡片類別 (填寫 Pokemon / One Piece / Yu-Gi-Oh，預設 Pokemon)",
   "release_info": "發行年份與系列 (必填，從卡牌標誌或特徵推斷，如 2023 - 151)",
   "illustrator": "插畫家 (必填，左下角或右下角的英文名，看不清可寫 Unknown)",
   "market_heat": "市場熱度描述 (必填，開頭填寫 High / Medium / Low，後面白話文理由請務必使用『繁體中文』撰寫)",
@@ -1706,7 +2038,9 @@ async def analyze_image_with_google(image_path, api_key, lang="zh"):
   "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "is_alt_art": "是否為漫畫背景(Manga/Comic)或異圖(Parallel)？布林值 true/false。請極度仔細觀察卡片的『背景』：如果背景是一格一格的【黑白漫畫分鏡】，請填 true；如果背景只有閃電、特效、或單純場景，就算它是 SEC 也是普通版，『必須』填 false！",
-  "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)"
+  "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)",
+  "item_type": "卡片型態 (選填，填 card 或 series_box。若圖片是卡盒/補充包盒，請填 series_box)",
+  "series_code": "系列序號 (選填，若為 series_box 必填；用於 yuyu-tei search_word，例如 m4 / op15 / loch)"
 }"""
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
@@ -1799,7 +2133,7 @@ async def analyze_image_with_openai(image_path, api_key, lang="zh"):
   "grade": "卡片等級 (必填，如果有PSA/BGS等鑑定盒，印有10就填如 PSA 10, 否則如果是裸卡就填 Ungraded)",
   "jp_name": "日文名稱 (選填，沒有請留空字串)",
   "c_name": "中文名稱 (選填，沒有請留空字串)",
-  "category": "卡片類別 (填寫 Pokemon 或 One Piece，預設 Pokemon)",
+  "category": "卡片類別 (填寫 Pokemon / One Piece / Yu-Gi-Oh，預設 Pokemon)",
   "release_info": "發行年份與系列 (必填，從卡牌標誌或特徵推斷，如 2023 - 151)",
   "illustrator": "插畫家 (必填，左下角或營右下角的英文名，看不清可寫 Unknown)",
   "market_heat": "市場熱度描述 (必填，開頭填寫 High / Medium / Low，後面白話文理由請務必使用『繁體中文』撰寫)",
@@ -1807,7 +2141,9 @@ async def analyze_image_with_openai(image_path, api_key, lang="zh"):
   "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "is_alt_art": "是否為漫畫背景(Manga/Comic)或異圖(Parallel)？布林值 true/false。請極度仔細觀察卡片的『背景』：如果背景是一格一格的【黑白漫畫分鏡】，請填 true；如果背景只有閃電、特效、或單純場景，就算它是 SEC 也是普通版，『必須』填 false！",
-  "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)"
+  "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)",
+  "item_type": "卡片型態 (選填，填 card 或 series_box。若圖片是卡盒/補充包盒，請填 series_box)",
+  "series_code": "系列序號 (選填，若為 series_box 必填；用於 yuyu-tei search_word，例如 m4 / op15 / loch)"
 }"""
 
     payload = {
@@ -1881,7 +2217,7 @@ async def analyze_image_with_minimax(image_path, api_key, lang="zh"):
   "grade": "卡片等級 (必填，如果有PSA/BGS等鑑定盒，印有10就填如 PSA 10, 否則如果是裸卡就填 Ungraded)",
   "jp_name": "日文名稱 (選填，沒有請留空字串)",
   "c_name": "中文名稱 (選填，沒有請留空字串)",
-  "category": "卡片類別 (填寫 Pokemon 或 One Piece，預設 Pokemon)",
+  "category": "卡片類別 (填寫 Pokemon / One Piece / Yu-Gi-Oh，預設 Pokemon)",
   "release_info": "發行年份與系列 (必填，從卡牌標誌或特徵推斷，如 2023 - 151)",
   "illustrator": "插畫家 (必填，左下角或右下角的英文名，看不清可寫 Unknown)",
   "market_heat": "市場熱度描述 (必填，開頭填寫 High / Medium / Low，後面白話文理由請務必使用『繁體中文』撰寫)",
@@ -1889,7 +2225,9 @@ async def analyze_image_with_minimax(image_path, api_key, lang="zh"):
   "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "is_alt_art": "是否為漫畫背景(Manga/Comic)或異圖(Parallel)？布林值 true/false。請極度仔細觀察卡片的『背景』：如果背景是一格一格的【黑白漫畫分鏡】，請填 true；如果背景只有閃電、特效、或單純場景，就算它是 SEC 也是普通版，『必須』填 false！",
-  "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)"
+  "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)",
+  "item_type": "卡片型態 (選填，填 card 或 series_box。若圖片是卡盒/補充包盒，請填 series_box)",
+  "series_code": "系列序號 (選填，若為 series_box 必填；用於 yuyu-tei search_word，例如 m4 / op15 / loch)"
 }"""
 
     payload = {
@@ -2086,6 +2424,77 @@ async def process_single_image(
 
     _debug_save("step1_meta.json", json.dumps(card_info, ensure_ascii=False, indent=2))
 
+    # ── Series Box flow: 抓卡盒內卡片列表（先直連 HTML，失敗才走 Jina） ──
+    is_series_box = _looks_like_series_box(card_info)
+    series_code = _extract_series_code(card_info)
+    if is_series_box and series_code:
+        _debug_log(f"📦 偵測到系列卡盒，啟動盒裝流程: series_code={series_code}")
+        loop = asyncio.get_running_loop()
+        series_result = await loop.run_in_executor(
+            None,
+            contextvars.copy_context().run,
+            fetch_yuyutei_series_cards,
+            card_info,
+            series_code,
+        )
+        _debug_save("step2_series_box.json", json.dumps(series_result, ensure_ascii=False, indent=2))
+        box_report = build_series_box_report(card_info, series_result)
+        _debug_save("step3_report.md", box_report)
+
+        box_name_for_display = str(series_code).upper()
+        safe_name = re.sub(r"[^A-Za-z0-9]", "_", box_name_for_display)
+        safe_series = re.sub(r"[^A-Za-z0-9]", "_", str(series_code))
+        final_dest_dir = os.path.abspath(out_dir) if out_dir else tempfile.mkdtemp(prefix="openclaw_box_report_")
+        os.makedirs(final_dest_dir, exist_ok=True)
+        box_path = os.path.join(final_dest_dir, f"BOX_Vision_{safe_name}_{safe_series}.md")
+        with open(box_path, "w", encoding="utf-8") as f:
+            f.write(box_report)
+        print(f"✅ 卡盒報告已儲存至: {box_path}")
+
+        top10_prizes = []
+        for item in (series_result.get("items") or [])[:10]:
+            top10_prizes.append({
+                "number": item.get("card_no", ""),
+                "image": item.get("image_url", ""),
+                "price": item.get("price_text", ""),
+                "price_jpy": item.get("price_jpy", 0),
+            })
+
+        poster_path = ""
+        if REPORT_ONLY:
+            try:
+                poster_path = await image_generator.generate_box_top10_poster(
+                    box_name_for_display,
+                    top10_prizes,
+                    out_dir=final_dest_dir,
+                    template_version=poster_version,
+                    ui_lang=lang,
+                )
+            except Exception as e:
+                _debug_log(f"⚠️ 生成卡盒海報失敗: {e}")
+
+        if stream_mode:
+            return (
+                box_report,
+                {
+                    "box_mode": True,
+                    "box_name": box_name_for_display,
+                    "box_prizes": top10_prizes,
+                    "card_info": dict(card_info),
+                    "snkr_records": [],
+                    "pc_records": [],
+                    "out_dir": final_dest_dir,
+                    "poster_version": poster_version,
+                    "ui_lang": lang,
+                },
+            )
+
+        if REPORT_ONLY:
+            return (box_report, [poster_path, ""] if poster_path else [])
+        return box_report
+    elif is_series_box and not series_code:
+        _debug_log("⚠️ 偵測到卡盒，但找不到 series_code/set_code，改走單卡流程")
+
     # ── features-based override ──────────────────────────────────────────────
     features_lower = features.lower() if features else ""
     is_flagship = any(kw in features_lower for kw in ["flagship", "旗艦賽", "flagship battle"])
@@ -2276,6 +2685,7 @@ async def finish_report_after_selection(
     category_display = (
         "寶可夢卡牌" if category.lower() == "pokemon"
         else "航海王卡牌" if category.lower() == "one piece"
+        else "遊戲王卡牌" if category.lower() in ("yugioh", "yu-gi-oh")
         else category
     )
     gemrate_stats = None
@@ -2459,6 +2869,20 @@ async def finish_report_after_selection(
 async def generate_posters(poster_data):
     if not poster_data:
         return []
+    if poster_data.get("box_mode"):
+        out_dir = poster_data.get("out_dir")
+        box_name = poster_data.get("box_name") or "Unknown Box"
+        prizes = poster_data.get("box_prizes") or []
+        template_version = poster_data.get("poster_version", "v3")
+        ui_lang = poster_data.get("ui_lang") or str((poster_data.get("card_info") or {}).get("ui_lang", "zh"))
+        poster_path = await image_generator.generate_box_top10_poster(
+            box_name,
+            prizes,
+            out_dir=out_dir,
+            template_version=template_version,
+            ui_lang=ui_lang,
+        )
+        return [poster_path] if poster_path else []
     return await image_generator.generate_report(
         poster_data["card_info"],
         poster_data["snkr_records"],
@@ -2475,6 +2899,26 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
     card_info = await analyze_image_with_fallbacks(image_path, api_key, lang=lang)
     if not card_info:
         return None, "卡片影像辨識失敗"
+
+    if _looks_like_series_box(card_info):
+        series_code = _extract_series_code(card_info)
+        if series_code:
+            loop = asyncio.get_running_loop()
+            series_result = await loop.run_in_executor(
+                None,
+                contextvars.copy_context().run,
+                fetch_yuyutei_series_cards,
+                card_info,
+                series_code,
+            )
+            return card_info, {
+                "pc": [],
+                "snkr": [],
+                "series_cards": series_result.get("items", []),
+                "series_source_url": series_result.get("source_url", ""),
+                "series_method": series_result.get("method", ""),
+                "series_fallback_used": series_result.get("fallback_used", False),
+            }
     
     name = card_info.get("name", "Unknown")
     set_code = card_info.get("set_code", "")

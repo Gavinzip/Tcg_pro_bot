@@ -3,6 +3,7 @@ import urllib.request
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 import base64
 import io
+import html as html_lib
 from collections import deque
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
@@ -754,6 +755,171 @@ def calculate_arbitrage_stats(pc_records, snkr_records):
         profit = max_10 - (avg_raw + grading_cost)
         
     return avg_10, avg_9, avg_raw, profit, max_10
+
+
+def _format_jpy(value):
+    try:
+        num = int(round(float(value)))
+        return f"¥{num:,}"
+    except Exception:
+        return "¥0"
+
+
+def _box_price_to_int(prize):
+    raw = prize.get("price_jpy", prize.get("price", 0))
+    try:
+        return int(round(float(raw)))
+    except Exception:
+        txt = str(prize.get("price_text", ""))
+        digits = re.sub(r"[^0-9]", "", txt)
+        return int(digits) if digits else 0
+
+
+def _box_source_notice(ui_lang):
+    lang = _normalize_ui_lang(ui_lang or "zh")
+    return _lt(
+        lang,
+        "資料來源：YUYU-TEI https://yuyu-tei.jp/ ｜ 本海報資料僅供參考，未經授權不得轉載與轉發",
+        "Source: YUYU-TEI https://yuyu-tei.jp/ | For reference only. Reposting or redistribution is prohibited.",
+        "출처: YUYU-TEI https://yuyu-tei.jp/ | 본 포스터는 참고용이며 무단 전재·재배포를 금합니다.",
+        "资料来源：YUYU-TEI https://yuyu-tei.jp/ ｜ 本海报资料仅供参考，未经授权不得转载与转发",
+    )
+
+
+def _resolve_yuyutei_image_urls(image_url):
+    url = str(image_url or "").strip()
+    if not url:
+        return "", "", ""
+    if "card.yuyu-tei.jp" not in url:
+        return url, url, url
+
+    if "/100_140/" in url:
+        return (
+            url.replace("/100_140/", "/front/"),
+            url.replace("/100_140/", "/200_280/"),
+            url,
+        )
+    if "/200_280/" in url:
+        return (
+            url.replace("/200_280/", "/front/"),
+            url,
+            url.replace("/200_280/", "/100_140/"),
+        )
+    return url, url, url
+
+
+def _build_box_prize_cards_html(prizes):
+    cards = []
+    for idx, prize in enumerate(prizes[:10], start=1):
+        number = html_lib.escape(str(prize.get("number") or prize.get("card_no") or "N/A"))
+        image_original = str(prize.get("image") or prize.get("image_url") or "")
+        image_primary, image_fallback_1, image_fallback_2 = _resolve_yuyutei_image_urls(image_original)
+        image = html_lib.escape(image_primary, quote=True)
+        image_fallback = html_lib.escape(image_fallback_1, quote=True)
+        image_fallback_2 = html_lib.escape(image_fallback_2, quote=True)
+        price = html_lib.escape(str(prize.get("price") or prize.get("price_text") or _format_jpy(_box_price_to_int(prize))))
+        cards.append(f"""
+            <div class="card-slot rounded-2xl p-2 flex flex-col items-center justify-between relative">
+                <div class="label-tag mb-1">{number}</div>
+                <div class="card-frame relative w-full aspect-[3.2/3.6] rounded-lg overflow-hidden">
+                    <img src="{image}" data-fallback="{image_fallback}" data-fallback2="{image_fallback_2}" alt="Prize {idx}" class="card-art w-full h-full object-contain" onerror="this.dataset.fallback?((this.src=this.dataset.fallback),(this.dataset.fallback=this.dataset.fallback2||''),(this.dataset.fallback2='')):(this.onerror=null)" />
+                </div>
+                <div class="mt-2 flex flex-col items-center">
+                    <div class="price-tag">{price}</div>
+                </div>
+                <div class="absolute -top-[1px] -right-[1px] rank-chip font-black">
+                    TOP {idx:02d}
+                </div>
+            </div>
+        """)
+    return "\n".join(cards)
+
+
+async def _render_single_html_poster(html_content, out_path, width=1200, height=900, device_scale_factor=2):
+    async with RENDER_SEMAPHORE:
+        browser = await AsyncBrowserManager.get_browser()
+        context = await browser.new_context(
+            viewport={"width": width, "height": height},
+            device_scale_factor=device_scale_factor,
+        )
+        try:
+            page = await context.new_page()
+            await page.set_content(html_content, wait_until="networkidle")
+            await _screenshot_poster_root(page, out_path)
+            await page.close()
+        finally:
+            await context.close()
+
+
+async def generate_box_top10_poster(box_name, prizes, out_dir=None, template_version="v3", ui_lang=None):
+    if not out_dir:
+        out_dir = BASE_DIR
+    os.makedirs(out_dir, exist_ok=True)
+
+    selected_version, template_dir, _, _ = _resolve_template_bundle(template_version)
+    template_path = os.path.join(template_dir, "box_top10_prizes.html")
+    if not os.path.exists(template_path):
+        # Always fall back to v3 box template.
+        template_dir = os.path.join(BASE_DIR, "templates", "v3")
+        template_path = os.path.join(template_dir, "box_top10_prizes.html")
+    if not os.path.exists(template_path):
+        raise FileNotFoundError(f"Box poster template not found: {template_path}")
+
+    with open(template_path, "r", encoding="utf-8") as f:
+        html_doc = f.read()
+    lang = _normalize_ui_lang(ui_lang or "zh")
+
+    html_doc = html_doc.replace(
+        "Top 10 Prize List / 頂級賞清單",
+        _lt(lang, "Top 10 Prize List / 頂級賞清單", "Top 10 Prize List", "Top 10 Prize List", "Top 10 Prize List / 顶级赏清单"),
+    )
+    html_doc = html_doc.replace(
+        "Total Value",
+        _lt(lang, "總價值", "Total Value", "총 가치", "总价值"),
+    )
+    html_doc = html_doc.replace(
+        "Update Date",
+        _lt(lang, "更新日期", "Update Date", "업데이트 날짜", "更新日期"),
+    )
+    html_doc = html_doc.replace(
+        "Verified Market Data",
+        _lt(lang, "市場資料已驗證", "Verified Market Data", "검증된 시세 데이터", "市场数据已验证"),
+    )
+
+    logo_path = os.path.join(template_dir, "logo.png")
+    if os.path.exists(logo_path):
+        try:
+            with open(logo_path, "rb") as logo_f:
+                logo_bytes = logo_f.read()
+            logo_bytes = _strip_white_border_background_png(logo_bytes)
+            logo_b64 = base64.b64encode(logo_bytes).decode("utf-8")
+            logo_src = f"data:image/png;base64,{logo_b64}"
+            html_doc = html_doc.replace('src="logo.png"', f'src="{logo_src}"').replace("src='logo.png'", f"src='{logo_src}'")
+        except Exception as e:
+            print(f"⚠️ Box logo inline failed: {e}")
+
+    top10 = sorted(prizes or [], key=_box_price_to_int, reverse=True)[:10]
+    total_value = sum(_box_price_to_int(p) for p in top10)
+    prize_cards_html = _build_box_prize_cards_html(top10)
+
+    replacements = {
+        "{{ box_name }}": box_name or "Unknown Box",
+        "{{ prize_cards_html }}": prize_cards_html,
+        "{{ total_value }}": _format_jpy(total_value),
+        "{{ update_date }}": datetime.now().strftime("%Y-%m-%d"),
+        "{{ source_notice }}": _box_source_notice(lang),
+    }
+
+    for k, v in replacements.items():
+        core_key = k.replace("{{", "").replace("}}", "").strip()
+        pattern = r"\{\{\s*" + re.escape(core_key) + r"\s*\}\}"
+        html_doc = re.sub(pattern, str(v) if v is not None else "", html_doc)
+
+    safe_name = re.sub(r"[^A-Za-z0-9]", "_", str(box_name or "box"))[:80]
+    out_path = os.path.join(out_dir, f"report_{safe_name}_box_top10.png")
+    await _render_single_html_poster(html_doc, out_path, width=1200, height=900, device_scale_factor=2)
+    print(f"🖼️ Box top10 poster generated: {out_path} (template={selected_version})")
+    return out_path
 
 async def generate_report(card_data, snkr_records, pc_records, out_dir=None, template_version="v3", ui_lang=None):
     if not out_dir:
