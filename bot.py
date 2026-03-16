@@ -127,7 +127,7 @@ def _format_fmv_usd(value: int | None) -> str:
 
 
 def _clamp_profile_card_count(value: int | None) -> int:
-    if value in (3, 10):
+    if value in (1, 3, 10):
         return int(value)
     return 10
 
@@ -213,7 +213,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "收藏數量",
             "selectable_sbt_label": "可選 SBT",
             "setup_tip": "請選模板、SBT、卡片後按「生成海報」。若不選 SBT/卡片，會用預設（依 FMV 由高到低）。",
-            "template_placeholder": "1) 選擇模板（Top 3 / Top 10）",
+            "template_placeholder": "1) 選擇模板（Top 1 / Top 3 / Top 10）",
             "sbt_placeholder": "2) 複選 SBT（可略過）",
             "card_placeholder": "3) 複選卡片（可略過）",
             "default_button": "使用預設直接生成",
@@ -244,7 +244,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "收藏数量",
             "selectable_sbt_label": "可选 SBT",
             "setup_tip": "请选择模板、SBT、卡片后点击“生成海报”。若不选 SBT/卡片，将使用默认（按 FMV 从高到低）。",
-            "template_placeholder": "1) 选择模板（Top 3 / Top 10）",
+            "template_placeholder": "1) 选择模板（Top 1 / Top 3 / Top 10）",
             "sbt_placeholder": "2) 多选 SBT（可跳过）",
             "card_placeholder": "3) 多选卡片（可跳过）",
             "default_button": "使用默认直接生成",
@@ -275,7 +275,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "컬렉션 수",
             "selectable_sbt_label": "선택 가능 SBT",
             "setup_tip": "템플릿, SBT, 카드를 선택한 뒤 \"포스터 생성\"을 누르세요. SBT/카드를 선택하지 않으면 기본값(FMV 내림차순)을 사용합니다.",
-            "template_placeholder": "1) 템플릿 선택 (Top 3 / Top 10)",
+            "template_placeholder": "1) 템플릿 선택 (Top 1 / Top 3 / Top 10)",
             "sbt_placeholder": "2) SBT 다중 선택 (선택 사항)",
             "card_placeholder": "3) 카드 다중 선택 (선택 사항)",
             "default_button": "기본값으로 생성",
@@ -305,7 +305,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
         "collection_label": "Collection",
         "selectable_sbt_label": "Selectable SBT",
         "setup_tip": "Choose template, SBT, and cards, then click Generate Poster. If SBT/cards are not selected, defaults are used (FMV high to low).",
-        "template_placeholder": "1) Select template (Top 3 / Top 10)",
+        "template_placeholder": "1) Select template (Top 1 / Top 3 / Top 10)",
         "sbt_placeholder": "2) Select SBT (optional)",
         "card_placeholder": "3) Select cards (optional)",
         "default_button": "Generate with Defaults",
@@ -1617,6 +1617,7 @@ class ProfileLangSelect(discord.ui.Select):
 class ProfileTemplateSelect(discord.ui.Select):
     def __init__(self, default_count: int = 10, placeholder: str = "Template"):
         options = [
+            discord.SelectOption(label="Top 1", value="1", default=(default_count == 1)),
             discord.SelectOption(label="Top 3", value="3", default=(default_count == 3)),
             discord.SelectOption(label="Top 10", value="10", default=(default_count == 10)),
         ]

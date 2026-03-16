@@ -431,6 +431,40 @@
         .grid-layout-1 .item-card { width: 470px; padding: 2rem; }
         .grid-layout-1 .item-card .card-frame { aspect-ratio: 2.58/3.58; }
 
+        /* Single-item poster: keep visual focus but avoid overlapping header/footer. */
+        [data-item-count="1"] .cards-block {
+            justify-content: flex-start;
+            padding-top: 0.1rem;
+        }
+
+        [data-item-count="1"] .grid-layout-1 {
+            height: auto;
+            align-items: flex-start;
+        }
+
+        [data-item-count="1"] .grid-layout-1 .item-card {
+            width: 374px;
+            padding: 1rem 0.85rem 1.05rem;
+            border-radius: 1.5rem;
+            margin-top: -6px;
+        }
+
+        [data-item-count="1"] .grid-layout-1 .item-card .card-frame {
+            margin-bottom: 0.65rem;
+        }
+
+        [data-item-count="1"] .grid-layout-1 .price-value {
+            font-size: 2.05rem;
+        }
+
+        [data-item-count="1"] .grid-layout-1 .price-currency {
+            font-size: 1.16rem;
+        }
+
+        [data-item-count="1"] .grid-layout-1 .price-unit {
+            font-size: 0.78rem;
+        }
+
         .grid-layout-2, .grid-layout-3 { display: flex; justify-content: center; gap: 2.3rem; align-items: center; height: 100%; }
         .grid-layout-2 .item-card, .grid-layout-3 .item-card { width: 340px; }
 
@@ -551,7 +585,7 @@
     <div class="absolute bottom-[10%] right-[10%] w-[500px] h-[500px] bg-[#ff5500] rounded-full mix-blend-multiply filter blur-[150px] opacity-10"></div>
 
     <!-- Main Container -->
-    <div class="relative w-[1200px] h-[900px] glass-container prismatic-border flex flex-col p-12 z-10 overflow-hidden" data-tilt="{% if enable_tilt %}on{% else %}off{% endif %}" data-grid-rows="{% if items|length > 5 %}two{% else %}one{% endif %}">
+    <div class="relative w-[1200px] h-[900px] glass-container prismatic-border flex flex-col p-12 z-10 overflow-hidden" data-tilt="{% if enable_tilt %}on{% else %}off{% endif %}" data-grid-rows="{% if items|length > 5 %}two{% else %}one{% endif %}" data-item-count="{{ items|length }}">
         
         <!-- Header -->
         <div class="header-block flex justify-between items-center mb-7">
