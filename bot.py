@@ -1682,7 +1682,7 @@ class ProfileCardSelect(discord.ui.Select):
 
 class ProfileConfigView(discord.ui.View):
     def __init__(self, author_id: int, wallet: str, picker_data: dict, selected_lang: str):
-        super().__init__(timeout=300)
+        super().__init__(timeout=180)
         self.author_id = author_id
         self.wallet = wallet
         self.picker_data = picker_data or {}
@@ -1940,13 +1940,13 @@ async def profile(interaction: discord.Interaction, address: str):
     thread = await resp.create_thread(name="收藏海報設定", auto_archive_duration=60)
     await thread.add_user(interaction.user)
 
-    default_lang = _profile_lang_from_locale(getattr(interaction, "locale", None) or getattr(interaction, "guild_locale", None))
+    default_lang = "zh"
     default_texts = _profile_wizard_texts(default_lang)
 
-    lang_view = LanguageSelectView(interaction.user.id, timeout_seconds=90)
+    lang_view = LanguageSelectView(interaction.user.id, timeout_seconds=10)
     lang_msg = await thread.send(default_texts["lang_prompt"], view=lang_view)
     picked_lang, selected = await lang_view.wait_for_choice()
-    profile_lang = picked_lang if selected and picked_lang else default_lang
+    profile_lang = picked_lang if selected and picked_lang else "zh"
     if not selected:
         lang_view._disable_all()
         try:
