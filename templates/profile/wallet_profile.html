@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <title>Wallet Collection Poster</title>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&amp;display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet" />
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <script id="tailwind-config">
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        "holo-cyan": "#e0f7fa",
+                        "holo-purple": "#ede7f6",
+                        "holo-gold": "#fff8e1",
+                        "premium-gold": "#d4af37",
+                        "premium-gold-light": "#ffea8c",
+                        "premium-gold-dark": "#aa8323",
+                        "text-main": "#0f172a",
+                        "text-muted": "#64748b",
+                    },
+                    fontFamily: {
+                        "display": ["Manrope", '"Noto Sans TC"', "sans-serif"]
+                    }
+                },
+            },
+        }
+    </script>
+    <style>
+        :root {
+            --foil-1: #ffeaa0;
+            --foil-2: #d4af37;
+            --foil-3: #9f7a1f;
+            --glass-edge: rgba(255, 255, 255, 0.88);
+            --glass-bg: rgba(255, 255, 255, 0.46);
+            /* Card framing controls (tune these 5 values) */
+            --card-scale: 1.15;
+            --card-pos-x: 50%;
+            --card-pos-y: 50%;
+            --card-shift-x: 0%;
+            --card-shift-y: 4%;
+            --card-crop-top: 0.6%;
+            --card-crop-right: 3.2%;
+            --card-crop-bottom: 1.8%;
+            --card-crop-left: 3.2%;
+            --frame-side-gap: 2.2%;
+        }
+
+        body {
+            font-family: 'Manrope', 'Noto Sans TC', sans-serif;
+            width: 1200px;
+            min-height: 900px;
+            margin: 0 auto;
+            background: #f8f9fa;
+            color: #0f172a;
+        }
+
+        .dark-metal-text {
+            background: linear-gradient(135deg, #0f172a 0%, #334155 50%, #0f172a 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .holo-title {
+            background: linear-gradient(95deg, #1f4bff 0%, #0abf8a 34%, #f2b705 66%, #ff5a2f 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: 0 3px 16px rgba(31, 75, 255, 0.12);
+        }
+
+        .glass-container {
+            background:
+                radial-gradient(120% 120% at 10% 15%, rgba(255, 255, 255, 0.88) 0%, rgba(255, 255, 255, 0) 45%),
+                linear-gradient(140deg, rgba(255,255,255,0.96) 0%, rgba(255,255,255,0.66) 56%, rgba(248,250,252,0.62) 100%);
+            backdrop-filter: blur(40px);
+            -webkit-backdrop-filter: blur(40px);
+            border: 1px solid rgba(255,255,255,1);
+            box-shadow: 
+                0 35px 70px rgba(15, 23, 42, 0.08),
+                inset 0 2px 12px rgba(255,255,255,0.9),
+                inset 0 -2px 12px rgba(0,0,0,0.03);
+            border-radius: 0;
+        }
+
+        .prismatic-border {
+            position: relative;
+        }
+        .prismatic-border::before {
+            content: "";
+            position: absolute;
+            inset: -2px;
+            border-radius: inherit;
+            background: linear-gradient(120deg, #e0f7fa, #ede7f6, #fff8e1, #e0f7fa);
+            background-size: 200% 200%;
+            z-index: -1;
+            opacity: 0.6;
+            filter: blur(4px);
+        }
+
+        .noise-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 0;
+            opacity: 0.04;
+            pointer-events: none;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+        }
+
+        .item-card {
+            background:
+                radial-gradient(120% 140% at 10% 8%, rgba(255,255,255,0.58), rgba(255,255,255,0.10) 56%),
+                linear-gradient(155deg, rgba(255,255,255,0.40), rgba(255,255,255,0.14));
+            border: 1px solid rgba(255, 255, 255, 0.82);
+            backdrop-filter: blur(24px) saturate(1.12);
+            box-shadow:
+                0 16px 40px rgba(15, 23, 42, 0.12),
+                inset 0 1px 0 rgba(255,255,255,0.96),
+                inset 0 -1px 0 rgba(255,255,255,0.55);
+            transition: all 0.5s cubic-bezier(0.23, 1, 0.32, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .item-card::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            border-radius: inherit;
+            background: linear-gradient(130deg, rgba(255,255,255,0.28), rgba(255,255,255,0) 38%);
+            pointer-events: none;
+        }
+
+        .item-card::after {
+            content: "";
+            position: absolute;
+            inset: -1px;
+            border-radius: inherit;
+            padding: 1px;
+            background: linear-gradient(140deg, rgba(255,255,255,0.95), rgba(212,175,55,0.22), rgba(255,255,255,0.65));
+            background-size: 220% 220%;
+            -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+            -webkit-mask-composite: xor;
+            mask-composite: exclude;
+            pointer-events: none;
+            opacity: 0.8;
+            animation: edgeFlow 6.4s linear infinite;
+        }
+        .item-card:hover {
+            transform: translateY(-8px) scale(1.018);
+            background: linear-gradient(155deg, rgba(255,255,255,0.54), rgba(255,255,255,0.22));
+            box-shadow: 0 24px 52px rgba(15, 23, 42, 0.13);
+            border-color: rgba(212, 175, 55, 0.25);
+        }
+
+        @keyframes edgeFlow {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        .item-card.compact {
+            padding: 0.9rem 0.7rem 1rem;
+        }
+
+        .price-tag {
+            display: inline-flex;
+            align-items: baseline;
+            justify-content: center;
+            gap: 0.28rem;
+            line-height: 1;
+            font-weight: 900;
+        }
+
+        .price-currency {
+            font-size: 1.15rem;
+            font-weight: 900;
+            color: #9f7a1f;
+            text-shadow: 0 1px 6px rgba(212, 175, 55, 0.32);
+            transform: translateY(-0.03em);
+        }
+
+        .price-value {
+            background: linear-gradient(140deg, #6f4d0c 0%, #c49a30 45%, #8a671b 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -0.01em;
+            font-size: 1.9rem;
+            text-shadow: 0 2px 9px rgba(212, 175, 55, 0.28);
+        }
+
+        .price-unit {
+            background: linear-gradient(140deg, #6f4d0c 0%, #c49a30 45%, #8a671b 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-size: 0.82rem;
+            font-weight: 900;
+            letter-spacing: 0.1em;
+            transform: translateY(-0.16em);
+        }
+
+        .card-frame {
+            position: relative;
+            isolation: isolate;
+            background:
+                radial-gradient(130% 130% at 12% 10%, rgba(255,255,255,0.22), rgba(255,255,255,0.02) 65%),
+                linear-gradient(170deg, rgba(255,255,255,0.13), rgba(255,255,255,0.04));
+            border: 1px solid var(--glass-edge);
+            width: calc(100% - var(--frame-side-gap) - var(--frame-side-gap));
+            margin-left: var(--frame-side-gap);
+            margin-right: var(--frame-side-gap);
+            box-shadow:
+                inset 0 1px 0 rgba(255, 255, 255, 0.9),
+                0 16px 36px rgba(15, 23, 42, 0.12);
+            transition: transform .55s cubic-bezier(0.23, 1, 0.32, 1);
+        }
+
+        [data-tilt="on"] .item-card:nth-child(odd) .card-frame { transform: rotate(-0.85deg); }
+        [data-tilt="on"] .item-card:nth-child(even) .card-frame { transform: rotate(0.85deg); }
+        [data-tilt="on"] .item-card:hover .card-frame { transform: rotate(0deg) translateY(-2px); }
+
+        .card-frame::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            border-radius: inherit;
+            background: linear-gradient(135deg, rgba(255,255,255,0.26), rgba(255,255,255,0.01) 45%);
+            pointer-events: none;
+            z-index: 3;
+        }
+
+        .card-frame::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            border-radius: inherit;
+            box-shadow:
+                inset 0 0 0 1px rgba(255,255,255,0.52),
+                inset 0 0 28px rgba(212, 175, 55, 0.08);
+            pointer-events: none;
+            z-index: 3;
+        }
+
+        .card-art {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            object-position: var(--card-pos-x) var(--card-pos-y);
+            transform: translate(var(--card-shift-x), var(--card-shift-y)) scale(var(--card-scale));
+            transform-origin: center;
+            clip-path: inset(
+                var(--card-crop-top)
+                var(--card-crop-right)
+                var(--card-crop-bottom)
+                var(--card-crop-left)
+                round 16px
+            );
+            filter: saturate(1.08) contrast(1.05);
+            transition: transform .65s ease;
+        }
+
+        .group:hover .card-art {
+            transform: translate(var(--card-shift-x), var(--card-shift-y)) scale(calc(var(--card-scale) + 0.03));
+        }
+
+        .foil-label {
+            font-size: 11px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 0.22em;
+            color: #64748b;
+            margin-bottom: 8px;
+        }
+
+        .foil-number {
+            font-size: 56px;
+            font-weight: 900;
+            line-height: 1;
+            letter-spacing: -0.03em;
+            background: linear-gradient(140deg, #5f420a 0%, #b58b28 43%, #7c5a16 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: 0 2px 10px rgba(212, 175, 55, 0.32);
+        }
+
+        .foil-unit {
+            background: linear-gradient(140deg, #5f420a 0%, #b58b28 43%, #7c5a16 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-size: 13px;
+            font-weight: 900;
+            letter-spacing: 0.15em;
+            margin-left: 8px;
+            transform: translateY(-0.42em);
+        }
+
+        .foil-currency {
+            background: linear-gradient(140deg, #5f420a 0%, #b58b28 43%, #7c5a16 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-size: 22px;
+            font-weight: 900;
+            transform: translateY(-0.22em);
+            margin-right: 4px;
+        }
+
+        .stat-value-row {
+            min-height: 64px;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            line-height: 1;
+        }
+
+        .asset-number {
+            font-size: 42px;
+            font-weight: 900;
+            letter-spacing: -0.015em;
+            color: #0f172a;
+            line-height: 1;
+        }
+
+        .asset-unit {
+            font-size: 12px;
+            font-weight: 900;
+            letter-spacing: 0.14em;
+            color: #64748b;
+            margin-left: 8px;
+            transform: translateY(-0.42em);
+        }
+
+        .sbt-panel {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 0.6rem;
+            min-height: 116px;
+            justify-content: flex-end;
+        }
+
+        .sbt-title {
+            font-size: 11px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 0.2em;
+            color: #64748b;
+        }
+
+        .sbt-list {
+            display: grid;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            gap: 0.42rem;
+            width: 500px;
+        }
+
+        .sbt-badge {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.28rem;
+            text-align: center;
+        }
+
+        .sbt-badge-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 16px;
+            object-fit: cover;
+            border: 1px solid rgba(255,255,255,0.95);
+            box-shadow:
+                0 8px 18px rgba(15, 23, 42, 0.18),
+                inset 0 1px 0 rgba(255,255,255,0.95);
+            flex-shrink: 0;
+            background: linear-gradient(145deg, rgba(255,255,255,0.84), rgba(255,255,255,0.58));
+        }
+
+        .sbt-badge-fallback {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #8f97aa;
+            font-size: 18px;
+            font-weight: 800;
+        }
+
+        .sbt-badge-name {
+            max-width: 68px;
+            min-height: 26px;
+            font-size: 8.2px;
+            font-weight: 800;
+            line-height: 1.15;
+            letter-spacing: 0.02em;
+            color: #667085;
+            white-space: normal;
+            word-break: break-word;
+        }
+
+        .sbt-badge-count {
+            font-size: 9px;
+            font-weight: 900;
+            color: #9f7a1f;
+        }
+
+        .header-block {
+            align-items: center;
+        }
+
+        .brand-wrap {
+            transform: translateY(-10px);
+        }
+
+        .brand-name {
+            font-size: 32px;
+            font-weight: 900;
+            letter-spacing: 0.03em;
+            color: #1e293b;
+            line-height: 1;
+        }
+
+        /* Dynamic Grid Adjustments */
+        .grid-layout-1 { display: flex; justify-content: center; align-items: center; height: 100%; }
+        .grid-layout-1 .item-card { width: 470px; padding: 2rem; }
+        .grid-layout-1 .item-card .card-frame { aspect-ratio: 2.58/3.58; }
+
+        .grid-layout-2, .grid-layout-3 { display: flex; justify-content: center; gap: 2.3rem; align-items: center; height: 100%; }
+        .grid-layout-2 .item-card, .grid-layout-3 .item-card { width: 340px; }
+
+        .grid-layout-4, .grid-layout-5 { 
+            display: grid; 
+            column-gap: 0.95rem;
+            row-gap: 1rem; 
+            align-content: center;
+        }
+
+        .grid-layout-4 { 
+            grid-template-columns: repeat(4, minmax(0, 1fr)); 
+        }
+
+        .grid-layout-5 { 
+            grid-template-columns: repeat(5, minmax(0, 1fr)); 
+        }
+
+        .grid-layout-4 .item-card,
+        .grid-layout-5 .item-card {
+            width: 100%;
+            max-width: 186px;
+            justify-self: center;
+            padding: 0.66rem 0.52rem 0.74rem;
+        }
+
+        .grid-layout-4 .item-card .card-frame,
+        .grid-layout-5 .item-card .card-frame {
+            margin-bottom: 0.62rem;
+        }
+
+        .grid-layout-6 { 
+            display: grid; 
+            grid-template-columns: repeat(3, minmax(0, 1fr)); 
+            column-gap: 1.15rem;
+            row-gap: 1.25rem;
+            align-content: center;
+        }
+
+        .grid-layout-6 .item-card {
+            width: 100%;
+            max-width: 224px;
+            justify-self: center;
+            padding: 0.68rem 0.55rem 0.78rem;
+        }
+
+        .grid-layout-7, .grid-layout-8, .grid-layout-9, .grid-layout-10 { 
+            display: grid; 
+            grid-template-columns: repeat(5, minmax(0, 1fr)); 
+            column-gap: 0.95rem;
+            row-gap: 1.45rem;
+            align-content: center;
+        }
+
+        .grid-layout-7 .item-card,
+        .grid-layout-8 .item-card,
+        .grid-layout-9 .item-card,
+        .grid-layout-10 .item-card {
+            width: 100%;
+            max-width: 176px;
+            justify-self: center;
+            padding: 0.46rem 0.34rem 0.54rem;
+            border-radius: 1rem;
+        }
+
+        .grid-layout-7 .item-card .card-frame,
+        .grid-layout-8 .item-card .card-frame,
+        .grid-layout-9 .item-card .card-frame,
+        .grid-layout-10 .item-card .card-frame {
+            margin-bottom: 0.42rem;
+        }
+
+        .grid-layout-7 .price-value,
+        .grid-layout-8 .price-value,
+        .grid-layout-9 .price-value,
+        .grid-layout-10 .price-value {
+            font-size: 1.42rem;
+        }
+
+        .grid-layout-7 .price-currency,
+        .grid-layout-8 .price-currency,
+        .grid-layout-9 .price-currency,
+        .grid-layout-10 .price-currency {
+            font-size: 0.92rem;
+        }
+
+        .grid-layout-7 .price-unit,
+        .grid-layout-8 .price-unit,
+        .grid-layout-9 .price-unit,
+        .grid-layout-10 .price-unit {
+            font-size: 0.62rem;
+        }
+
+        [data-grid-rows="two"] .header-block {
+            margin-bottom: 1.2rem;
+        }
+
+        [data-grid-rows="two"] .cards-block {
+            padding-top: 0.45rem;
+            padding-bottom: 0.45rem;
+        }
+
+        [data-grid-rows="two"] .footer-block {
+            margin-top: 1.1rem;
+            padding-top: 1rem;
+        }
+    </style>
+</head>
+
+<body class="bg-[#f8f9fa] flex items-center justify-center p-0 m-0 overflow-hidden relative min-h-[900px]">
+
+    <div class="noise-overlay"></div>
+
+    <!-- 背景彩虹全息光暈 -->
+    <div class="absolute top-[-10%] left-[-10%] w-[600px] h-[600px] bg-[#0044ff] rounded-full mix-blend-multiply filter blur-[150px] opacity-10 animate-pulse"></div>
+    <div class="absolute top-[20%] right-[-10%] w-[600px] h-[600px] bg-[#00dd88] rounded-full mix-blend-multiply filter blur-[150px] opacity-10"></div>
+    <div class="absolute bottom-[-10%] left-[20%] w-[600px] h-[600px] bg-[#ffdd00] rounded-full mix-blend-multiply filter blur-[150px] opacity-10"></div>
+    <div class="absolute bottom-[10%] right-[10%] w-[500px] h-[500px] bg-[#ff5500] rounded-full mix-blend-multiply filter blur-[150px] opacity-10"></div>
+
+    <!-- Main Container -->
+    <div class="relative w-[1200px] h-[900px] glass-container prismatic-border flex flex-col p-12 z-10 overflow-hidden" data-tilt="{% if enable_tilt %}on{% else %}off{% endif %}" data-grid-rows="{% if items|length > 5 %}two{% else %}one{% endif %}">
+        
+        <!-- Header -->
+        <div class="header-block flex justify-between items-center mb-7">
+            <div class="brand-wrap flex items-center gap-3">
+                <img src="logo.png" alt="Logo" class="h-[72px] w-auto object-contain drop-shadow-sm" />
+                <div class="brand-name">{{ brand_name or 'Renaiss' }}</div>
+            </div>
+            <div class="text-right">
+                <h1 class="holo-title text-5xl font-black tracking-tight leading-none mb-2">{{ collection_name }}</h1>
+                <div class="flex items-center justify-end gap-2 text-text-muted">
+                    <span class="material-symbols-outlined text-sm">workspace_premium</span>
+                    <span class="text-sm font-bold tracking-wider">SBT {{ sbt_total }}</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Dynamic Content Area -->
+        <div class="cards-block flex-1 min-h-0 flex flex-col justify-center">
+            <div class="grid-layout-{{ items|length }}">
+                {% for item in items %}
+                <div class="item-card compact rounded-3xl flex flex-col items-center group relative">
+                    <!-- Item Image -->
+                    <div class="card-frame relative w-full aspect-[2.58/3.58] rounded-2xl overflow-hidden mb-4">
+                        <img src="{{ item.image }}" alt="{{ item.name }}" class="card-art" />
+                        <div class="absolute inset-0 bg-gradient-to-t from-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+                    </div>
+
+                    <!-- Item Info -->
+                    <div class="w-full text-center space-y-2">
+                        <div class="flex justify-center">
+                            <div class="price-tag"><span class="price-currency">$</span><span class="price-value">{{ item.value }}</span><span class="price-unit">USD</span></div>
+                        </div>
+                    </div>
+
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer-block mt-7 pt-5 border-t border-black/5 flex justify-between items-end">
+            <div class="flex gap-10">
+                <div class="flex flex-col">
+                    <span class="foil-label">{{ total_value_label or ('Top ' ~ (items|length) ~ ' Total Value') }}</span>
+                    <div class="stat-value-row">
+                        <span class="foil-currency">$</span>
+                        <span class="foil-number">{{ total_value }}</span>
+                        <span class="foil-unit">USD</span>
+                    </div>
+                </div>
+                <div class="h-12 w-px bg-black/5"></div>
+                <div class="flex flex-col">
+                    <span class="text-[11px] font-black text-text-muted uppercase tracking-[0.2em] mb-2">{{ items_count_label or 'Items Count' }}</span>
+                    <div class="stat-value-row">
+                        <span class="asset-number">{{ items|length }}</span><span class="asset-unit">{{ assets_unit or 'Assets' }}</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="sbt-panel">
+                <span class="sbt-title">{{ sbt_badges_label or 'SBT Badges' }}</span>
+                <div class="sbt-list">
+                    {% if sbt_badges_display and sbt_badges_display|length > 0 %}
+                        {% for badge in sbt_badges_display %}
+                        <div class="sbt-badge" title="{{ badge.name }}">
+                            {% if badge.image %}
+                            <img src="{{ badge.image }}" alt="{{ badge.name }}" class="sbt-badge-icon" />
+                            {% else %}
+                            <span class="sbt-badge-icon sbt-badge-fallback">•</span>
+                            {% endif %}
+                            <span class="sbt-badge-name">{{ badge.label }}</span>
+                            {% if badge.balance and badge.balance > 1 %}
+                            <span class="sbt-badge-count">{{ owned_prefix or 'owned ' }}{{ badge.balance }}</span>
+                            {% endif %}
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="sbt-badge">
+                            <span class="sbt-badge-icon sbt-badge-fallback">-</span>
+                            <span class="sbt-badge-name">{{ no_sbt_label or 'No SBT' }}</span>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
