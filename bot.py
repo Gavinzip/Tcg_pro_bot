@@ -1931,30 +1931,27 @@ async def manual_analyze(interaction: discord.Interaction, image: discord.Attach
 @tree.command(name="profile", description="輸入錢包地址，開啟互動式海報設定面板")
 @app_commands.describe(address="錢包地址（0x 開頭）")
 async def profile(interaction: discord.Interaction, address: str):
-    try:
-        # Ack ASAP to avoid Discord 3s interaction timeout (10062 Unknown interaction).
-        await interaction.response.defer(thinking=True, ephemeral=False)
-    except discord.NotFound:
-        print("❌ /profile 互動已失效（defer NotFound: 10062）", file=sys.stderr)
-        return
-    except discord.InteractionResponded:
-        pass
-
     wallet = _normalize_wallet_address(address)
     if not wallet:
-        await interaction.followup.send(
+        await interaction.response.send_message(
             "❌ 錢包地址格式錯誤，請輸入 `0x` 開頭且長度 42 的地址。",
             ephemeral=True,
         )
         return
 
-    init_msg = await interaction.followup.send("🎛️ 正在建立收藏海報設定討論串...", wait=True)
-    thread = await init_msg.create_thread(name="收藏海報設定", auto_archive_duration=60)
     try:
-        await thread.add_user(interaction.user)
-    except Exception:
-        # Non-fatal: some guild/thread configs may not allow explicitly adding users.
-        pass
+        # Keep the original clean UX: immediate response -> create thread from that message.
+        await interaction.response.send_message("🎛️ 正在建立收藏海報設定討論串...", ephemeral=False)
+        resp = await interaction.original_response()
+    except discord.NotFound:
+        # Fallback for occasional interaction timeout: still create a thread from channel message.
+        channel = interaction.channel
+        if channel is None:
+            print("❌ /profile 互動已失效且找不到可用頻道。", file=sys.stderr)
+            return
+        resp = await channel.send("🎛️ 正在建立收藏海報設定討論串...")
+    thread = await resp.create_thread(name="收藏海報設定", auto_archive_duration=60)
+    await thread.add_user(interaction.user)
 
     default_lang = "zh"
     default_texts = _profile_wizard_texts(default_lang)
