@@ -314,11 +314,20 @@
         }
 
         .stat-value-row {
-            min-height: 64px;
+            min-height: 58px;
             display: flex;
             align-items: flex-end;
             justify-content: center;
             line-height: 1;
+        }
+
+        .footer-block {
+            margin-top: 2.7rem;
+            padding-top: 0.55rem;
+        }
+
+        .summary-stats {
+            transform: translateY(10px);
         }
 
         .asset-number {
@@ -342,9 +351,10 @@
             display: flex;
             flex-direction: column;
             align-items: flex-end;
-            gap: 0.6rem;
-            min-height: 116px;
-            justify-content: flex-end;
+            gap: 0.5rem;
+            min-height: 0;
+            justify-content: flex-start;
+            padding-top: 0.05rem;
         }
 
         .sbt-title {
@@ -359,7 +369,7 @@
             display: grid;
             grid-template-columns: repeat(7, minmax(0, 1fr));
             gap: 0.42rem;
-            width: 500px;
+            width: 560px;
         }
 
         .sbt-badge {
@@ -371,9 +381,9 @@
         }
 
         .sbt-badge-icon {
-            width: 48px;
-            height: 48px;
-            border-radius: 16px;
+            width: 56px;
+            height: 56px;
+            border-radius: 17px;
             object-fit: cover;
             border: 1px solid rgba(255,255,255,0.95);
             box-shadow:
@@ -393,9 +403,9 @@
         }
 
         .sbt-badge-name {
-            max-width: 68px;
-            min-height: 26px;
-            font-size: 8.2px;
+            max-width: 80px;
+            min-height: 28px;
+            font-size: 9px;
             font-weight: 800;
             line-height: 1.15;
             letter-spacing: 0.02em;
@@ -470,20 +480,27 @@
 
         .grid-layout-4, .grid-layout-5 { 
             display: grid; 
-            column-gap: 0.95rem;
             row-gap: 1rem; 
             align-content: center;
         }
 
         .grid-layout-4 { 
             grid-template-columns: repeat(4, minmax(0, 1fr)); 
+            column-gap: 0.95rem;
         }
 
         .grid-layout-5 { 
             grid-template-columns: repeat(5, minmax(0, 1fr)); 
+            column-gap: 0.95rem;
         }
 
-        .grid-layout-4 .item-card,
+        .grid-layout-4 .item-card {
+            width: 100%;
+            max-width: 252px;
+            justify-self: center;
+            padding: 0.82rem 0.64rem 0.92rem;
+        }
+
         .grid-layout-5 .item-card {
             width: 100%;
             max-width: 186px;
@@ -491,7 +508,10 @@
             padding: 0.66rem 0.52rem 0.74rem;
         }
 
-        .grid-layout-4 .item-card .card-frame,
+        .grid-layout-4 .item-card .card-frame {
+            margin-bottom: 0.8rem;
+        }
+
         .grid-layout-5 .item-card .card-frame {
             margin-bottom: 0.62rem;
         }
@@ -564,12 +584,12 @@
 
         [data-grid-rows="two"] .cards-block {
             padding-top: 0.45rem;
-            padding-bottom: 0.45rem;
+            padding-bottom: 0.12rem;
         }
 
         [data-grid-rows="two"] .footer-block {
-            margin-top: 1.1rem;
-            padding-top: 1rem;
+            margin-top: 2.2rem;
+            padding-top: 0.5rem;
         }
     </style>
 </head>
@@ -585,12 +605,12 @@
     <div class="absolute bottom-[10%] right-[10%] w-[500px] h-[500px] bg-[#ff5500] rounded-full mix-blend-multiply filter blur-[150px] opacity-10"></div>
 
     <!-- Main Container -->
-    <div class="relative w-[1200px] h-[900px] glass-container prismatic-border flex flex-col p-12 z-10 overflow-hidden" data-tilt="{% if enable_tilt %}on{% else %}off{% endif %}" data-grid-rows="{% if items|length > 5 %}two{% else %}one{% endif %}" data-item-count="{{ items|length }}">
+    <div class="relative w-[1200px] h-[900px] glass-container prismatic-border flex flex-col pt-12 px-12 pb-4 z-10 overflow-hidden" data-tilt="{% if enable_tilt %}on{% else %}off{% endif %}" data-grid-rows="{% if items|length > 5 %}two{% else %}one{% endif %}" data-item-count="{{ items|length }}">
         
         <!-- Header -->
         <div class="header-block flex justify-between items-center mb-7">
             <div class="brand-wrap flex items-center gap-3">
-                <img src="logo.png" alt="Logo" class="h-[72px] w-auto object-contain drop-shadow-sm" />
+                <img src="logo.png" alt="Logo" class="h-[100px] w-auto object-contain drop-shadow-sm" />
                 <div class="brand-name">{{ brand_name or 'Renaiss' }}</div>
             </div>
             <div class="text-right">
@@ -626,8 +646,8 @@
         </div>
 
         <!-- Footer -->
-        <div class="footer-block mt-7 pt-5 border-t border-black/5 flex justify-between items-end">
-            <div class="flex gap-10">
+        <div class="footer-block border-t border-black/5 flex justify-between items-start">
+            <div class="summary-stats flex gap-10">
                 <div class="flex flex-col">
                     <span class="foil-label">{{ total_value_label or ('Top ' ~ (items|length) ~ ' Total Value') }}</span>
                     <div class="stat-value-row">
@@ -636,9 +656,9 @@
                         <span class="foil-unit">USD</span>
                     </div>
                 </div>
-                <div class="h-12 w-px bg-black/5"></div>
+                <div class="summary-divider h-12 w-px bg-black/5"></div>
                 <div class="flex flex-col">
-                    <span class="text-[11px] font-black text-text-muted uppercase tracking-[0.2em] mb-2">{{ items_count_label or 'Items Count' }}</span>
+                    <span class="items-label text-[11px] font-black text-text-muted uppercase tracking-[0.2em] mb-2">{{ items_count_label or 'Items Count' }}</span>
                     <div class="stat-value-row">
                         <span class="asset-number">{{ items|length }}</span><span class="asset-unit">{{ assets_unit or 'Assets' }}</span>
                     </div>
