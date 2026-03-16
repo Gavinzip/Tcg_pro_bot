@@ -869,7 +869,10 @@ async def _render_wallet_profile_poster(template_payload: dict, out_dir: str, sa
 
     # If the template is Jinja-style, render blocks/loops first.
     if template_context and ("{%" in html_doc or "{{" in html_doc):
-        from jinja2 import Template
+        try:
+            from jinja2 import Template
+        except ModuleNotFoundError as e:
+            raise RuntimeError("缺少套件 jinja2，請先安裝 `pip install -r requirements.txt`") from e
 
         html_doc = Template(html_doc).render(**template_context)
 
@@ -1943,7 +1946,7 @@ async def profile(interaction: discord.Interaction, address: str):
     default_lang = "zh"
     default_texts = _profile_wizard_texts(default_lang)
 
-    lang_view = LanguageSelectView(interaction.user.id, timeout_seconds=10)
+    lang_view = LanguageSelectView(interaction.user.id, timeout_seconds=20)
     lang_msg = await thread.send(default_texts["lang_prompt"], view=lang_view)
     picked_lang, selected = await lang_view.wait_for_choice()
     profile_lang = picked_lang if selected and picked_lang else "zh"

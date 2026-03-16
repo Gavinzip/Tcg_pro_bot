@@ -3,3 +3,4 @@ playwright
 matplotlib
 python-dotenv
 requests
+jinja2
