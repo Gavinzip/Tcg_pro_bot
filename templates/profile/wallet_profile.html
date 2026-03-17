@@ -70,7 +70,7 @@
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
-            text-shadow: 0 3px 16px rgba(31, 75, 255, 0.12);
+            text-shadow: none;
         }
 
         .glass-container {
@@ -328,6 +328,7 @@
 
         .summary-stats {
             transform: translateY(10px);
+            align-items: flex-end;
         }
 
         .asset-number {
@@ -421,7 +422,33 @@
         }
 
         .header-block {
-            align-items: center;
+            align-items: flex-start;
+            overflow: visible;
+        }
+
+        .header-right {
+            max-width: 70%;
+            padding-top: 0;
+            padding-right: 0;
+            min-width: 0;
+            flex-shrink: 1;
+            overflow: visible;
+        }
+
+        .header-title {
+            display: inline-block;
+            line-height: 1.28 !important;
+            margin-bottom: 0.1rem;
+            padding-top: 0;
+            padding-bottom: 0.28em;
+            overflow-wrap: anywhere;
+            overflow: visible !important;
+        }
+
+        .header-meta {
+            line-height: 1;
+            min-height: 0;
+            overflow: visible;
         }
 
         .brand-wrap {
@@ -613,10 +640,10 @@
                 <img src="logo.png" alt="Logo" class="h-[100px] w-auto object-contain drop-shadow-sm" />
                 <div class="brand-name">{{ brand_name or 'Renaiss' }}</div>
             </div>
-            <div class="text-right">
-                <h1 class="holo-title text-5xl font-black tracking-tight leading-none mb-2">{{ collection_name }}</h1>
-                <div class="flex items-center justify-end gap-2 text-text-muted">
-                    <span class="material-symbols-outlined text-sm">workspace_premium</span>
+            <div class="header-right text-right">
+                <h1 class="header-title holo-title text-5xl font-black tracking-tight">{{ collection_name }}</h1>
+                <div class="header-meta flex items-center justify-end gap-2 text-text-muted">
+                    <span class="material-symbols-outlined text-sm leading-none">workspace_premium</span>
                     <span class="text-sm font-bold tracking-wider">SBT {{ sbt_total }}</span>
                 </div>
             </div>
