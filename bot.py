@@ -6,8 +6,7 @@ import shutil
 import tempfile
 import base64
 import io
-import copy
-import hashlib
+import glob
 import threading
 import asyncio
 import traceback
@@ -73,9 +72,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile＿beta.html")
 PROFILE_LOGO_PATH = os.path.join(BASE_DIR, "templates", "profile", "logo.png")
 PROFILE_BACKGROUND_DIR = os.path.join(BASE_DIR, "templates", "backgorund")
-PROFILE_PREVIEW_CACHE_DIR = os.path.join(BASE_DIR, "debug_wallet_profile_latest", "profile_preview_cache")
-PROFILE_PREVIEW_CACHE_TTL_SEC = max(60, int(os.getenv("PROFILE_PREVIEW_CACHE_TTL_SEC", "21600")))
-PROFILE_PREVIEW_CACHE_VERSION = "v1"
+PROFILE_PREVIEW_DEMO_DIR = os.path.join(BASE_DIR, "templates", "backgorund", "demo")
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
 RENAISS_SBT_BADGES_URL = "https://www.renaiss.xyz/api/trpc/sbt.getUserBadges"
 PROFILE_PAGE_LIMIT = max(10, min(100, int(os.getenv("PROFILE_PAGE_LIMIT", "100"))))
@@ -1103,64 +1100,24 @@ async def _generate_profile_background_previews(
     profile_lang: str,
     preview_card_count: int = 10,
 ) -> list[tuple[str, str]]:
-    os.makedirs(PROFILE_PREVIEW_CACHE_DIR, exist_ok=True)
-    normalized_wallet = _normalize_wallet_address(wallet) or str(wallet or "").strip().lower()
     preview_card_count = _clamp_profile_card_count(preview_card_count)
-    template_sig = "0"
-    try:
-        template_sig = str(int(os.path.getmtime(PROFILE_TEMPLATE_PATH)))
-    except Exception:
-        pass
-
-    cache_seed = f"{PROFILE_PREVIEW_CACHE_VERSION}|{normalized_wallet}|{profile_lang}|{preview_card_count}|{template_sig}"
-    cache_hash = hashlib.md5(cache_seed.encode("utf-8")).hexdigest()[:14]
-    preview_paths: list[tuple[str, str]] = []
-    for bg_key in ("classic", "1", "2", "3"):
-        safe_name = f"profile_preview_{cache_hash}_bg_{bg_key}_top{preview_card_count}"
-        path = os.path.join(PROFILE_PREVIEW_CACHE_DIR, f"{safe_name}_profile.png")
-        preview_paths.append((bg_key, path))
-
-    now_ts = time.time()
-    cache_valid = True
-    for _, path in preview_paths:
-        if not os.path.exists(path):
-            cache_valid = False
-            break
-        if os.path.getsize(path) <= 0:
-            cache_valid = False
-            break
-        if (now_ts - os.path.getmtime(path)) > PROFILE_PREVIEW_CACHE_TTL_SEC:
-            cache_valid = False
-            break
-    if cache_valid:
-        return preview_paths
-
-    loop = asyncio.get_running_loop()
-    bg_labels = _profile_background_display_labels(profile_lang)
-    base_ctx = await loop.run_in_executor(
-        None,
-        _build_wallet_profile_context,
-        normalized_wallet,
-        [],
-        False,
-        preview_card_count,
-        [],
-        profile_lang,
-        "classic",
-    )
+    demo_dir = PROFILE_PREVIEW_DEMO_DIR
+    if not os.path.isdir(demo_dir):
+        raise RuntimeError(f"找不到預覽圖資料夾: {demo_dir}")
 
     results: list[tuple[str, str]] = []
-    for bg_key, out_path in preview_paths:
-        preview_ctx = copy.deepcopy(base_ctx)
-        template_context = dict(preview_ctx.get("template_context") or {})
-        template_context["background_key"] = bg_key
-        template_context["background_image"] = _profile_background_data_uri(bg_key)
-        preview_ctx["template_context"] = template_context
+    missing: list[str] = []
+    for bg_key in ("classic", "1", "2", "3"):
+        exact = glob.glob(os.path.join(demo_dir, f"*_bg_{bg_key}_top{preview_card_count}_profile.png"))
+        fallback = [] if exact else glob.glob(os.path.join(demo_dir, f"*_bg_{bg_key}_top*_profile.png"))
+        candidates = sorted((exact or fallback), key=lambda p: os.path.getmtime(p), reverse=True)
+        if not candidates:
+            missing.append(bg_key)
+            continue
+        results.append((bg_key, candidates[0]))
 
-        safe_name = os.path.basename(out_path).removesuffix("_profile.png")
-        async with POSTER_SEMAPHORE:
-            rendered_path = await _render_wallet_profile_poster(preview_ctx, PROFILE_PREVIEW_CACHE_DIR, safe_name=safe_name)
-        results.append((bg_key, rendered_path))
+    if missing:
+        raise RuntimeError(f"demo 預覽圖缺少背景: {', '.join(missing)}（路徑: {demo_dir}）")
 
     return results
 
