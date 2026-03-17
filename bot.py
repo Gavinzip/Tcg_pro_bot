@@ -255,8 +255,8 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "setup_tip": "請選模板、SBT、卡片後按「生成海報」。若不選 SBT/卡片，會用預設（依 FMV 由高到低）。",
             "template_placeholder": "1) 選擇模板（Top 1 / Top 3 / Top 4 / Top 5 / Top 10）",
             "background_placeholder": "2) 選擇背景（經典 / 超級甲賀忍蛙 / 妙蛙花 / 小智與皮卡丘）",
-            "sbt_placeholder": "3) 複選 SBT（可略過）",
-            "card_placeholder": "4) 複選卡片（可略過）",
+            "sbt_placeholder": "2) 複選 SBT（可略過）",
+            "card_placeholder": "3) 複選卡片（可略過）",
             "default_button": "使用預設直接生成",
             "generate_button": "生成海報",
             "only_owner_msg": "只有發起指令的人可以操作此面板。",
@@ -289,8 +289,8 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "setup_tip": "请选择模板、SBT、卡片后点击“生成海报”。若不选 SBT/卡片，将使用默认（按 FMV 从高到低）。",
             "template_placeholder": "1) 选择模板（Top 1 / Top 3 / Top 4 / Top 5 / Top 10）",
             "background_placeholder": "2) 选择背景（经典 / 超级甲贺忍蛙 / 妙蛙花 / 小智与皮卡丘）",
-            "sbt_placeholder": "3) 多选 SBT（可跳过）",
-            "card_placeholder": "4) 多选卡片（可跳过）",
+            "sbt_placeholder": "2) 多选 SBT（可跳过）",
+            "card_placeholder": "3) 多选卡片（可跳过）",
             "default_button": "使用默认直接生成",
             "generate_button": "生成海报",
             "only_owner_msg": "只有发起指令的人可以操作此面板。",
@@ -323,8 +323,8 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "setup_tip": "템플릿, SBT, 카드를 선택한 뒤 \"포스터 생성\"을 누르세요. SBT/카드를 선택하지 않으면 기본값(FMV 내림차순)을 사용합니다.",
             "template_placeholder": "1) 템플릿 선택 (Top 1 / Top 3 / Top 4 / Top 5 / Top 10)",
             "background_placeholder": "2) 배경 선택 (Classic / 개굴닌자(유대변화) / 이상해꽃 / 지우와 피카츄)",
-            "sbt_placeholder": "3) SBT 다중 선택 (선택 사항)",
-            "card_placeholder": "4) 카드 다중 선택 (선택 사항)",
+            "sbt_placeholder": "2) SBT 다중 선택 (선택 사항)",
+            "card_placeholder": "3) 카드 다중 선택 (선택 사항)",
             "default_button": "기본값으로 생성",
             "generate_button": "포스터 생성",
             "only_owner_msg": "명령을 실행한 사용자만 이 패널을 조작할 수 있습니다.",
@@ -356,8 +356,8 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
         "setup_tip": "Choose template, SBT, and cards, then click Generate Poster. If SBT/cards are not selected, defaults are used (FMV high to low).",
         "template_placeholder": "1) Select template (Top 1 / Top 3 / Top 4 / Top 5 / Top 10)",
         "background_placeholder": "2) Select background (Classic / Ash-Greninja / Venusaur / Ash & Pikachu)",
-        "sbt_placeholder": "3) Select SBT (optional)",
-        "card_placeholder": "4) Select cards (optional)",
+        "sbt_placeholder": "2) Select SBT (optional)",
+        "card_placeholder": "3) Select cards (optional)",
         "default_button": "Generate with Defaults",
         "generate_button": "Generate Poster",
         "only_owner_msg": "Only the command user can operate this panel.",
@@ -1005,6 +1005,7 @@ def _build_wallet_profile_context(
             "sbt_total": sbt_total,
             "sbt_badges_display": display_badges,
             "items": poster_items,
+            "assets_count": total_count,
             "total_value": _format_fmv_display(poster_total_fmv),
             "total_value_label": _profile_top_value_label(len(poster_items), profile_lang),
             "items_count_label": ui_labels["items_count_label"],
@@ -2072,7 +2073,6 @@ class ProfileConfigView(discord.ui.View):
 
         self.selected_lang = _profile_lang_from_locale(selected_lang)
         self.texts = _profile_wizard_texts(self.selected_lang)
-        self.background_labels = _profile_background_display_labels(self.selected_lang)
         self.selected_template = 10
         self.selected_background = "classic"
         self.selected_sbt_values: list[str] = []
@@ -2091,13 +2091,8 @@ class ProfileConfigView(discord.ui.View):
         }
 
         self.add_item(ProfileTemplateSelect(self.selected_template, placeholder=self.texts["template_placeholder"]))
-        self.add_item(
-            ProfileBackgroundSelect(
-                self.selected_background,
-                placeholder=self.texts["background_placeholder"],
-                labels=self.background_labels,
-            )
-        )
+        # Background selection is intentionally disabled for now.
+        # Keep profile posters locked to the classic background preset.
         self.add_item(
             ProfileSBTSelect(
                 self.sbt_options,
@@ -2153,8 +2148,6 @@ class ProfileConfigView(discord.ui.View):
         owned_sbt_count = int((self.picker_data or {}).get("owned_sbt_count") or 0)
         lang_text = f"{LANG_FLAGS.get(self.selected_lang, '🌐')} {LANG_LABELS.get(self.selected_lang, self.selected_lang)}"
         template_text = f"Top {self.selected_template}"
-        bg_key = _normalize_profile_background_key(self.selected_background)
-        background_text = self.background_labels.get(bg_key, bg_key)
         sbt_text = self._selected_lines(self.selected_sbt_values, self.sbt_label_map)
         card_text = self._selected_lines(self.selected_card_values, self.card_label_map)
         return (
@@ -2165,7 +2158,6 @@ class ProfileConfigView(discord.ui.View):
             f"**{self.texts['current_selection_title']}**\n"
             f"{self.texts['lang_selected_label']}: **{lang_text}**\n"
             f"{self.texts['template_selected_label']}: **{template_text}**\n"
-            f"{self.texts['background_selected_label']}: **{background_text}**\n"
             f"{self.texts['sbt_selected_label']}:\n{sbt_text}\n"
             f"{self.texts['cards_selected_label']}:\n{card_text}\n\n"
             f"{self.texts['setup_tip']}"
@@ -2198,7 +2190,7 @@ class ProfileConfigView(discord.ui.View):
 
         selected_sbt = [] if use_default else list(self.selected_sbt_values)
         selected_cards = [] if use_default else list(self.selected_card_values)
-        selected_background = "classic" if use_default else self.selected_background
+        selected_background = "classic"
         template_count = self.selected_template
         out_dir = tempfile.mkdtemp(prefix=f"tcg_wallet_cfg_{interaction.id}_")
         loop = asyncio.get_running_loop()
@@ -2507,68 +2499,14 @@ async def profile(interaction: discord.Interaction, address: str):
             pass
 
     loop = asyncio.get_running_loop()
-    bg_labels = _profile_background_display_labels(profile_lang)
-
     try:
-        await thread.send(
-            _t(
-                profile_lang,
-                "🖼️ 已選擇語言，正在傳送四種背景模板預覽（Top 10）...",
-                "🖼️ Language selected. Sending 4 background template previews (Top 10)...",
-                "🖼️ 언어 선택 완료. 4가지 배경 템플릿 미리보기(Top 10)를 전송 중입니다...",
-                "🖼️ 已选择语言，正在发送四种背景模板预览（Top 10）...",
-            )
-        )
-
-        picker_task = loop.run_in_executor(
+        # Preview-image flow is intentionally disabled for now (copyright risk).
+        # Keep /profile in classic-only mode until preview assets are legally cleared.
+        picker_data = await loop.run_in_executor(
             None,
             _build_wallet_profile_picker_data,
             wallet,
         )
-        preview_task = asyncio.create_task(
-            _generate_profile_background_previews(
-                wallet=wallet,
-                profile_lang=profile_lang,
-                preview_card_count=10,
-            )
-        )
-
-        try:
-            previews = await preview_task
-            files = [discord.File(path) for _, path in previews if path and os.path.exists(path)]
-            legend = _t(
-                profile_lang,
-                f"預覽版本：`{bg_labels.get('classic', 'Classic')}` / `{bg_labels.get('1', '1')}` / `{bg_labels.get('2', '2')}` / `{bg_labels.get('3', '3')}`\n範例圖僅供參考",
-                f"Preview versions: `{bg_labels.get('classic', 'Classic')}` / `{bg_labels.get('1', '1')}` / `{bg_labels.get('2', '2')}` / `{bg_labels.get('3', '3')}`\nSample images are for reference only.",
-                f"미리보기 버전: `{bg_labels.get('classic', 'Classic')}` / `{bg_labels.get('1', '1')}` / `{bg_labels.get('2', '2')}` / `{bg_labels.get('3', '3')}`\n샘플 이미지는 참고용입니다.",
-                f"预览版本：`{bg_labels.get('classic', 'Classic')}` / `{bg_labels.get('1', '1')}` / `{bg_labels.get('2', '2')}` / `{bg_labels.get('3', '3')}`\n示例图仅供参考",
-            )
-            if files:
-                await thread.send(legend, files=files)
-            else:
-                await thread.send(
-                    _t(
-                        profile_lang,
-                        "⚠️ 預覽圖生成完成，但沒有可傳送檔案。",
-                        "⚠️ Preview generation finished, but no files were available to send.",
-                        "⚠️ 미리보기 생성은 완료됐지만 전송할 파일이 없습니다.",
-                        "⚠️ 预览图生成完成，但没有可传送文件。",
-                    )
-                )
-        except Exception as preview_err:
-            print(f"❌ /profile 預覽圖生成失敗: {preview_err}", file=sys.stderr)
-            print(traceback.format_exc(), file=sys.stderr)
-            await thread.send(
-                _t(
-                    profile_lang,
-                    f"⚠️ 預覽圖生成失敗，先進入設定：{preview_err}",
-                    f"⚠️ Preview generation failed, continuing to settings: {preview_err}",
-                    f"⚠️ 미리보기 생성에 실패하여 설정 화면으로 계속 진행합니다: {preview_err}",
-                    f"⚠️ 预览图生成失败，先进入设置：{preview_err}",
-                )
-            )
-
-        picker_data = await picker_task
         view = ProfileConfigView(interaction.user.id, wallet, picker_data, profile_lang)
         msg = await thread.send(view.render_message(), view=view)
         view.bind_message(msg)

@@ -905,7 +905,7 @@
                 <div class="flex flex-col">
                     <span class="items-label text-[11px] font-black text-text-muted uppercase tracking-[0.2em] mb-2">{{ items_count_label or 'Items Count' }}</span>
                     <div class="stat-value-row">
-                        <span class="asset-number">{{ items|length }}</span><span class="asset-unit">{{ assets_unit or 'Assets' }}</span>
+                        <span class="asset-number">{{ assets_count or items|length }}</span><span class="asset-unit">{{ assets_unit or 'Assets' }}</span>
                     </div>
                 </div>
             </div>
