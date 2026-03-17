@@ -6,6 +6,8 @@ import shutil
 import tempfile
 import base64
 import io
+import copy
+import hashlib
 import threading
 import asyncio
 import traceback
@@ -14,6 +16,7 @@ import json
 import re
 import html as html_lib
 import time
+import mimetypes
 from datetime import datetime
 import requests
 import market_report_vision
@@ -67,8 +70,12 @@ POSTER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_POSTERS)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # /profile uses an isolated template bundle to avoid impacting normal card posters.
-PROFILE_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile.html")
+PROFILE_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile＿beta.html")
 PROFILE_LOGO_PATH = os.path.join(BASE_DIR, "templates", "profile", "logo.png")
+PROFILE_BACKGROUND_DIR = os.path.join(BASE_DIR, "templates", "backgorund")
+PROFILE_PREVIEW_CACHE_DIR = os.path.join(BASE_DIR, "debug_wallet_profile_latest", "profile_preview_cache")
+PROFILE_PREVIEW_CACHE_TTL_SEC = max(60, int(os.getenv("PROFILE_PREVIEW_CACHE_TTL_SEC", "21600")))
+PROFILE_PREVIEW_CACHE_VERSION = "v1"
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
 RENAISS_SBT_BADGES_URL = "https://www.renaiss.xyz/api/trpc/sbt.getUserBadges"
 PROFILE_PAGE_LIMIT = max(10, min(100, int(os.getenv("PROFILE_PAGE_LIMIT", "100"))))
@@ -77,6 +84,12 @@ PROFILE_API_MAX_RETRIES = max(1, int(os.getenv("PROFILE_API_MAX_RETRIES", "4")))
 PROFILE_API_RETRY_BACKOFF_SEC = max(0.2, float(os.getenv("PROFILE_API_RETRY_BACKOFF_SEC", "0.8")))
 _WALLET_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _TRANSPARENT_CARD_IMAGE = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="
+_PROFILE_BACKGROUND_FILES = {
+    "classic": None,
+    "1": "1.jpg",
+    "2": "2.png",
+    "3": "3.jpg",
+}
 
 
 def _normalize_wallet_address(address: str) -> str | None:
@@ -127,9 +140,39 @@ def _format_fmv_usd(value: int | None) -> str:
 
 
 def _clamp_profile_card_count(value: int | None) -> int:
-    if value in (1, 3, 10):
+    if value in (1, 3, 4, 5, 10):
         return int(value)
     return 10
+
+
+def _normalize_profile_background_key(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if text in ("classic", "經典", "经典", "default", "0"):
+        return "classic"
+    if text in ("1", "2", "3"):
+        return text
+    return "classic"
+
+
+def _profile_background_data_uri(background_key: str | None) -> str:
+    key = _normalize_profile_background_key(background_key)
+    filename = _PROFILE_BACKGROUND_FILES.get(key)
+    if not filename:
+        return ""
+    img_path = os.path.join(PROFILE_BACKGROUND_DIR, filename)
+    if not os.path.exists(img_path):
+        return ""
+    try:
+        with open(img_path, "rb") as f:
+            raw = f.read()
+        mime, _ = mimetypes.guess_type(img_path)
+        if not mime:
+            ext = os.path.splitext(img_path)[1].lower()
+            mime = "image/png" if ext == ".png" else "image/jpeg"
+        b64 = base64.b64encode(raw).decode("utf-8")
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return ""
 
 
 def _profile_lang_from_locale(locale_like) -> str:
@@ -213,9 +256,10 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "收藏數量",
             "selectable_sbt_label": "可選 SBT",
             "setup_tip": "請選模板、SBT、卡片後按「生成海報」。若不選 SBT/卡片，會用預設（依 FMV 由高到低）。",
-            "template_placeholder": "1) 選擇模板（Top 1 / Top 3 / Top 10）",
-            "sbt_placeholder": "2) 複選 SBT（可略過）",
-            "card_placeholder": "3) 複選卡片（可略過）",
+            "template_placeholder": "1) 選擇模板（Top 1 / Top 3 / Top 4 / Top 5 / Top 10）",
+            "background_placeholder": "2) 選擇背景（經典 / 超級甲賀忍蛙 / 妙蛙花 / 小智與皮卡丘）",
+            "sbt_placeholder": "3) 複選 SBT（可略過）",
+            "card_placeholder": "4) 複選卡片（可略過）",
             "default_button": "使用預設直接生成",
             "generate_button": "生成海報",
             "only_owner_msg": "只有發起指令的人可以操作此面板。",
@@ -230,8 +274,10 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "current_selection_title": "目前選擇",
             "lang_selected_label": "語言",
             "template_selected_label": "模板",
+            "background_selected_label": "背景",
             "sbt_selected_label": "SBT",
             "cards_selected_label": "卡片",
+            "background_classic_label": "經典",
             "default_short": "預設",
             "selected_short": "已選",
         }
@@ -244,9 +290,10 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "收藏数量",
             "selectable_sbt_label": "可选 SBT",
             "setup_tip": "请选择模板、SBT、卡片后点击“生成海报”。若不选 SBT/卡片，将使用默认（按 FMV 从高到低）。",
-            "template_placeholder": "1) 选择模板（Top 1 / Top 3 / Top 10）",
-            "sbt_placeholder": "2) 多选 SBT（可跳过）",
-            "card_placeholder": "3) 多选卡片（可跳过）",
+            "template_placeholder": "1) 选择模板（Top 1 / Top 3 / Top 4 / Top 5 / Top 10）",
+            "background_placeholder": "2) 选择背景（经典 / 超级甲贺忍蛙 / 妙蛙花 / 小智与皮卡丘）",
+            "sbt_placeholder": "3) 多选 SBT（可跳过）",
+            "card_placeholder": "4) 多选卡片（可跳过）",
             "default_button": "使用默认直接生成",
             "generate_button": "生成海报",
             "only_owner_msg": "只有发起指令的人可以操作此面板。",
@@ -261,8 +308,10 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "current_selection_title": "当前选择",
             "lang_selected_label": "语言",
             "template_selected_label": "模板",
+            "background_selected_label": "背景",
             "sbt_selected_label": "SBT",
             "cards_selected_label": "卡片",
+            "background_classic_label": "经典",
             "default_short": "默认",
             "selected_short": "已选",
         }
@@ -275,9 +324,10 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "컬렉션 수",
             "selectable_sbt_label": "선택 가능 SBT",
             "setup_tip": "템플릿, SBT, 카드를 선택한 뒤 \"포스터 생성\"을 누르세요. SBT/카드를 선택하지 않으면 기본값(FMV 내림차순)을 사용합니다.",
-            "template_placeholder": "1) 템플릿 선택 (Top 1 / Top 3 / Top 10)",
-            "sbt_placeholder": "2) SBT 다중 선택 (선택 사항)",
-            "card_placeholder": "3) 카드 다중 선택 (선택 사항)",
+            "template_placeholder": "1) 템플릿 선택 (Top 1 / Top 3 / Top 4 / Top 5 / Top 10)",
+            "background_placeholder": "2) 배경 선택 (Classic / 개굴닌자(유대변화) / 이상해꽃 / 지우와 피카츄)",
+            "sbt_placeholder": "3) SBT 다중 선택 (선택 사항)",
+            "card_placeholder": "4) 카드 다중 선택 (선택 사항)",
             "default_button": "기본값으로 생성",
             "generate_button": "포스터 생성",
             "only_owner_msg": "명령을 실행한 사용자만 이 패널을 조작할 수 있습니다.",
@@ -292,8 +342,10 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "current_selection_title": "현재 선택",
             "lang_selected_label": "언어",
             "template_selected_label": "템플릿",
+            "background_selected_label": "배경",
             "sbt_selected_label": "SBT",
             "cards_selected_label": "카드",
+            "background_classic_label": "Classic",
             "default_short": "기본",
             "selected_short": "선택",
         }
@@ -305,9 +357,10 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
         "collection_label": "Collection",
         "selectable_sbt_label": "Selectable SBT",
         "setup_tip": "Choose template, SBT, and cards, then click Generate Poster. If SBT/cards are not selected, defaults are used (FMV high to low).",
-        "template_placeholder": "1) Select template (Top 1 / Top 3 / Top 10)",
-        "sbt_placeholder": "2) Select SBT (optional)",
-        "card_placeholder": "3) Select cards (optional)",
+        "template_placeholder": "1) Select template (Top 1 / Top 3 / Top 4 / Top 5 / Top 10)",
+        "background_placeholder": "2) Select background (Classic / Ash-Greninja / Venusaur / Ash & Pikachu)",
+        "sbt_placeholder": "3) Select SBT (optional)",
+        "card_placeholder": "4) Select cards (optional)",
         "default_button": "Generate with Defaults",
         "generate_button": "Generate Poster",
         "only_owner_msg": "Only the command user can operate this panel.",
@@ -322,10 +375,43 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
         "current_selection_title": "Current Selection",
         "lang_selected_label": "Language",
         "template_selected_label": "Template",
+        "background_selected_label": "Background",
         "sbt_selected_label": "SBT",
         "cards_selected_label": "Cards",
+        "background_classic_label": "Classic",
         "default_short": "Default",
         "selected_short": "Selected",
+    }
+
+
+def _profile_background_display_labels(lang: str) -> dict[str, str]:
+    lang = _profile_lang_from_locale(lang)
+    if lang == "zh":
+        return {
+            "classic": "經典",
+            "1": "超級甲賀忍蛙",
+            "2": "妙蛙花",
+            "3": "小智與皮卡丘",
+        }
+    if lang == "zhs":
+        return {
+            "classic": "经典",
+            "1": "超级甲贺忍蛙",
+            "2": "妙蛙花",
+            "3": "小智与皮卡丘",
+        }
+    if lang == "ko":
+        return {
+            "classic": "Classic",
+            "1": "개굴닌자(유대변화)",
+            "2": "이상해꽃",
+            "3": "지우와 피카츄",
+        }
+    return {
+        "classic": "Classic",
+        "1": "Ash-Greninja",
+        "2": "Venusaur",
+        "3": "Ash & Pikachu",
     }
 
 
@@ -391,7 +477,7 @@ def _prepare_collectible_image_for_poster(image_url: str) -> str:
     if not src:
         return _TRANSPARENT_CARD_IMAGE
     try:
-        from PIL import Image
+        from PIL import Image, ImageDraw
         import numpy as np
 
         resp = requests.get(
@@ -408,31 +494,142 @@ def _prepare_collectible_image_for_poster(image_url: str) -> str:
         if w < 50 or h < 50:
             return src
 
-        # Crop only pure black outer margins while preserving the full slab frame.
-        gray_np = np.asarray(img.convert("L"), dtype=np.uint8)
-        active_cols = (gray_np > 10).mean(axis=0) > 0.01
-        active_rows = (gray_np > 10).mean(axis=1) > 0.01
+        # Vercel graded-card renders are square with dark stage background.
+        # Use tighter fixed slab crop ratios to remove black side/floor regions.
+        if "graded-cards-renders" in src and abs(w - h) <= int(min(w, h) * 0.08):
+            l = int(w * 0.274)
+            r = int(w * 0.726)
+            t = int(h * 0.070)
+            btm = int(h * 0.888)
+            # Fine crop offsets from user tuning:
+            # left outward 8px, right outward 15px, bottom upward 20px.
+            l = max(0, l - 8)
+            r = min(w, r + 15)
+            btm = max(t + 1, btm - 20)
+            if (r - l) > w * 0.3 and (btm - t) > h * 0.6:
+                img = img.crop((l, t, r, btm))
+        else:
+            # Fallback: remove dark background connected to image edges.
+            rgb = np.asarray(img, dtype=np.uint8)
+            hh0, ww0 = rgb.shape[:2]
+            rr = rgb[..., 0].astype(np.uint16)
+            gg = rgb[..., 1].astype(np.uint16)
+            bb = rgb[..., 2].astype(np.uint16)
+            gray = ((rr * 299 + gg * 587 + bb * 114) // 1000).astype(np.uint8)
+            near_black = gray <= 46
 
-        if active_cols.any() and active_rows.any():
-            l = int(np.argmax(active_cols))
-            r = int(len(active_cols) - np.argmax(active_cols[::-1]))
-            t = int(np.argmax(active_rows))
-            b = int(len(active_rows) - np.argmax(active_rows[::-1]))
+            visited = np.zeros((hh0, ww0), dtype=np.uint8)
+            stack: list[tuple[int, int]] = []
 
-            # Keep a tiny safety padding so we never shave slab edges.
-            pad = 2
-            l = max(0, l - pad)
-            t = max(0, t - pad)
-            r = min(w, r + pad)
-            b = min(h, b + pad)
+            top_x = np.where(near_black[0])[0]
+            bot_x = np.where(near_black[hh0 - 1])[0]
+            left_y = np.where(near_black[:, 0])[0]
+            right_y = np.where(near_black[:, ww0 - 1])[0]
 
-            if (r - l) > w * 0.35 and (b - t) > h * 0.35:
-                img = img.crop((l, t, r, b))
+            for x in top_x:
+                stack.append((0, int(x)))
+            for x in bot_x:
+                stack.append((hh0 - 1, int(x)))
+            for y in left_y:
+                stack.append((int(y), 0))
+            for y in right_y:
+                stack.append((int(y), ww0 - 1))
+
+            while stack:
+                y, x = stack.pop()
+                if y < 0 or y >= hh0 or x < 0 or x >= ww0:
+                    continue
+                if visited[y, x] or not near_black[y, x]:
+                    continue
+                visited[y, x] = 1
+                stack.append((y - 1, x))
+                stack.append((y + 1, x))
+                stack.append((y, x - 1))
+                stack.append((y, x + 1))
+
+            fg = visited == 0
+            ys, xs = np.where(fg)
+            if xs.size and ys.size:
+                l = int(xs.min())
+                r = int(xs.max()) + 1
+                t = int(ys.min())
+                btm = int(ys.max()) + 1
+                if (r - l) > ww0 * 0.35 and (btm - t) > hh0 * 0.35:
+                    img = img.crop((l, t, r, btm))
+
+        # Apply real rounded-corner cutout at preprocessing stage (not CSS-only).
+        rgba = img.convert("RGBA")
+        ww, hh = rgba.size
+        corner_radius = max(22, int(min(ww, hh) * 0.055))
+        mask = Image.new("L", (ww, hh), 0)
+        draw = ImageDraw.Draw(mask)
+        draw.rounded_rectangle((0, 0, ww - 1, hh - 1), radius=corner_radius, fill=255)
+        rgba.putalpha(mask)
 
         out = io.BytesIO()
-        img.save(out, format="WEBP", quality=92, method=6)
+        rgba.save(out, format="PNG", optimize=True)
         b64 = base64.b64encode(out.getvalue()).decode("utf-8")
-        return f"data:image/webp;base64,{b64}"
+        return f"data:image/png;base64,{b64}"
+    except Exception:
+        return src
+
+
+def _prepare_sbt_badge_image_for_poster(image_url: str) -> str:
+    src = str(image_url or "").strip()
+    if not src:
+        return ""
+    try:
+        from PIL import Image, ImageDraw
+        import numpy as np
+        import math
+
+        resp = requests.get(
+            src,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+        w, h = img.size
+        if w < 24 or h < 24:
+            return src
+
+        # Normalize to square first so all templates can reuse one stable prepared asset.
+        side = min(w, h)
+        l = (w - side) // 2
+        t = (h - side) // 2
+        img = img.crop((l, t, l + side, t + side))
+
+        # Build a clean hex mask (similar logic for all SBT badges).
+        s = img.size[0]
+        pad = max(1.0, s * 0.06)
+        cx = (s - 1) / 2.0
+        cy = (s - 1) / 2.0
+        radius = (s / 2.0) - pad
+        pts = []
+        for i in range(6):
+            ang = math.radians(-90 + i * 60)
+            x = cx + radius * math.cos(ang)
+            y = cy + radius * math.sin(ang)
+            pts.append((x, y))
+
+        mask = Image.new("L", (s, s), 0)
+        draw = ImageDraw.Draw(mask)
+        draw.polygon(pts, fill=255)
+
+        arr = np.array(img, dtype=np.uint8, copy=True)
+        alpha_src = arr[..., 3].astype(np.uint16)
+        alpha_hex = np.asarray(mask, dtype=np.uint16)
+        arr[..., 3] = np.minimum(alpha_src, alpha_hex).astype(np.uint8)
+        out_img = Image.fromarray(arr, mode="RGBA")
+
+        out = io.BytesIO()
+        out_img.save(out, format="PNG", optimize=True)
+        b64 = base64.b64encode(out.getvalue()).decode("utf-8")
+        return f"data:image/png;base64,{b64}"
     except Exception:
         return src
 
@@ -522,6 +719,9 @@ def _fetch_user_sbt_badges(username: str | None) -> list[dict]:
 
 
 def _resolve_user_from_wallet(wallet_address: str) -> tuple[str | None, str | None]:
+    wallet_address = _normalize_wallet_address(wallet_address or "") or str(wallet_address or "").strip().lower()
+    if not wallet_address:
+        return None, None
     offset = 0
     while offset <= PROFILE_SCAN_MAX_OFFSET:
         payload = {
@@ -671,9 +871,12 @@ def _build_wallet_profile_context(
     card_count: int = 10,
     selected_cards: list[str] | None = None,
     profile_lang: str = "en",
+    background_style: str = "classic",
 ) -> dict:
     profile_lang = _profile_lang_from_locale(profile_lang)
     ui_labels = _profile_ui_labels(profile_lang)
+    background_key = _normalize_profile_background_key(background_style)
+    background_image = _profile_background_data_uri(background_key)
     user_id, username = _resolve_user_from_wallet(wallet_address)
     if not user_id:
         raise RuntimeError("找不到此地址的公開收藏，無法反查 userId")
@@ -771,12 +974,13 @@ def _build_wallet_profile_context(
         name = str(b.get("name") or "").strip()
         if not name:
             continue
+        badge_image = _prepare_sbt_badge_image_for_poster(str(b.get("image_url") or "").strip())
         display_badges.append(
             {
                 "name": name,
                 "label": _compact_sbt_label(name),
                 "balance": _parse_int(b.get("balance")) or 0,
-                "image": str(b.get("image_url") or "").strip(),
+                "image": badge_image,
             }
         )
     poster_items = []
@@ -815,6 +1019,8 @@ def _build_wallet_profile_context(
             "brand_site": ui_labels["brand_site"],
             "update_date": datetime.now().strftime("%Y-%m-%d"),
             "enable_tilt": bool(enable_tilt),
+            "background_key": background_key,
+            "background_image": background_image,
         },
         "replacements": {
             "{{ card_name }}": html_lib.escape(f"{username or 'Unknown'} Vault"),
@@ -890,6 +1096,73 @@ async def _render_wallet_profile_poster(template_payload: dict, out_dir: str, sa
         device_scale_factor=2,
     )
     return out_path
+
+
+async def _generate_profile_background_previews(
+    wallet: str,
+    profile_lang: str,
+    preview_card_count: int = 10,
+) -> list[tuple[str, str]]:
+    os.makedirs(PROFILE_PREVIEW_CACHE_DIR, exist_ok=True)
+    normalized_wallet = _normalize_wallet_address(wallet) or str(wallet or "").strip().lower()
+    preview_card_count = _clamp_profile_card_count(preview_card_count)
+    template_sig = "0"
+    try:
+        template_sig = str(int(os.path.getmtime(PROFILE_TEMPLATE_PATH)))
+    except Exception:
+        pass
+
+    cache_seed = f"{PROFILE_PREVIEW_CACHE_VERSION}|{normalized_wallet}|{profile_lang}|{preview_card_count}|{template_sig}"
+    cache_hash = hashlib.md5(cache_seed.encode("utf-8")).hexdigest()[:14]
+    preview_paths: list[tuple[str, str]] = []
+    for bg_key in ("classic", "1", "2", "3"):
+        safe_name = f"profile_preview_{cache_hash}_bg_{bg_key}_top{preview_card_count}"
+        path = os.path.join(PROFILE_PREVIEW_CACHE_DIR, f"{safe_name}_profile.png")
+        preview_paths.append((bg_key, path))
+
+    now_ts = time.time()
+    cache_valid = True
+    for _, path in preview_paths:
+        if not os.path.exists(path):
+            cache_valid = False
+            break
+        if os.path.getsize(path) <= 0:
+            cache_valid = False
+            break
+        if (now_ts - os.path.getmtime(path)) > PROFILE_PREVIEW_CACHE_TTL_SEC:
+            cache_valid = False
+            break
+    if cache_valid:
+        return preview_paths
+
+    loop = asyncio.get_running_loop()
+    bg_labels = _profile_background_display_labels(profile_lang)
+    base_ctx = await loop.run_in_executor(
+        None,
+        _build_wallet_profile_context,
+        normalized_wallet,
+        [],
+        False,
+        preview_card_count,
+        [],
+        profile_lang,
+        "classic",
+    )
+
+    results: list[tuple[str, str]] = []
+    for bg_key, out_path in preview_paths:
+        preview_ctx = copy.deepcopy(base_ctx)
+        template_context = dict(preview_ctx.get("template_context") or {})
+        template_context["background_key"] = bg_key
+        template_context["background_image"] = _profile_background_data_uri(bg_key)
+        preview_ctx["template_context"] = template_context
+
+        safe_name = os.path.basename(out_path).removesuffix("_profile.png")
+        async with POSTER_SEMAPHORE:
+            rendered_path = await _render_wallet_profile_poster(preview_ctx, PROFILE_PREVIEW_CACHE_DIR, safe_name=safe_name)
+        results.append((bg_key, rendered_path))
+
+    return results
 
 
 def smart_split(text, limit=1900):
@@ -1743,12 +2016,36 @@ class ProfileTemplateSelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="Top 1", value="1", default=(default_count == 1)),
             discord.SelectOption(label="Top 3", value="3", default=(default_count == 3)),
+            discord.SelectOption(label="Top 4", value="4", default=(default_count == 4)),
+            discord.SelectOption(label="Top 5", value="5", default=(default_count == 5)),
             discord.SelectOption(label="Top 10", value="10", default=(default_count == 10)),
+        ]
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_template = _clamp_profile_card_count(_parse_int(self.values[0]))
+        await self.view.refresh(interaction)
+
+
+class ProfileBackgroundSelect(discord.ui.Select):
+    def __init__(
+        self,
+        default_key: str = "classic",
+        placeholder: str = "Background",
+        labels: dict[str, str] | None = None,
+    ):
+        normalized = _normalize_profile_background_key(default_key)
+        labels = labels or {}
+        options = [
+            discord.SelectOption(label=str(labels.get("classic") or "Classic")[:100], value="classic", default=(normalized == "classic")),
+            discord.SelectOption(label=str(labels.get("1") or "1")[:100], value="1", default=(normalized == "1")),
+            discord.SelectOption(label=str(labels.get("2") or "2")[:100], value="2", default=(normalized == "2")),
+            discord.SelectOption(label=str(labels.get("3") or "3")[:100], value="3", default=(normalized == "3")),
         ]
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options, row=1)
 
     async def callback(self, interaction: discord.Interaction):
-        self.view.selected_template = _clamp_profile_card_count(_parse_int(self.values[0]))
+        self.view.selected_background = _normalize_profile_background_key(self.values[0])
         await self.view.refresh(interaction)
 
 
@@ -1810,7 +2107,7 @@ class ProfileCardSelect(discord.ui.Select):
 
 class ProfileConfigView(discord.ui.View):
     def __init__(self, author_id: int, wallet: str, picker_data: dict, selected_lang: str):
-        super().__init__(timeout=180)
+        super().__init__(timeout=240)
         self.author_id = author_id
         self.wallet = wallet
         self.picker_data = picker_data or {}
@@ -1818,7 +2115,9 @@ class ProfileConfigView(discord.ui.View):
 
         self.selected_lang = _profile_lang_from_locale(selected_lang)
         self.texts = _profile_wizard_texts(self.selected_lang)
+        self.background_labels = _profile_background_display_labels(self.selected_lang)
         self.selected_template = 10
+        self.selected_background = "classic"
         self.selected_sbt_values: list[str] = []
         self.selected_card_values: list[str] = []
         self.bound_message: discord.Message | None = None
@@ -1835,6 +2134,13 @@ class ProfileConfigView(discord.ui.View):
         }
 
         self.add_item(ProfileTemplateSelect(self.selected_template, placeholder=self.texts["template_placeholder"]))
+        self.add_item(
+            ProfileBackgroundSelect(
+                self.selected_background,
+                placeholder=self.texts["background_placeholder"],
+                labels=self.background_labels,
+            )
+        )
         self.add_item(
             ProfileSBTSelect(
                 self.sbt_options,
@@ -1890,6 +2196,8 @@ class ProfileConfigView(discord.ui.View):
         owned_sbt_count = int((self.picker_data or {}).get("owned_sbt_count") or 0)
         lang_text = f"{LANG_FLAGS.get(self.selected_lang, '🌐')} {LANG_LABELS.get(self.selected_lang, self.selected_lang)}"
         template_text = f"Top {self.selected_template}"
+        bg_key = _normalize_profile_background_key(self.selected_background)
+        background_text = self.background_labels.get(bg_key, bg_key)
         sbt_text = self._selected_lines(self.selected_sbt_values, self.sbt_label_map)
         card_text = self._selected_lines(self.selected_card_values, self.card_label_map)
         return (
@@ -1900,6 +2208,7 @@ class ProfileConfigView(discord.ui.View):
             f"**{self.texts['current_selection_title']}**\n"
             f"{self.texts['lang_selected_label']}: **{lang_text}**\n"
             f"{self.texts['template_selected_label']}: **{template_text}**\n"
+            f"{self.texts['background_selected_label']}: **{background_text}**\n"
             f"{self.texts['sbt_selected_label']}:\n{sbt_text}\n"
             f"{self.texts['cards_selected_label']}:\n{card_text}\n\n"
             f"{self.texts['setup_tip']}"
@@ -1932,6 +2241,7 @@ class ProfileConfigView(discord.ui.View):
 
         selected_sbt = [] if use_default else list(self.selected_sbt_values)
         selected_cards = [] if use_default else list(self.selected_card_values)
+        selected_background = "classic" if use_default else self.selected_background
         template_count = self.selected_template
         out_dir = tempfile.mkdtemp(prefix=f"tcg_wallet_cfg_{interaction.id}_")
         loop = asyncio.get_running_loop()
@@ -1946,6 +2256,7 @@ class ProfileConfigView(discord.ui.View):
                 template_count,
                 selected_cards,
                 self.selected_lang,
+                selected_background,
             )
             safe_name = f"{self.username}_{self.wallet[-6:]}"
             async with POSTER_SEMAPHORE:
@@ -2239,13 +2550,68 @@ async def profile(interaction: discord.Interaction, address: str):
             pass
 
     loop = asyncio.get_running_loop()
+    bg_labels = _profile_background_display_labels(profile_lang)
 
     try:
-        picker_data = await loop.run_in_executor(
+        await thread.send(
+            _t(
+                profile_lang,
+                "🖼️ 已選擇語言，正在傳送四種背景模板預覽（Top 10）...",
+                "🖼️ Language selected. Sending 4 background template previews (Top 10)...",
+                "🖼️ 언어 선택 완료. 4가지 배경 템플릿 미리보기(Top 10)를 전송 중입니다...",
+                "🖼️ 已选择语言，正在发送四种背景模板预览（Top 10）...",
+            )
+        )
+
+        picker_task = loop.run_in_executor(
             None,
             _build_wallet_profile_picker_data,
             wallet,
         )
+        preview_task = asyncio.create_task(
+            _generate_profile_background_previews(
+                wallet=wallet,
+                profile_lang=profile_lang,
+                preview_card_count=10,
+            )
+        )
+
+        try:
+            previews = await preview_task
+            files = [discord.File(path) for _, path in previews if path and os.path.exists(path)]
+            legend = _t(
+                profile_lang,
+                f"預覽版本：`{bg_labels.get('classic', 'Classic')}` / `{bg_labels.get('1', '1')}` / `{bg_labels.get('2', '2')}` / `{bg_labels.get('3', '3')}`\n範例圖僅供參考",
+                f"Preview versions: `{bg_labels.get('classic', 'Classic')}` / `{bg_labels.get('1', '1')}` / `{bg_labels.get('2', '2')}` / `{bg_labels.get('3', '3')}`\nSample images are for reference only.",
+                f"미리보기 버전: `{bg_labels.get('classic', 'Classic')}` / `{bg_labels.get('1', '1')}` / `{bg_labels.get('2', '2')}` / `{bg_labels.get('3', '3')}`\n샘플 이미지는 참고용입니다.",
+                f"预览版本：`{bg_labels.get('classic', 'Classic')}` / `{bg_labels.get('1', '1')}` / `{bg_labels.get('2', '2')}` / `{bg_labels.get('3', '3')}`\n示例图仅供参考",
+            )
+            if files:
+                await thread.send(legend, files=files)
+            else:
+                await thread.send(
+                    _t(
+                        profile_lang,
+                        "⚠️ 預覽圖生成完成，但沒有可傳送檔案。",
+                        "⚠️ Preview generation finished, but no files were available to send.",
+                        "⚠️ 미리보기 생성은 완료됐지만 전송할 파일이 없습니다.",
+                        "⚠️ 预览图生成完成，但没有可传送文件。",
+                    )
+                )
+        except Exception as preview_err:
+            print(f"❌ /profile 預覽圖生成失敗: {preview_err}", file=sys.stderr)
+            print(traceback.format_exc(), file=sys.stderr)
+            await thread.send(
+                _t(
+                    profile_lang,
+                    f"⚠️ 預覽圖生成失敗，先進入設定：{preview_err}",
+                    f"⚠️ Preview generation failed, continuing to settings: {preview_err}",
+                    f"⚠️ 미리보기 생성에 실패하여 설정 화면으로 계속 진행합니다: {preview_err}",
+                    f"⚠️ 预览图生成失败，先进入设置：{preview_err}",
+                )
+            )
+
+        picker_data = await picker_task
         view = ProfileConfigView(interaction.user.id, wallet, picker_data, profile_lang)
         msg = await thread.send(view.render_message(), view=view)
         view.bind_message(msg)
