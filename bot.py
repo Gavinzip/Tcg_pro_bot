@@ -6,7 +6,6 @@ import shutil
 import tempfile
 import base64
 import io
-import glob
 import threading
 import asyncio
 import traceback
@@ -16,6 +15,7 @@ import re
 import html as html_lib
 import time
 import mimetypes
+import hashlib
 from collections import Counter, defaultdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -73,18 +73,22 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # /profile uses an isolated template bundle to avoid impacting normal card posters.
 PROFILE_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile＿beta.html")
 PROFILE_HISTORY_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_history_beta.html")
+PROFILE_EXTREMES_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_extremes_beta.html")
 PROFILE_LOGO_PATH = os.path.join(BASE_DIR, "templates", "profile", "logo.png")
 PROFILE_BACKGROUND_DIR = os.path.join(BASE_DIR, "templates", "backgorund")
-PROFILE_PREVIEW_DEMO_DIR = os.path.join(BASE_DIR, "templates", "backgorund", "demo")
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
+RENAISS_COLLECTIBLE_BY_TOKEN_URL = "https://www.renaiss.xyz/api/trpc/collectible.getCollectibleByTokenId"
 RENAISS_SBT_BADGES_URL = "https://www.renaiss.xyz/api/trpc/sbt.getUserBadges"
 RENAISS_ACTIVITY_LIST_URL = "https://www.renaiss.xyz/api/trpc/activity.getSubgraphUserActivities"
+RENAISS_TOKEN_ACTIVITY_URL = "https://www.renaiss.xyz/api/trpc/activity.getSubgraphTokenActivities"
 PROFILE_PAGE_LIMIT = max(10, min(100, int(os.getenv("PROFILE_PAGE_LIMIT", "100"))))
 PROFILE_SCAN_MAX_OFFSET = max(PROFILE_PAGE_LIMIT, int(os.getenv("PROFILE_SCAN_MAX_OFFSET", "5000")))
 PROFILE_API_MAX_RETRIES = max(1, int(os.getenv("PROFILE_API_MAX_RETRIES", "4")))
 PROFILE_API_RETRY_BACKOFF_SEC = max(0.2, float(os.getenv("PROFILE_API_RETRY_BACKOFF_SEC", "0.8")))
-PROFILE_ACTIVITY_PAGE_LIMIT = max(20, min(100, int(os.getenv("PROFILE_ACTIVITY_PAGE_LIMIT", "20"))))
+PROFILE_ACTIVITY_PAGE_LIMIT = max(1, min(50, int(os.getenv("PROFILE_ACTIVITY_PAGE_LIMIT", "50"))))
 PROFILE_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_ACTIVITY_MAX_PAGES", "120")))
+PROFILE_TOKEN_ACTIVITY_PAGE_LIMIT = max(1, min(50, int(os.getenv("PROFILE_TOKEN_ACTIVITY_PAGE_LIMIT", "50"))))
+PROFILE_TOKEN_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_TOKEN_ACTIVITY_MAX_PAGES", "20")))
 PROFILE_CARD_WITHDRAW_ADDRESS = str(
     os.getenv("PROFILE_CARD_WITHDRAW_ADDRESS", "0x341Edb3EdC1E45612E5704F29eC8d26fBb4072b4")
 ).strip().lower()
@@ -94,6 +98,9 @@ _WALLET_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _TRANSPARENT_CARD_IMAGE = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="
 _WEI_DECIMAL = Decimal("1000000000000000000")
 _CARD_FMV_CACHE: dict[str, Decimal] = {}
+_CARD_IMAGE_CACHE: dict[str, str] = {}
+_PREPARED_CARD_IMAGE_CACHE: dict[str, str] = {}
+PROFILE_PREPARED_CARD_CACHE_DIR = os.path.join(BASE_DIR, "templates", "profile", "cache_cards")
 _PROFILE_BACKGROUND_FILES = {
     "classic": None,
     "1": "1.jpg",
@@ -453,6 +460,56 @@ def _profile_history_labels(lang: str) -> dict[str, str]:
         "chip_unknown": "Unknown",
         "note_line_1": "Prices use PerpetualPullActivity first; missing rows are inferred from the same contract price.",
         "note_line_2": "Net = Total Earned - Total Spent; Holdings FMV is shown separately.",
+    }
+
+
+def _profile_extreme_labels(lang: str) -> dict[str, str]:
+    if lang == "zh":
+        return {
+            "title": "Historical Pull Extremes",
+            "subtitle": "歷史抽到卡片的最高 / 最低價值",
+            "high_label": "最高價值",
+            "low_label": "最低價值",
+            "no_data": "目前沒有可用的歷史抽卡資料",
+            "top_value_label": "歷史高低兩張總值",
+            "items_count_label": "歷史抽卡數",
+            "assets_unit": "張",
+            "sbt_badges_label": "歷史樣本",
+        }
+    if lang == "zhs":
+        return {
+            "title": "Historical Pull Extremes",
+            "subtitle": "历史抽到卡片的最高 / 最低价值",
+            "high_label": "最高价值",
+            "low_label": "最低价值",
+            "no_data": "暂无可用的历史抽卡数据",
+            "top_value_label": "历史高低两张总值",
+            "items_count_label": "历史抽卡数",
+            "assets_unit": "张",
+            "sbt_badges_label": "历史样本",
+        }
+    if lang == "ko":
+        return {
+            "title": "Historical Pull Extremes",
+            "subtitle": "과거 뽑기 카드의 최고 / 최저 가치",
+            "high_label": "최고 가치",
+            "low_label": "최저 가치",
+            "no_data": "사용 가능한 과거 뽑기 데이터가 없습니다",
+            "top_value_label": "히스토리 상/하 2장 총가치",
+            "items_count_label": "히스토리 뽑기 수",
+            "assets_unit": "장",
+            "sbt_badges_label": "히스토리 샘플",
+        }
+    return {
+        "title": "Historical Pull Extremes",
+        "subtitle": "Highest / Lowest value among historical pulls",
+        "high_label": "Highest Value",
+        "low_label": "Lowest Value",
+        "no_data": "No historical pull data available",
+        "top_value_label": "Historical Top/Bottom Pair Value",
+        "items_count_label": "Historical Pulls",
+        "assets_unit": "Cards",
+        "sbt_badges_label": "History Samples",
     }
 
 
@@ -1008,6 +1065,167 @@ def _extract_card_field_value(text: str, field: str) -> Decimal:
     return Decimal("0")
 
 
+def _trpc_collectible_by_token(token_id: str) -> dict:
+    token = str(token_id or "").strip()
+    if not token:
+        return {}
+    params = {
+        "batch": "1",
+        "input": json.dumps(
+            {"0": {"json": {"tokenId": token}, "meta": {"values": {"tokenId": ["bigint"]}}}},
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ),
+    }
+
+    last_err = None
+    for attempt in range(1, PROFILE_API_MAX_RETRIES + 1):
+        try:
+            resp = requests.get(RENAISS_COLLECTIBLE_BY_TOKEN_URL, params=params, timeout=25)
+            status = int(resp.status_code or 0)
+            if status == 429 or status >= 500:
+                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp.raise_for_status()
+
+            data = resp.json()
+            if not isinstance(data, list) or not data:
+                raise RuntimeError("collectible.getCollectibleByTokenId 回傳格式異常")
+            root = data[0]
+            if root.get("error"):
+                err_data = ((root.get("error") or {}).get("json") or {}).get("data") or {}
+                if int(err_data.get("httpStatus") or 0) == 404:
+                    return {}
+                err_msg = ((root.get("error") or {}).get("json") or {}).get("message") or "unknown error"
+                raise RuntimeError(f"collectible.getCollectibleByTokenId error: {err_msg}")
+            result = (((root.get("result") or {}).get("data") or {}).get("json") or {})
+            if not isinstance(result, dict):
+                raise RuntimeError("collectible.getCollectibleByTokenId result 缺失")
+            return result
+        except Exception as e:
+            last_err = e
+            status = None
+            if isinstance(e, requests.RequestException) and getattr(e, "response", None) is not None:
+                status = int(e.response.status_code or 0)
+            retryable = status in (408, 409, 425, 429) or (status is not None and status >= 500) or status is None
+            if retryable and attempt < PROFILE_API_MAX_RETRIES:
+                wait_sec = PROFILE_API_RETRY_BACKOFF_SEC * (2 ** (attempt - 1))
+                time.sleep(wait_sec)
+                continue
+            break
+
+    raise RuntimeError(f"collectible.getCollectibleByTokenId 請求失敗（已重試 {PROFILE_API_MAX_RETRIES} 次）：{last_err}")
+
+
+def _trpc_token_activities(
+    token_id: str,
+    cursor: str | None = None,
+    limit: int = PROFILE_TOKEN_ACTIVITY_PAGE_LIMIT,
+) -> dict:
+    token = str(token_id or "").strip()
+    if not token:
+        return {"activities": [], "nextCursor": None}
+    row = {
+        "json": {
+            "tokenId": token,
+            "limit": int(max(1, min(50, limit))),
+            "cursor": cursor,
+        }
+    }
+    if cursor is None:
+        row["meta"] = {"values": {"cursor": ["undefined"]}}
+    params = {
+        "batch": "1",
+        "input": json.dumps({"0": row}, separators=(",", ":"), ensure_ascii=False),
+    }
+
+    last_err = None
+    for attempt in range(1, PROFILE_API_MAX_RETRIES + 1):
+        try:
+            resp = requests.get(RENAISS_TOKEN_ACTIVITY_URL, params=params, timeout=25)
+            status = int(resp.status_code or 0)
+            if status == 429 or status >= 500:
+                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp.raise_for_status()
+
+            data = resp.json()
+            if not isinstance(data, list) or not data:
+                raise RuntimeError("activity.getSubgraphTokenActivities 回傳格式異常")
+            root = data[0]
+            if root.get("error"):
+                err_msg = ((root.get("error") or {}).get("json") or {}).get("message") or "unknown error"
+                raise RuntimeError(f"activity.getSubgraphTokenActivities error: {err_msg}")
+            result = (((root.get("result") or {}).get("data") or {}).get("json") or {})
+            if not isinstance(result, dict):
+                raise RuntimeError("activity.getSubgraphTokenActivities result 缺失")
+            return result
+        except Exception as e:
+            last_err = e
+            status = None
+            if isinstance(e, requests.RequestException) and getattr(e, "response", None) is not None:
+                status = int(e.response.status_code or 0)
+            retryable = status in (408, 409, 425, 429) or (status is not None and status >= 500) or status is None
+            if retryable and attempt < PROFILE_API_MAX_RETRIES:
+                wait_sec = PROFILE_API_RETRY_BACKOFF_SEC * (2 ** (attempt - 1))
+                time.sleep(wait_sec)
+                continue
+            break
+
+    raise RuntimeError(f"activity.getSubgraphTokenActivities 請求失敗（已重試 {PROFILE_API_MAX_RETRIES} 次）：{last_err}")
+
+
+def _fetch_card_trade_fallback_by_token_id(token_id: str) -> Decimal:
+    tid = str(token_id or "").strip()
+    if not tid:
+        return Decimal("0")
+    try:
+        activities = _fetch_token_activities(tid)
+        best_value = Decimal("0")
+        best_ts = -1
+        for row in activities:
+            if not isinstance(row, dict):
+                continue
+            row_type = str(row.get("__typename") or "").strip()
+            ts = _parse_int(row.get("timestamp")) or 0
+            price = Decimal("0")
+            if row_type in ("SellActivity", "BuyActivity"):
+                price = _wei_to_usdt(row.get("amount"))
+            elif row_type in ("PerpetualBuybackActivity", "BuybackActivity"):
+                price = _wei_to_usdt(row.get("priceInUsdt"))
+                if price <= 0:
+                    price = _wei_to_usdt(row.get("amount"))
+            if price > 0 and ts >= best_ts:
+                best_ts = ts
+                best_value = price
+        return best_value if best_value > 0 else Decimal("0")
+    except Exception:
+        return Decimal("0")
+
+
+def _fetch_token_activities(token_id: str) -> list[dict]:
+    all_rows: list[dict] = []
+    seen_cursors: set[str] = set()
+    cursor: str | None = None
+    tid = str(token_id or "").strip()
+    if not tid:
+        return all_rows
+
+    for _ in range(PROFILE_TOKEN_ACTIVITY_MAX_PAGES):
+        page = _trpc_token_activities(tid, cursor=cursor, limit=PROFILE_TOKEN_ACTIVITY_PAGE_LIMIT)
+        activities = page.get("activities") or []
+        if isinstance(activities, list):
+            all_rows.extend([x for x in activities if isinstance(x, dict)])
+        next_cursor = page.get("nextCursor")
+        if not next_cursor:
+            break
+        next_cursor = str(next_cursor)
+        if next_cursor in seen_cursors:
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+    return all_rows
+
+
 def _fetch_card_fmv_by_token_id(token_id: str) -> Decimal:
     tid = str(token_id or "").strip()
     if not tid:
@@ -1015,15 +1233,12 @@ def _fetch_card_fmv_by_token_id(token_id: str) -> Decimal:
     if tid in _CARD_FMV_CACHE:
         return _CARD_FMV_CACHE[tid]
 
-    url = f"https://www.renaiss.xyz/card/{tid}"
     value = Decimal("0")
     try:
-        resp = requests.get(url, timeout=20)
-        resp.raise_for_status()
-        html = resp.text or ""
-        fmv_raw = _extract_card_field_value(html, "fmvPriceInUSD")
-        buyback_raw = _extract_card_field_value(html, "buybackBaseValueInUSD")
-        ask_raw = _extract_card_field_value(html, "askPriceInUSDT")
+        collectible = _trpc_collectible_by_token(tid)
+        fmv_raw = _to_decimal(collectible.get("fmvPriceInUSD"))
+        buyback_raw = _to_decimal(collectible.get("buybackBaseValueInUSD"))
+        ask_raw = _to_decimal(collectible.get("askPriceInUSDT"))
         for candidate in (
             _card_price_to_usd(fmv_raw),
             _card_price_to_usd(buyback_raw),
@@ -1035,8 +1250,36 @@ def _fetch_card_fmv_by_token_id(token_id: str) -> Decimal:
     except Exception:
         value = Decimal("0")
 
+    # Burned/withdrawn cards may no longer be queryable by collectible token API.
+    # Fallback to the latest token-level trade/buyback amount as an estimated card value.
+    if value <= 0:
+        value = _fetch_card_trade_fallback_by_token_id(tid)
+
     _CARD_FMV_CACHE[tid] = value
     return value
+
+
+def _fetch_card_image_by_token_id(token_id: str) -> str:
+    tid = str(token_id or "").strip()
+    if not tid:
+        return ""
+    if tid in _CARD_IMAGE_CACHE:
+        return _CARD_IMAGE_CACHE[tid]
+
+    image_url = ""
+    try:
+        collectible = _trpc_collectible_by_token(tid)
+        image_url = str(
+            collectible.get("frontImageUrl")
+            or collectible.get("imageUrl")
+            or collectible.get("collectibleImageUrl")
+            or ""
+        ).strip()
+    except Exception:
+        image_url = ""
+
+    _CARD_IMAGE_CACHE[tid] = image_url
+    return image_url
 
 
 def _fetch_user_activities(wallet_address: str) -> list[dict]:
@@ -1113,6 +1356,16 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
     release_seen_open_keys: set[str] = set()
     legacy_seen_open_keys: set[str] = set()
     seen_withdraw_events: set[str] = set()
+    release_cards_by_token: dict[str, dict] = {}
+    token_latest_values: dict[str, tuple[int, Decimal]] = {}
+
+    def _remember_token_value(token_id: str, value: Decimal, ts_value: int):
+        tid = str(token_id or "").strip()
+        if not tid or value <= 0:
+            return
+        prev = token_latest_values.get(tid)
+        if prev is None or ts_value >= prev[0]:
+            token_latest_values[tid] = (ts_value, value)
 
     for row in activities:
         row_type = str(row.get("__typename") or "").strip()
@@ -1123,6 +1376,20 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         ts = _parse_int(row.get("timestamp"))
         if ts and ts > 0:
             ts_values.append(ts)
+        row_item = row.get("item") if isinstance(row.get("item"), dict) else {}
+        token_hint = str(row.get("nftTokenId") or row.get("tokenId") or row_item.get("tokenId") or "").strip()
+
+        if row_type == "PerpetualReleaseTokenActivity":
+            if token_hint:
+                current_release = release_cards_by_token.get(token_hint) or {}
+                current_ts = _parse_int(current_release.get("timestamp_raw"))
+                if not current_release or ts >= current_ts:
+                    release_cards_by_token[token_hint] = {
+                        "token_id": token_hint,
+                        "name": str(row_item.get("collectibleName") or row_item.get("title") or "Unknown Collectible").strip(),
+                        "image": str(row_item.get("imageUrl") or row_item.get("collectibleImageUrl") or "").strip(),
+                        "timestamp_raw": ts,
+                    }
 
         if row_type == "PerpetualPullActivity":
             checkout_id = str(row.get("checkoutId") or "").strip()
@@ -1169,10 +1436,13 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
                 buyback_price = _wei_to_usdt(row.get("amount"))
             if buyback_price > 0:
                 buyback_earned_total += buyback_price
+            fmv_hint = _card_price_to_usd(row.get("fmvPriceInUsd"))
+            _remember_token_value(token_hint, fmv_hint if fmv_hint > 0 else buyback_price, ts)
         elif row_type in ("BuyActivity", "SellActivity"):
             amount = _wei_to_usdt(row.get("amount"))
             if amount <= 0:
                 continue
+            _remember_token_value(token_hint, amount, ts)
             bidder = str(row.get("bidder") or "").strip().lower()
             asker = str(row.get("asker") or "").strip().lower()
             if bidder == wallet_norm:
@@ -1336,6 +1606,15 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         history_range = dt_min if dt_min == dt_max else f"{dt_min} ~ {dt_max}"
         active_days_count = max(1, int((ts_max - ts_min) // 86400) + 1)
 
+    release_cards = sorted(
+        (v for v in release_cards_by_token.values() if isinstance(v, dict)),
+        key=lambda x: _parse_int(x.get("timestamp_raw")),
+        reverse=True,
+    )
+    for card in release_cards:
+        card.pop("timestamp_raw", None)
+    token_value_hints = {k: v[1] for k, v in token_latest_values.items()}
+
     return {
         "labels": labels,
         "history_range": history_range,
@@ -1357,6 +1636,144 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         "active_days_count": active_days_count,
         "contract_rows": contract_rows,
         "activity_rows": activity_rows,
+        "release_cards": release_cards,
+        "token_value_hints": token_value_hints,
+    }
+
+
+def _build_wallet_extremes_template_context(
+    history_data: dict,
+    parsed_sorted: list[dict],
+    profile_name: str,
+    short_wallet: str,
+    profile_lang: str = "en",
+) -> dict:
+    labels = _profile_extreme_labels(_profile_lang_from_locale(profile_lang))
+    ui_labels = _profile_ui_labels(_profile_lang_from_locale(profile_lang))
+    current_cards_by_token: dict[str, dict] = {}
+    for row in parsed_sorted:
+        raw = (row or {}).get("raw") or {}
+        token_id = str(raw.get("tokenId") or "").strip()
+        if not token_id:
+            continue
+        value = _to_decimal((row or {}).get("fmv")) / Decimal("100")
+        current_cards_by_token[token_id] = {
+            "name": str(raw.get("name") or "Unknown Collectible"),
+            "image": str(raw.get("frontImageUrl") or ""),
+            "value": value,
+        }
+
+    release_cards = (history_data or {}).get("release_cards") or []
+    token_value_hints = (history_data or {}).get("token_value_hints") or {}
+
+    candidates: list[dict] = []
+    seen_tokens: set[str] = set()
+    for card in release_cards:
+        if not isinstance(card, dict):
+            continue
+        token_id = str(card.get("token_id") or "").strip()
+        if not token_id or token_id in seen_tokens:
+            continue
+        seen_tokens.add(token_id)
+        hinted_value = _to_decimal(token_value_hints.get(token_id))
+        current_info = current_cards_by_token.get(token_id) or {}
+        value = hinted_value if hinted_value > 0 else _to_decimal(current_info.get("value"))
+        if value <= 0:
+            continue
+        name = str(card.get("name") or current_info.get("name") or "Unknown Collectible")
+        # Prefer collection front image (usually graded slab render). If missing,
+        # try token-level collectible API before falling back to release image.
+        current_image = str(current_info.get("image") or "").strip()
+        release_image = str(card.get("image") or "").strip()
+        api_image = ""
+        if not current_image and (not release_image or "graded-cards-renders" not in release_image):
+            api_image = _fetch_card_image_by_token_id(token_id)
+        image = current_image or api_image or release_image
+        candidates.append(
+            {
+                "token_id": token_id,
+                "name": name,
+                "image": image,
+                "value": value,
+            }
+        )
+
+    if len(candidates) < 2:
+        for token_id, info in current_cards_by_token.items():
+            if token_id in seen_tokens:
+                continue
+            value = _to_decimal(info.get("value"))
+            if value <= 0:
+                continue
+            seen_tokens.add(token_id)
+            candidates.append(
+                {
+                    "token_id": token_id,
+                    "name": str(info.get("name") or "Unknown Collectible"),
+                    "image": str(info.get("image") or ""),
+                    "value": value,
+                }
+            )
+
+    if candidates:
+        highest = max(candidates, key=lambda x: (_to_decimal(x.get("value")), str(x.get("token_id") or "")))
+        lowest = min(candidates, key=lambda x: (_to_decimal(x.get("value")), str(x.get("token_id") or "")))
+        if str(highest.get("token_id")) == str(lowest.get("token_id")) and len(candidates) > 1:
+            ordered_low = sorted(candidates, key=lambda x: (_to_decimal(x.get("value")), str(x.get("token_id") or "")))
+            lowest = ordered_low[1]
+        has_data = True
+    else:
+        highest = {
+            "name": labels.get("no_data", "No historical pull data available"),
+            "image": _TRANSPARENT_CARD_IMAGE,
+            "value": Decimal("0"),
+        }
+        lowest = dict(highest)
+        has_data = False
+    items = [
+        {
+            "name": f"{labels.get('high_label', 'Highest Value')} / {str(highest.get('name') or 'Unknown Collectible')}",
+            "image": _prepare_collectible_image_for_poster(str(highest.get("image") or "")),
+            "value": _format_usdt_decimal(highest.get("value")),
+        },
+        {
+            "name": f"{labels.get('low_label', 'Lowest Value')} / {str(lowest.get('name') or 'Unknown Collectible')}",
+            "image": _prepare_collectible_image_for_poster(str(lowest.get("image") or "")),
+            "value": _format_usdt_decimal(lowest.get("value")),
+        },
+    ]
+    pair_total = _to_decimal(highest.get("value")) + _to_decimal(lowest.get("value"))
+
+    sbt_badges_display = []
+    if has_data:
+        sbt_badges_display = [
+            {"name": labels.get("high_label", "Highest Value"), "label": labels.get("high_label", "High"), "balance": 1, "image": ""},
+            {"name": labels.get("low_label", "Lowest Value"), "label": labels.get("low_label", "Low"), "balance": 1, "image": ""},
+        ]
+
+    return {
+        "collection_name": f"{profile_name} Collection",
+        "sbt_total": len(items) if has_data else 0,
+        "extreme_mode": True,
+        "hide_footer": True,
+        "sbt_badges_display": sbt_badges_display,
+        "items": items,
+        "assets_count": len(release_cards),
+        "total_value": _format_usdt_decimal(pair_total),
+        "total_value_label": labels.get("top_value_label", "Historical Top/Bottom Pair Value"),
+        "items_count_label": labels.get("items_count_label", ui_labels.get("items_count_label", "Items Count")),
+        "assets_unit": labels.get("assets_unit", ui_labels.get("assets_unit", "Assets")),
+        "sbt_badges_label": labels.get("sbt_badges_label", ui_labels.get("sbt_badges_label", "SBT Badges")),
+        "no_sbt_label": labels.get("no_data", ui_labels.get("no_sbt_label", "No data")),
+        "owned_prefix": ui_labels.get("owned_prefix", "owned "),
+        "brand_name": ui_labels.get("brand_name", "Renaiss"),
+        "brand_site": ui_labels.get("brand_site", "renaiss.xyz"),
+        "update_date": datetime.now().strftime("%Y-%m-%d"),
+        "enable_tilt": False,
+        "background_key": "classic",
+        "background_image": _profile_background_data_uri("classic"),
+        "_meta_wallet_short": short_wallet,
+        "_meta_subtitle": labels.get("subtitle", "Highest / Lowest value among historical pulls"),
     }
 
 
@@ -1481,13 +1898,55 @@ def _build_wallet_features_html(top_items: list[dict]) -> str:
 
 
 def _build_wallet_profile_picker_data(wallet_address: str) -> dict:
-    user_id, username = _resolve_user_from_wallet(wallet_address)
+    wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
+    wallet_short = (
+        f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else (wallet_norm or "Unknown User")
+    )
+    try:
+        user_id, username = _resolve_user_from_wallet(wallet_address)
+    except Exception:
+        user_id, username = None, None
     if not user_id:
-        raise RuntimeError("找不到此地址的公開收藏，無法反查 userId")
+        return {
+            "username": wallet_short,
+            "user_id": None,
+            "collection_count": 0,
+            "card_options": [],
+            "owned_sbt_count": 0,
+            "sbt_options": [],
+        }
 
-    collection = _fetch_user_collection(user_id)
+    try:
+        collection = _fetch_user_collection(user_id)
+    except Exception:
+        collection = []
     if not collection:
-        raise RuntimeError("已找到 userId，但目前沒有可用收藏資料")
+        sbt_badges = _fetch_user_sbt_badges(username)
+        owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
+        sbt_options = []
+        for b in owned_badges[:25]:
+            name = str(b.get("name") or "").strip()
+            if not name:
+                continue
+            sbt_id = str(b.get("sbt_id") or "").strip()
+            balance = _parse_int(b.get("balance")) or 0
+            value = f"id:{sbt_id}" if sbt_id else f"name:{name.lower()}"
+            sbt_options.append(
+                {
+                    "value": value[:100],
+                    "label": name[:100],
+                    "full_label": name[:160],
+                    "description": f"Balance {balance}"[:100],
+                }
+            )
+        return {
+            "username": str(username or wallet_short),
+            "user_id": user_id,
+            "collection_count": 0,
+            "card_options": [],
+            "owned_sbt_count": len(owned_badges),
+            "sbt_options": sbt_options,
+        }
 
     parsed = []
     for item in collection:
@@ -1560,13 +2019,20 @@ def _build_wallet_profile_context(
     ui_labels = _profile_ui_labels(profile_lang)
     background_key = _normalize_profile_background_key(background_style)
     background_image = _profile_background_data_uri(background_key)
-    user_id, username = _resolve_user_from_wallet(wallet_address)
-    if not user_id:
-        raise RuntimeError("找不到此地址的公開收藏，無法反查 userId")
-
-    collection = _fetch_user_collection(user_id)
-    if not collection:
-        raise RuntimeError("已找到 userId，但目前沒有可用收藏資料")
+    try:
+        user_id, username = _resolve_user_from_wallet(wallet_address)
+    except Exception:
+        user_id, username = None, None
+    wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
+    short_wallet = f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm
+    if user_id:
+        try:
+            collection = _fetch_user_collection(user_id)
+        except Exception:
+            collection = []
+    else:
+        collection = []
+    has_collection = bool(collection)
 
     parsed = []
     for item in collection:
@@ -1580,7 +2046,7 @@ def _build_wallet_profile_context(
         )
 
     parsed_sorted = sorted(parsed, key=lambda x: x["fmv"], reverse=True)
-    hero = parsed_sorted[0]["raw"]
+    hero = parsed_sorted[0]["raw"] if parsed_sorted else {}
     total_count = len(parsed_sorted)
     listed_count = sum(1 for x in parsed_sorted if x["ask"] is not None)
     listed_ratio = (listed_count / total_count) if total_count else 0.0
@@ -1629,8 +2095,8 @@ def _build_wallet_profile_context(
     </div>
     """.strip()
 
-    short_wallet = f"{wallet_address[:6]}...{wallet_address[-4:]}"
     hero_name = str(hero.get("name") or "Collection Overview")
+    profile_name = str(username or short_wallet or "Unknown User")
     sbt_badges = _fetch_user_sbt_badges(username)
     sbt_total = sum((b.get("balance") or 0) for b in sbt_badges)
     owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
@@ -1703,6 +2169,8 @@ def _build_wallet_profile_context(
             "active_days_count": 0,
             "contract_rows": [],
             "activity_rows": [],
+            "release_cards": [],
+            "token_value_hints": {},
         }
     history_labels = history_data.get("labels") or _profile_history_labels(profile_lang)
     history_activity_rows = history_data.get("activity_rows") or []
@@ -1712,7 +2180,7 @@ def _build_wallet_profile_context(
     net_with_holdings = cash_net + holdings_value
 
     history_template_context = {
-        "collection_name": f"{username or 'Unknown'} Collection",
+        "collection_name": f"{profile_name} Collection",
         "brand_name": ui_labels["brand_name"],
         "brand_site": ui_labels["brand_site"],
         "wallet_short": history_data.get("wallet_short") or short_wallet,
@@ -1771,17 +2239,25 @@ def _build_wallet_profile_context(
         "contract_rows": history_contract_rows,
         "activity_rows": history_activity_rows,
     }
+    extremes_template_context = _build_wallet_extremes_template_context(
+        history_data=history_data,
+        parsed_sorted=parsed_sorted,
+        profile_name=profile_name,
+        short_wallet=(history_data.get("wallet_short") or short_wallet),
+        profile_lang=profile_lang,
+    )
 
     return {
-        "username": str(username or "Unknown User"),
+        "username": profile_name,
         "user_id": user_id,
         "wallet_address": wallet_address,
+        "profile_poster_enabled": bool(has_collection and len(poster_items_raw) > 0),
         "count": total_count,
         "total_fmv": total_fmv,
         "shown_count": len(poster_items_raw),
         "shown_fmv": poster_total_fmv,
         "template_context": {
-            "collection_name": f"{username or 'Unknown'} Collection",
+            "collection_name": f"{profile_name} Collection",
             "sbt_total": sbt_total,
             "sbt_badges_display": display_badges,
             "items": poster_items,
@@ -1801,6 +2277,7 @@ def _build_wallet_profile_context(
             "background_image": background_image,
         },
         "history_template_context": history_template_context,
+        "extreme_template_context": extremes_template_context,
         "history_summary": {
             "opened_packs": history_data.get("opened_packs_count", 0),
             "total_spent": history_data.get("total_spent", Decimal("0")),
@@ -1814,7 +2291,7 @@ def _build_wallet_profile_context(
             "card_withdraw_total": history_data.get("card_withdraw_total", Decimal("0")),
         },
         "replacements": {
-            "{{ card_name }}": html_lib.escape(f"{username or 'Unknown'} Vault"),
+            "{{ card_name }}": html_lib.escape(f"{profile_name} Vault"),
             "{{ card_set }}": html_lib.escape("Renaiss Collection"),
             "{{ card_number }}": html_lib.escape(str(total_count)),
             "{{ category }}": html_lib.escape("WALLET PROFILE"),
@@ -1833,7 +2310,7 @@ def _build_wallet_profile_context(
             "{{ competitive_freq_width }}": str(competitive_freq_width),
             "{{ competitive_freq_desc }}": html_lib.escape(competitive_freq_desc),
             "{{ features_html }}": _build_wallet_features_html(top_items_raw),
-            "{{ illustrator }}": html_lib.escape(str(username or "Unknown")),
+            "{{ illustrator }}": html_lib.escape(profile_name),
             "{{ release_info }}": html_lib.escape(f"{short_wallet} · TOP: {hero_name[:30]}"),
         },
     }
@@ -1934,31 +2411,50 @@ async def _render_wallet_profile_history_poster(template_payload: dict, out_dir:
     return out_path
 
 
-async def _generate_profile_background_previews(
-    wallet: str,
-    profile_lang: str,
-    preview_card_count: int = 10,
-) -> list[tuple[str, str]]:
-    preview_card_count = _clamp_profile_card_count(preview_card_count)
-    demo_dir = PROFILE_PREVIEW_DEMO_DIR
-    if not os.path.isdir(demo_dir):
-        raise RuntimeError(f"找不到預覽圖資料夾: {demo_dir}")
+async def _render_wallet_profile_extreme_poster(template_payload: dict, out_dir: str, safe_name: str = "wallet_profile") -> str:
+    template_path = PROFILE_EXTREMES_TEMPLATE_PATH
+    if not os.path.exists(template_path):
+        raise FileNotFoundError(f"找不到 profile extremes template: {template_path}")
 
-    results: list[tuple[str, str]] = []
-    missing: list[str] = []
-    for bg_key in ("classic", "1", "2", "3"):
-        exact = glob.glob(os.path.join(demo_dir, f"*_bg_{bg_key}_top{preview_card_count}_profile.png"))
-        fallback = [] if exact else glob.glob(os.path.join(demo_dir, f"*_bg_{bg_key}_top*_profile.png"))
-        candidates = sorted((exact or fallback), key=lambda p: os.path.getmtime(p), reverse=True)
-        if not candidates:
-            missing.append(bg_key)
-            continue
-        results.append((bg_key, candidates[0]))
+    if isinstance(template_payload, dict):
+        template_context = template_payload.get("extreme_template_context") or {}
+        replacements = template_payload.get("extreme_replacements") or {}
+    else:
+        template_context = {}
+        replacements = {}
 
-    if missing:
-        raise RuntimeError(f"demo 預覽圖缺少背景: {', '.join(missing)}（路徑: {demo_dir}）")
+    with open(template_path, "r", encoding="utf-8") as f:
+        html_doc = f.read()
 
-    return results
+    if os.path.exists(PROFILE_LOGO_PATH):
+        with open(PROFILE_LOGO_PATH, "rb") as logo_f:
+            logo_bytes = logo_f.read()
+        logo_bytes = image_generator._strip_white_border_background_png(logo_bytes)
+        logo_b64 = base64.b64encode(logo_bytes).decode("utf-8")
+        logo_src = f"data:image/png;base64,{logo_b64}"
+        html_doc = html_doc.replace('src="logo.png"', f'src="{logo_src}"').replace("src='logo.png'", f"src='{logo_src}'")
+
+    if template_context and ("{%" in html_doc or "{{" in html_doc):
+        try:
+            from jinja2 import Template
+        except ModuleNotFoundError as e:
+            raise RuntimeError("缺少套件 jinja2，請先安裝 `pip install -r requirements.txt`") from e
+        html_doc = Template(html_doc).render(**template_context)
+
+    for key, value in replacements.items():
+        html_doc = html_doc.replace(key, str(value))
+
+    os.makedirs(out_dir, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_]+", "_", safe_name).strip("_") or "wallet_profile"
+    out_path = os.path.join(out_dir, f"{safe}_profile_extremes.png")
+    await image_generator._render_single_html_poster(
+        html_doc,
+        out_path,
+        width=1200,
+        height=900,
+        device_scale_factor=2,
+    )
+    return out_path
 
 
 def smart_split(text, limit=1900):
@@ -3046,21 +3542,41 @@ class ProfileConfigView(discord.ui.View):
                 selected_background,
             )
             safe_name = f"{self.username}_{self.wallet[-6:]}"
+            poster_enabled = bool(profile_ctx.get("profile_poster_enabled", True))
+            poster_path = None
+            extremes_path = None
             async with POSTER_SEMAPHORE:
-                poster_path = await _render_wallet_profile_poster(profile_ctx, out_dir, safe_name=safe_name)
                 history_path = await _render_wallet_profile_history_poster(profile_ctx, out_dir, safe_name=safe_name)
+                extremes_path = await _render_wallet_profile_extreme_poster(profile_ctx, out_dir, safe_name=safe_name)
+                if poster_enabled:
+                    poster_path = await _render_wallet_profile_poster(profile_ctx, out_dir, safe_name=safe_name)
             history_summary = profile_ctx.get("history_summary") or {}
+            history_only_hint = ""
+            if not poster_enabled:
+                history_only_hint = _t(
+                    self.selected_lang,
+                    "（此地址目前無可展示卡片，僅生成歷史海報）\n",
+                    "(No collectible cards found for page 1, history poster only)\n",
+                    "(1페이지에 표시할 카드가 없어 히스토리 포스터만 생성)\n",
+                    "（该地址目前无可展示卡片，仅生成历史海报）\n",
+                )
             summary = (
                 f"✅ **{self.username}** · {self.texts['summary_done']}\n"
+                f"{history_only_hint}"
                 f"{self.texts['wallet_label']}: `{self.wallet}`\n"
                 f"{self.texts['shown_label']}: **{profile_ctx.get('shown_count', 0)}** | "
                 f"{self.texts['shown_fmv_label']}: **{_format_fmv_usd(_parse_int(profile_ctx.get('shown_fmv')))}**\n"
                 f"History · Opened Packs: **{_format_number(history_summary.get('opened_packs'))}** | "
                 f"Net: **{_format_usdt_currency(history_summary.get('net_total'), signed=True)}**"
             )
+            files = [discord.File(history_path)]
+            if extremes_path and os.path.exists(extremes_path):
+                files.append(discord.File(extremes_path))
+            if poster_path and os.path.exists(poster_path):
+                files.insert(0, discord.File(poster_path))
             await interaction.followup.send(
                 summary,
-                files=[discord.File(poster_path), discord.File(history_path)],
+                files=files,
             )
         except Exception as e:
             print(f"❌ ProfileConfigView 生成失敗: {e}", file=sys.stderr)

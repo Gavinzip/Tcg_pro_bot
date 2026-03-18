@@ -9,3 +9,5 @@ run_logs/
 run_debug_*.log
 .git.disabled*/
 _archive/
+debug_wallet_profile_latest/
+logs/

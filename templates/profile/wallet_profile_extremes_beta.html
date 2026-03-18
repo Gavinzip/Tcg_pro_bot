@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <title>Wallet Collection Poster</title>
+    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&amp;display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet" />
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <script id="tailwind-config">
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        "holo-cyan": "#e0f7fa",
+                        "holo-purple": "#ede7f6",
+                        "holo-gold": "#fff8e1",
+                        "premium-gold": "#d4af37",
+                        "premium-gold-light": "#ffea8c",
+                        "premium-gold-dark": "#aa8323",
+                        "text-main": "#0f172a",
+                        "text-muted": "#64748b",
+                    },
+                    fontFamily: {
+                        "display": ["Manrope", '"Noto Sans TC"', "sans-serif"]
+                    }
+                },
+            },
+        }
+    </script>
+    <style>
+        :root {
+            --foil-1: #ffeaa0;
+            --foil-2: #d4af37;
+            --foil-3: #9f7a1f;
+            --glass-edge: rgba(255, 255, 255, 0.88);
+            --glass-bg: rgba(255, 255, 255, 0.46);
+            --card-scale: 1;
+            --card-pos-x: 50%;
+            --card-pos-y: 50%;
+            --card-shift-x: 0%;
+            --card-shift-y: 0%;
+            --card-crop-top: 0%;
+            --card-crop-right: 0%;
+            --card-crop-bottom: 0%;
+            --card-crop-left: 0%;
+            --frame-side-gap: 0%;
+            --card-corner-radius: 22px;
+            --card-fine-scale: 1;
+            --card-fine-shift-x: 0px;
+            --card-fine-shift-y: 0px;
+            --header-panel-opacity: 1;
+            --gold-gradient: linear-gradient(135deg, #fff6cc 0%, #ffd700 25%, #d4af37 50%, #b8962e 75%, #fff2a6 100%);
+            --gold-glow-soft: 0 0 8px rgba(255, 215, 0, 0.45), 0 0 16px rgba(255, 215, 0, 0.24);
+            --gold-glow-strong: 0 0 10px rgba(255, 215, 0, 0.56), 0 0 20px rgba(255, 215, 0, 0.30);
+        }
+
+        body {
+            font-family: 'Manrope', 'Noto Sans TC', sans-serif;
+            width: 1200px;
+            min-height: 900px;
+            margin: 0 auto;
+            background: #f8f9fa;
+            color: #0f172a;
+        }
+
+        .dark-metal-text {
+            background: linear-gradient(135deg, #0f172a 0%, #334155 50%, #0f172a 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .holo-title {
+            background: linear-gradient(95deg, #1f4bff 0%, #0abf8a 34%, #f2b705 66%, #ff5a2f 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: none;
+        }
+
+        .glass-container {
+            background:
+                radial-gradient(120% 120% at 10% 15%, rgba(255, 255, 255, 0.88) 0%, rgba(255, 255, 255, 0) 45%),
+                linear-gradient(140deg, rgba(255,255,255,0.96) 0%, rgba(255,255,255,0.66) 56%, rgba(248,250,252,0.62) 100%);
+            backdrop-filter: blur(40px);
+            -webkit-backdrop-filter: blur(40px);
+            border: 1px solid rgba(255,255,255,1);
+            box-shadow: 
+                0 35px 70px rgba(15, 23, 42, 0.08),
+                inset 0 2px 12px rgba(255,255,255,0.9),
+                inset 0 -2px 12px rgba(0,0,0,0.03);
+            border-radius: 0;
+        }
+
+        .glass-container.bg-photo-mode {
+            background:
+                radial-gradient(120% 120% at 10% 15%, rgba(255, 255, 255, 0.38) 0%, rgba(255, 255, 255, 0) 45%),
+                linear-gradient(140deg, rgba(255,255,255,0.46) 0%, rgba(255,255,255,0.25) 56%, rgba(248,250,252,0.22) 100%);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+            border: 1px solid rgba(255,255,255,0.72);
+            box-shadow:
+                0 22px 46px rgba(15, 23, 42, 0.10),
+                inset 0 1px 7px rgba(255,255,255,0.62),
+                inset 0 -1px 6px rgba(0,0,0,0.02);
+        }
+
+        .glass-container.bg-photo-mode.bg-photo-mode-3 {
+            background:
+                radial-gradient(120% 120% at 10% 15%, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0) 45%),
+                linear-gradient(140deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.08) 56%, rgba(248,250,252,0.05) 100%);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255,255,255,0.28);
+            box-shadow:
+                0 18px 36px rgba(15, 23, 42, 0.12),
+                inset 0 1px 4px rgba(255,255,255,0.16),
+                inset 0 -1px 4px rgba(0,0,0,0.03);
+        }
+
+        .prismatic-border {
+            position: relative;
+        }
+        .prismatic-border::before {
+            content: "";
+            position: absolute;
+            inset: -2px;
+            border-radius: inherit;
+            background: linear-gradient(120deg, #e0f7fa, #ede7f6, #fff8e1, #e0f7fa);
+            background-size: 200% 200%;
+            z-index: -1;
+            opacity: 0.6;
+            filter: blur(4px);
+        }
+
+        .bg-photo-mode.prismatic-border::before { opacity: 0.3; }
+        .bg-photo-mode-3.prismatic-border::before { opacity: 0.12; }
+
+        .noise-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+            opacity: 0.025;
+            pointer-events: none;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+        }
+
+        .extreme-duality .noise-overlay {
+            opacity: 0.06;
+            mix-blend-mode: soft-light;
+        }
+
+        /* =====================
+           EXTREME DUALITY CORE
+           ===================== */
+        .extreme-duality {
+            border-radius: 0;
+            border: none;
+            background: transparent;
+            backdrop-filter: none;
+            -webkit-backdrop-filter: none;
+            box-shadow: none;
+            /* CRITICAL: must be visible so italic text doesn't clip */
+            overflow: visible !important;
+        }
+
+        .extreme-split-bg {
+            position: absolute;
+            inset: 0;
+            z-index: 0;
+            pointer-events: none;
+            border-radius: 0;
+            overflow: hidden;
+            /* 
+             * Ultra-smooth multi-stop gradient with wider transition zone.
+             * Extra color stops in the 38-58% range to eliminate banding.
+             */
+            background:
+                /* Left side atmosphere */
+                radial-gradient(ellipse 60% 55% at 18% 22%, rgba(140, 210, 255, 0.22) 0%, transparent 70%),
+                radial-gradient(ellipse 45% 50% at 12% 75%, rgba(200, 150, 230, 0.18) 0%, transparent 65%),
+                radial-gradient(ellipse 35% 40% at 35% 50%, rgba(180, 215, 245, 0.14) 0%, transparent 60%),
+                /* Right side hell atmosphere — spread evenly, subtle premium glow */
+                radial-gradient(ellipse 40% 35% at 78% 18%, rgba(140, 10, 30, 0.20) 0%, transparent 60%),
+                radial-gradient(ellipse 35% 30% at 90% 35%, rgba(120, 8, 25, 0.16) 0%, transparent 55%),
+                radial-gradient(ellipse 45% 40% at 72% 55%, rgba(100, 5, 20, 0.14) 0%, transparent 60%),
+                radial-gradient(ellipse 40% 38% at 85% 72%, rgba(130, 12, 28, 0.18) 0%, transparent 55%),
+                radial-gradient(ellipse 30% 25% at 65% 85%, rgba(90, 5, 15, 0.10) 0%, transparent 55%),
+                radial-gradient(ellipse 25% 20% at 95% 90%, rgba(110, 8, 22, 0.14) 0%, transparent 50%),
+                radial-gradient(ellipse 50% 45% at 80% 45%, rgba(80, 4, 14, 0.12) 0%, transparent 65%),
+                /* Base gradient — smooth purple-black transition (original tones) */
+                linear-gradient(
+                    to right,
+                    #ffffff  0%,
+                    #f5faff  5%,
+                    #eaf4ff 10%,
+                    #daeeff 16%,
+                    #c0dff5 24%,
+                    #a0bdd4 32%,
+                    #88a0b8 36%,
+                    #708698 39%,
+                    #5e7080 41%,
+                    #4e5c6a 43%,
+                    #3e4855 45%,
+                    #323844 47%,
+                    #282c38 49%,
+                    #1e2230 51%,
+                    #181c28 53%,
+                    #121620 55%,
+                    #0d1018 57%,
+                    #0a0c12 60%,
+                    #06080e 65%,
+                    #040508 72%,
+                    #020305 82%,
+                    #000000 100%
+                );
+        }
+
+        /* Wide center haze — heavy blur to mask any residual banding */
+        .extreme-center-haze {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 50%;
+            width: 280px;
+            transform: translateX(-50%);
+            z-index: 1;
+            pointer-events: none;
+            background: linear-gradient(
+                to right,
+                rgba(255,255,255,0)       0%,
+                rgba(160, 185, 210, 0.20) 20%,
+                rgba(100, 130, 170, 0.32) 38%,
+                rgba(40, 35, 55, 0.38)    50%,
+                rgba(15, 12, 25, 0.40)    62%,
+                rgba(8, 5, 15, 0.22)      80%,
+                rgba(255,255,255,0)       100%
+            );
+            filter: blur(36px);
+            opacity: 0.9;
+        }
+
+        .glass-container[data-hide-footer="1"] .cards-block {
+            padding-bottom: 0.7rem;
+        }
+
+        .extreme-duality .header-block,
+        .extreme-duality .cards-block {
+            position: relative;
+            z-index: 2;
+        }
+
+        /* Upright title in extreme mode */
+        .extreme-duality .header-title {
+            color: #f8fafc;
+            background: none;
+            -webkit-text-fill-color: currentColor;
+            text-transform: none;
+            font-style: normal;
+            letter-spacing: 0.01em;
+            font-weight: 800;
+            text-shadow: 0 2px 16px rgba(6, 14, 30, 0.35);
+            white-space: nowrap;
+            font-size: 3.32rem !important;
+            line-height: 1.1 !important;
+            overflow: visible !important;
+            display: inline-block;
+        }
+
+        .extreme-duality .header-right {
+            max-width: 72%;
+            padding-right: 14px;
+            padding-left: 14px;
+            overflow: visible !important;
+        }
+
+        .extreme-title-heaven {
+            background: linear-gradient(100deg, #ffd54a 0%, #ff9f43 24%, #55eac8 64%, #4db8ff 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .extreme-title-neutral {
+            background: linear-gradient(160deg, #8a9bb0 0%, #d0d8e4 22%, #f0f3f8 42%, #b8c4d4 62%, #8a9bb0 80%, #c8d2de 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            filter: drop-shadow(0 1px 3px rgba(180, 195, 220, 0.3));
+        }
+
+        .extreme-duality .header-meta {
+            display: none !important;
+        }
+
+        .extreme-compare {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2.2rem;
+            width: 100%;
+            height: 100%;
+            align-items: center;
+            justify-items: center;
+        }
+
+        .extreme-slot {
+            width: 100%;
+            max-width: 470px;
+            min-height: 580px;
+            border-radius: 0;
+            padding: 1.5rem 1.5rem 1.2rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            overflow: visible;
+        }
+
+        .extreme-heaven, .extreme-hell {
+            background: transparent;
+            border: none;
+            box-shadow: none;
+        }
+
+        .extreme-card-box {
+            width: min(330px, 86%);
+            aspect-ratio: 2.58/3.58;
+            border-radius: 0;
+            overflow: visible;
+            border: none;
+            box-shadow: none;
+            margin-bottom: 1rem;
+        }
+
+        .extreme-card-art {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+
+        .extreme-price {
+            font-size: 3rem;
+            font-weight: 900;
+            line-height: 1;
+            letter-spacing: -0.015em;
+            margin-top: 0.2rem;
+            color: #f8fafc;
+            text-shadow: 0 4px 18px rgba(0, 0, 0, 0.34);
+            position: relative;
+            display: inline-block;
+        }
+
+        .extreme-heaven .extreme-price {
+            color: transparent;
+            background: linear-gradient(
+                154deg,
+                #1a0e02 0%,
+                #573f0f 10%,
+                #c9982e 22%,
+                #ffe88a 32%,
+                #fffdf0 40%,
+                #ffe07a 48%,
+                #d4a730 56%,
+                #a07818 66%,
+                #e8c450 76%,
+                #fff5c8 84%,
+                #c49520 92%,
+                #2a1e08 100%
+            );
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            filter: drop-shadow(0 2px 6px rgba(255, 210, 80, 0.55)) drop-shadow(0 0 18px rgba(255, 200, 60, 0.35));
+        }
+
+        .extreme-hell .extreme-price {
+            color: #f8fafc;
+            text-shadow: 0 4px 18px rgba(0, 0, 0, 0.44);
+        }
+
+        .extreme-name {
+            margin-top: 0.6rem;
+            max-width: 92%;
+            text-align: center;
+            font-size: 0.84rem;
+            font-weight: 800;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            line-height: 1.35;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .extreme-heaven .extreme-name { color: #334155; }
+        .extreme-hell .extreme-name { color: #dbe5ff; }
+
+        /* Label badges */
+        .extreme-slot .extreme-label {
+            font-size: 0.7rem;
+            font-weight: 900;
+            letter-spacing: 0.22em;
+            text-transform: uppercase;
+            padding: 0.28rem 0.9rem;
+            border-radius: 99px;
+            margin-bottom: 1.2rem;
+        }
+        .extreme-heaven .extreme-label {
+            background: rgba(255,230,100,0.18);
+            color: #8a6a10;
+            border: 1px solid rgba(200,160,40,0.35);
+        }
+        .extreme-hell .extreme-label {
+            background: rgba(200,20,40,0.18);
+            color: #ff8888;
+            border: 1px solid rgba(200,20,40,0.4);
+        }
+
+        .poster-bg-image {
+            position: absolute;
+            inset: 0;
+            z-index: 0;
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+        }
+
+        .poster-bg-image.bg-style-3 {
+            filter: blur(3px) saturate(0.96);
+            transform: scale(1.03);
+            transform-origin: center;
+        }
+
+        .bg-key-3 .noise-overlay { opacity: 0.012; }
+
+        .item-card {
+            background: transparent;
+            border: none;
+            backdrop-filter: none;
+            box-shadow: none;
+            transition: none;
+            position: relative;
+            overflow: visible;
+        }
+        .item-card::before, .item-card::after { content: none; }
+        .item-card:hover { transform: none; background: transparent; box-shadow: none; }
+
+        @keyframes edgeFlow {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        .item-card.compact { padding: 0; }
+
+        .price-tag {
+            display: inline-flex;
+            align-items: baseline;
+            justify-content: center;
+            gap: 0.28rem;
+            line-height: 1;
+            font-weight: 900;
+            transform: translateY(15px);
+            position: relative;
+        }
+        .price-tag::before { content: none; }
+
+        .price-currency {
+            font-size: 1.15rem;
+            font-weight: 900;
+            background: linear-gradient(140deg, #7f5b14 0%, #d7b34a 45%, #9f7828 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: 0 1px 7px rgba(238, 199, 92, 0.34);
+            transform: translateY(-0.03em);
+            position: relative;
+            z-index: 1;
+        }
+
+        .price-value {
+            background: linear-gradient(140deg, #7f5b14 0%, #d7b34a 45%, #9f7828 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -0.01em;
+            font-size: 1.9rem;
+            text-shadow: 0 2px 9px rgba(226, 189, 72, 0.30);
+            position: relative;
+            z-index: 1;
+        }
+
+        .price-unit {
+            background: linear-gradient(140deg, #7f5b14 0%, #d7b34a 45%, #9f7828 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-size: 0.82rem;
+            font-weight: 900;
+            letter-spacing: 0.1em;
+            text-shadow: 0 1px 6px rgba(226, 189, 72, 0.28);
+            transform: translateY(-0.16em);
+            position: relative;
+            z-index: 1;
+        }
+
+        .card-frame {
+            position: relative;
+            isolation: auto;
+            background: transparent;
+            border: none;
+            width: 100%;
+            margin-left: 0;
+            margin-right: 0;
+            box-shadow: none;
+            transition: none;
+            overflow: hidden;
+            filter: drop-shadow(0 8px 12px rgba(15, 23, 42, 0.14));
+        }
+        .card-frame::before, .card-frame::after { content: none; }
+
+        [data-tilt="on"] .item-card:nth-child(odd) .card-frame { transform: none; }
+        [data-tilt="on"] .item-card:nth-child(even) .card-frame { transform: none; }
+        [data-tilt="on"] .item-card:hover .card-frame { transform: none; }
+
+        .card-art {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            object-position: var(--card-pos-x) var(--card-pos-y);
+            transform: translate(var(--card-fine-shift-x), var(--card-fine-shift-y)) scale(var(--card-fine-scale));
+            transform-origin: center;
+            clip-path: none;
+            filter: saturate(1.03) contrast(1.02);
+            transition: none;
+        }
+        .group:hover .card-art { transform: none; }
+
+        .foil-label {
+            font-size: 11px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 0.22em;
+            color: #64748b;
+            margin-bottom: 8px;
+        }
+
+        .foil-number {
+            font-size: 56px;
+            font-weight: 900;
+            line-height: 1;
+            letter-spacing: -0.03em;
+            background: linear-gradient(140deg, #5f420a 0%, #b58b28 43%, #7c5a16 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: 0 2px 10px rgba(212, 175, 55, 0.32);
+        }
+
+        .foil-unit {
+            background: linear-gradient(140deg, #5f420a 0%, #b58b28 43%, #7c5a16 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-size: 13px;
+            font-weight: 900;
+            letter-spacing: 0.15em;
+            margin-left: 8px;
+            transform: translateY(-0.42em);
+        }
+
+        .foil-currency {
+            background: linear-gradient(140deg, #5f420a 0%, #b58b28 43%, #7c5a16 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-size: 22px;
+            font-weight: 900;
+            transform: translateY(-0.22em);
+            margin-right: 4px;
+        }
+
+        .stat-value-row {
+            min-height: 58px;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            line-height: 1;
+        }
+
+        .footer-block {
+            margin-top: 2.7rem;
+            padding-top: 0.55rem;
+        }
+
+        .summary-stats {
+            transform: translateY(10px);
+            align-items: flex-end;
+        }
+
+        .asset-number {
+            font-size: 42px;
+            font-weight: 900;
+            letter-spacing: -0.015em;
+            color: #0f172a;
+            line-height: 1;
+        }
+
+        .asset-unit {
+            font-size: 12px;
+            font-weight: 900;
+            letter-spacing: 0.14em;
+            color: #64748b;
+            margin-left: 8px;
+            transform: translateY(-0.42em);
+        }
+
+        .sbt-panel {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 0.5rem;
+            min-height: 0;
+            justify-content: flex-start;
+            padding-top: 0.05rem;
+        }
+
+        .sbt-title {
+            font-size: 11px;
+            font-weight: 900;
+            text-transform: uppercase;
+            letter-spacing: 0.2em;
+            color: #64748b;
+        }
+
+        .sbt-list {
+            display: grid;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            gap: 0.42rem;
+            width: 560px;
+        }
+
+        .sbt-badge {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.28rem;
+            text-align: center;
+        }
+
+        .sbt-badge-icon {
+            width: 56px;
+            height: 56px;
+            border-radius: 0;
+            object-fit: contain;
+            border: none;
+            box-shadow: none;
+            flex-shrink: 0;
+            background: transparent;
+            display: block;
+            filter: drop-shadow(0 5px 10px rgba(15, 23, 42, 0.28));
+        }
+
+        .sbt-badge-fallback {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #8f97aa;
+            font-size: 18px;
+            font-weight: 800;
+        }
+
+        .sbt-badge-name {
+            max-width: 80px;
+            min-height: 28px;
+            font-size: 9px;
+            font-weight: 800;
+            line-height: 1.15;
+            letter-spacing: 0.02em;
+            color: #667085;
+            white-space: normal;
+            word-break: break-word;
+        }
+
+        .sbt-badge-count {
+            font-size: 9px;
+            font-weight: 900;
+            color: #9f7a1f;
+        }
+
+        .header-block {
+            align-items: flex-start;
+            overflow: visible;
+        }
+
+        .header-right {
+            max-width: 70%;
+            padding: 0;
+            min-width: 0;
+            flex-shrink: 1;
+            overflow: visible;
+            background: transparent;
+            border: none;
+            box-shadow: none;
+        }
+        .header-right::before, .header-right::after { content: none; }
+
+        .header-title {
+            display: inline-block;
+            line-height: 1.28 !important;
+            margin-bottom: 0.1rem;
+            padding-top: 0;
+            padding-bottom: 0.28em;
+            background: linear-gradient(
+                to left,
+                #1b56ff 0%,
+                #17b8ff 25%,
+                #18cc90 50%,
+                #f4bf18 74%,
+                #ff5a35 100%
+            );
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            color: transparent;
+            overflow-wrap: anywhere;
+            overflow: visible !important;
+            filter: saturate(1.73) contrast(1.08);
+            text-shadow:
+                0 1px 0 rgba(255, 255, 255, 0.3),
+                0 2px 0 rgba(255, 255, 255, 0.12),
+                0 5px 10px rgba(16, 36, 66, 0.26);
+        }
+
+        .header-meta {
+            line-height: 1;
+            min-height: 0;
+            overflow: visible;
+            color: #64748b !important;
+            text-shadow: none;
+        }
+        .header-meta span,
+        .header-meta .material-symbols-outlined { color: inherit !important; }
+
+        .brand-wrap { transform: translateY(-10px); }
+
+        .brand-name {
+            font-size: 32px;
+            font-weight: 900;
+            letter-spacing: 0.03em;
+            color: #2a3d59;
+            text-shadow:
+                0 1px 0 rgba(255,255,255,0.9),
+                0 2px 0 rgba(190, 206, 228, 0.8),
+                0 6px 10px rgba(17, 30, 52, 0.24);
+            line-height: 1;
+        }
+
+        .items-label { color: #64748b !important; }
+        .summary-divider { background: rgba(15, 23, 42, 0.06) !important; }
+        .footer-block { border-top-color: rgba(15, 23, 42, 0.08) !important; }
+
+        .bg-bright-text .brand-name {
+            color: #ffffff;
+            text-shadow: 0 1px 0 rgba(255,255,255,0.55), 0 6px 12px rgba(9, 15, 28, 0.34);
+        }
+        .bg-bright-text .header-meta,
+        .bg-bright-text .header-meta span,
+        .bg-bright-text .header-meta .material-symbols-outlined {
+            color: rgba(255, 255, 255, 0.96) !important;
+            text-shadow: 0 2px 8px rgba(8, 12, 20, 0.34);
+        }
+        .bg-bright-text .foil-label,
+        .bg-bright-text .items-label,
+        .bg-bright-text .asset-unit,
+        .bg-bright-text .sbt-title,
+        .bg-bright-text .sbt-badge-name,
+        .bg-bright-text .sbt-badge-count { color: rgba(255, 255, 255, 0.92) !important; }
+        .bg-bright-text .asset-number { color: #ffffff; }
+        .bg-bright-text .sbt-badge-fallback { color: rgba(255, 255, 255, 0.75); }
+        .bg-bright-text .summary-divider { background: rgba(255, 255, 255, 0.22) !important; }
+        .bg-bright-text .footer-block { border-top-color: rgba(255, 255, 255, 0.18) !important; }
+
+        .bg-vivid-gold .price-currency,
+        .bg-vivid-gold .price-value,
+        .bg-vivid-gold .price-unit,
+        .bg-vivid-gold .foil-number,
+        .bg-vivid-gold .foil-unit,
+        .bg-vivid-gold .foil-currency {
+            background: var(--gold-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .bg-key-2 .brand-name {
+            color: #2a3d59 !important;
+            text-shadow: 0 1px 0 rgba(255,255,255,0.9), 0 2px 0 rgba(190, 206, 228, 0.8), 0 6px 10px rgba(17, 30, 52, 0.24);
+        }
+        .bg-key-2 .foil-number,
+        .bg-key-2 .foil-unit,
+        .bg-key-2 .foil-currency {
+            background: linear-gradient(140deg, #8c6518 0%, #e6c252 46%, #c49a34 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .brand-suffix {
+            font-size: 0.58em;
+            letter-spacing: 0.08em;
+            margin-left: 0.08em;
+            vertical-align: baseline;
+        }
+
+        /* Dynamic Grid */
+        .grid-layout-1 { display: flex; justify-content: center; align-items: center; height: 100%; }
+        .grid-layout-1 .item-card { width: 470px; padding: 2rem; }
+        .grid-layout-1 .item-card .card-frame { aspect-ratio: 2.58/3.58; }
+
+        [data-item-count="1"] .cards-block { justify-content: flex-start; padding-top: 0.1rem; }
+        [data-item-count="1"] .grid-layout-1 { height: auto; align-items: flex-start; }
+        [data-item-count="1"] .grid-layout-1 .item-card { width: 374px; padding: 1rem 0.85rem 1.05rem; border-radius: 1.5rem; margin-top: -6px; }
+        [data-item-count="1"] .grid-layout-1 .item-card .card-frame { margin-bottom: 0.65rem; }
+        [data-item-count="1"] .grid-layout-1 .price-value { font-size: 2.05rem; }
+        [data-item-count="1"] .grid-layout-1 .price-currency { font-size: 1.16rem; }
+        [data-item-count="1"] .grid-layout-1 .price-unit { font-size: 0.78rem; }
+
+        .grid-layout-2, .grid-layout-3 { display: flex; justify-content: center; gap: 2.3rem; align-items: center; height: 100%; }
+        .grid-layout-2 .item-card, .grid-layout-3 .item-card { width: 340px; }
+
+        .grid-layout-4, .grid-layout-5 { display: grid; row-gap: 1rem; align-content: center; }
+        .grid-layout-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 0.35rem; }
+        .grid-layout-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); column-gap: 0.62rem; }
+        .grid-layout-4 .item-card, .grid-layout-5 .item-card { width: 100%; max-width: none; justify-self: center; padding: 0.26rem 0 0.6rem; }
+        .grid-layout-4 .item-card .card-frame, .grid-layout-5 .item-card .card-frame { margin-bottom: 0.56rem; }
+
+        .grid-layout-6 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 1.15rem; row-gap: 1.25rem; align-content: center; }
+        .grid-layout-6 .item-card { width: 100%; max-width: 224px; justify-self: center; padding: 0.68rem 0.55rem 0.78rem; }
+
+        .grid-layout-7, .grid-layout-8, .grid-layout-9, .grid-layout-10 { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); column-gap: 0.95rem; row-gap: 1.45rem; align-content: center; }
+        .grid-layout-7 .item-card, .grid-layout-8 .item-card, .grid-layout-9 .item-card, .grid-layout-10 .item-card { width: 100%; max-width: 176px; justify-self: center; padding: 0.46rem 0.34rem 0.54rem; border-radius: 1rem; }
+        .grid-layout-7 .item-card .card-frame, .grid-layout-8 .item-card .card-frame, .grid-layout-9 .item-card .card-frame, .grid-layout-10 .item-card .card-frame { margin-bottom: 0.42rem; }
+        .grid-layout-7 .price-value, .grid-layout-8 .price-value, .grid-layout-9 .price-value, .grid-layout-10 .price-value { font-size: 1.42rem; }
+        .grid-layout-7 .price-currency, .grid-layout-8 .price-currency, .grid-layout-9 .price-currency, .grid-layout-10 .price-currency { font-size: 0.92rem; }
+        .grid-layout-7 .price-unit, .grid-layout-8 .price-unit, .grid-layout-9 .price-unit, .grid-layout-10 .price-unit { font-size: 0.62rem; }
+
+        [data-grid-rows="two"] .header-block { margin-bottom: 1.2rem; }
+        [data-grid-rows="two"] .cards-block { padding-top: 0.45rem; padding-bottom: 0.12rem; }
+        [data-grid-rows="two"] .footer-block { margin-top: 2.2rem; padding-top: 0.5rem; }
+    </style>
+</head>
+
+{% set _bgkey = (background_key or 'classic') %}
+{% set _is_extreme = extreme_mode %}
+<body class="bg-[#f8f9fa] flex items-center justify-center p-0 m-0 overflow-hidden relative min-h-[900px] {% if background_image %}bg-transparent{% endif %} {% if _bgkey == '2' %}bg-key-2{% endif %} {% if _bgkey == '3' %}bg-key-3 bg-vivid-gold{% endif %} {% if _bgkey in ['2', '3'] %}bg-bright-text{% endif %}">
+
+    {% if background_image %}
+    <div class="poster-bg-image {% if _bgkey == '3' %}bg-style-3{% endif %}" style="background-image: {% if _bgkey == '3' %}linear-gradient(160deg, rgba(248,249,250,0.004) 0%, rgba(248,249,250,0.000) 100%){% else %}linear-gradient(160deg, rgba(248,249,250,0.03) 0%, rgba(248,249,250,0.01) 100%){% endif %}, url('{{ background_image }}');"></div>
+    {% endif %}
+
+    <div class="noise-overlay"></div>
+
+    {% if _bgkey == 'classic' and not _is_extreme %}
+    <div class="absolute top-[-10%] left-[-10%] w-[600px] h-[600px] bg-[#0044ff] rounded-full mix-blend-multiply filter blur-[150px] opacity-10 animate-pulse"></div>
+    <div class="absolute top-[20%] right-[-10%] w-[600px] h-[600px] bg-[#00dd88] rounded-full mix-blend-multiply filter blur-[150px] opacity-10"></div>
+    <div class="absolute bottom-[-10%] left-[20%] w-[600px] h-[600px] bg-[#ffdd00] rounded-full mix-blend-multiply filter blur-[150px] opacity-10"></div>
+    <div class="absolute bottom-[10%] right-[10%] w-[500px] h-[500px] bg-[#ff5500] rounded-full mix-blend-multiply filter blur-[150px] opacity-10"></div>
+    {% endif %}
+
+    <!-- Main Container — overflow:visible when extreme so italic title never clips -->
+    <div class="relative w-[1200px] h-[900px] glass-container prismatic-border {% if background_image %}bg-photo-mode{% endif %} {% if _bgkey == '3' %}bg-photo-mode-3{% endif %} {% if _is_extreme %}extreme-duality{% endif %} flex flex-col pt-12 px-12 pb-4 z-10 {% if _is_extreme %}overflow-visible{% else %}overflow-hidden{% endif %}" data-tilt="{% if enable_tilt %}on{% else %}off{% endif %}" data-grid-rows="{% if items|length > 5 %}two{% else %}one{% endif %}" data-item-count="{{ items|length }}" data-hide-footer="{% if hide_footer %}1{% else %}0{% endif %}">
+        {% if _is_extreme %}
+        <div class="extreme-split-bg"></div>
+        <div class="extreme-center-haze"></div>
+        {% endif %}
+
+        <!-- Header -->
+        <div class="header-block flex justify-between items-center mb-7">
+            <div class="brand-wrap flex items-center gap-3">
+                <img src="logo.png" alt="Logo" class="h-[100px] w-auto object-contain drop-shadow-sm" />
+                {% set _brand = brand_name or 'Renaiss' %}
+                <div class="brand-name">{{ _brand }}{% if '.xyz' not in _brand|lower %}<span class="brand-suffix">.XYZ</span>{% endif %}</div>
+            </div>
+            <div class="header-right text-right">
+                <h1 class="header-title holo-title text-5xl font-black tracking-tight">
+                    {% if _is_extreme %}
+                    <span class="extreme-title-heaven">Heaven</span>
+                    <span class="extreme-title-neutral">and Hell</span>
+                    {% else %}
+                    {{ collection_name }}
+                    {% endif %}
+                </h1>
+                <div class="header-meta flex items-center justify-end gap-2 text-text-muted">
+                    <span class="material-symbols-outlined text-sm leading-none">workspace_premium</span>
+                    <span class="text-sm font-bold tracking-wider">SBT {{ sbt_total }}</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Dynamic Content Area -->
+        <div class="cards-block flex-1 min-h-0 flex flex-col justify-center">
+            {% if _is_extreme %}
+            {% set heaven_item = items[0] if items|length > 0 else none %}
+            {% set hell_item = items[1] if items|length > 1 else heaven_item %}
+            <div class="extreme-compare">
+                <div class="extreme-slot extreme-heaven">
+                    {% if heaven_item %}
+
+                    <div class="extreme-card-box">
+                        <img src="{{ heaven_item.image }}" alt="{{ heaven_item.name }}" class="extreme-card-art" />
+                    </div>
+                    <div class="extreme-price">${{ heaven_item.value }}</div>
+                    <div class="extreme-name">{{ heaven_item.name }}</div>
+                    {% endif %}
+                </div>
+                <div class="extreme-slot extreme-hell">
+                    {% if hell_item %}
+
+                    <div class="extreme-card-box">
+                        <img src="{{ hell_item.image }}" alt="{{ hell_item.name }}" class="extreme-card-art" />
+                    </div>
+                    <div class="extreme-price">${{ hell_item.value }}</div>
+                    <div class="extreme-name">{{ hell_item.name }}</div>
+                    {% endif %}
+                </div>
+            </div>
+            {% else %}
+            <div class="grid-layout-{{ items|length }}">
+                {% for item in items %}
+                <div class="item-card compact rounded-3xl flex flex-col items-center group relative">
+                    <div class="card-frame relative w-full aspect-[2.58/3.58] mb-4">
+                        <img src="{{ item.image }}" alt="{{ item.name }}" class="card-art" />
+                    </div>
+                    <div class="w-full text-center space-y-2">
+                        <div class="flex justify-center">
+                            <div class="price-tag"><span class="price-currency">$</span><span class="price-value">{{ item.value }}</span><span class="price-unit">USD</span></div>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+
+        {% if not hide_footer %}
+        <div class="footer-block border-t border-black/5 flex justify-between items-start">
+            <div class="summary-stats flex gap-10">
+                <div class="flex flex-col">
+                    <span class="foil-label">{{ total_value_label or ('Top ' ~ (items|length) ~ ' Total Value') }}</span>
+                    <div class="stat-value-row">
+                        <span class="foil-currency">$</span>
+                        <span class="foil-number">{{ total_value }}</span>
+                        <span class="foil-unit">USD</span>
+                    </div>
+                </div>
+                <div class="summary-divider h-12 w-px bg-black/5"></div>
+                <div class="flex flex-col">
+                    <span class="items-label text-[11px] font-black text-text-muted uppercase tracking-[0.2em] mb-2">{{ items_count_label or 'Items Count' }}</span>
+                    <div class="stat-value-row">
+                        <span class="asset-number">{{ assets_count or items|length }}</span><span class="asset-unit">{{ assets_unit or 'Assets' }}</span>
+                    </div>
+                </div>
+            </div>
+            <div class="sbt-panel">
+                <span class="sbt-title">{{ sbt_badges_label or 'SBT Badges' }}</span>
+                <div class="sbt-list">
+                    {% if sbt_badges_display and sbt_badges_display|length > 0 %}
+                        {% for badge in sbt_badges_display %}
+                        <div class="sbt-badge" title="{{ badge.name }}">
+                            {% if badge.image %}
+                            <img src="{{ badge.image }}" alt="{{ badge.name }}" class="sbt-badge-icon" />
+                            {% else %}
+                            <span class="sbt-badge-icon sbt-badge-fallback">•</span>
+                            {% endif %}
+                            <span class="sbt-badge-name">{{ badge.label }}</span>
+                            {% if badge.balance and badge.balance > 1 %}
+                            <span class="sbt-badge-count">{{ owned_prefix or 'owned ' }}{{ badge.balance }}</span>
+                            {% endif %}
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="sbt-badge">
+                            <span class="sbt-badge-icon sbt-badge-fallback">-</span>
+                            <span class="sbt-badge-name">{{ no_sbt_label or 'No SBT' }}</span>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+</body>
+</html>
