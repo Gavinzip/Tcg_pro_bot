@@ -62,6 +62,32 @@ MAX_CONCURRENT_REPORTS = max(
     1, int(os.getenv("MAX_CONCURRENT_REPORTS", os.getenv("MAX_CONCURRENT_IMAGES", "6")))
 )
 MAX_CONCURRENT_POSTERS = max(1, int(os.getenv("MAX_CONCURRENT_POSTERS", "3")))
+AUTO_IMAGE_THREAD_MONITOR_ENABLED = str(os.getenv("AUTO_IMAGE_THREAD_MONITOR_ENABLED", "0")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+_AUTO_IMAGE_THREAD_CHANNEL_IDS_RAW = str(os.getenv("AUTO_IMAGE_THREAD_CHANNEL_IDS", "")).strip()
+AUTO_IMAGE_THREAD_CHANNEL_IDS = {
+    int(tok) for tok in re.split(r"[,\s;]+", _AUTO_IMAGE_THREAD_CHANNEL_IDS_RAW) if tok.strip().isdigit()
+}
+try:
+    _AUTO_IMAGE_THREAD_ARCHIVE_REQ = int(str(os.getenv("AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN", "1440")).strip())
+except Exception:
+    _AUTO_IMAGE_THREAD_ARCHIVE_REQ = 1440
+AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN = (
+    _AUTO_IMAGE_THREAD_ARCHIVE_REQ
+    if _AUTO_IMAGE_THREAD_ARCHIVE_REQ in (60, 1440, 4320, 10080)
+    else 1440
+)
+AUTO_IMAGE_THREAD_NAME_PREFIX = str(os.getenv("AUTO_IMAGE_THREAD_NAME_PREFIX", "圖片討論")).strip() or "圖片討論"
+AUTO_IMAGE_THREAD_POST_NOTE = str(os.getenv("AUTO_IMAGE_THREAD_POST_NOTE", "1")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -2873,6 +2899,65 @@ def _parse_lang_override(content_lower: str) -> str | None:
     return None
 
 
+def _is_image_attachment(att: discord.Attachment) -> bool:
+    filename = str(getattr(att, "filename", "") or "").lower()
+    content_type = str(getattr(att, "content_type", "") or "").lower()
+    if content_type.startswith("image/"):
+        return True
+    return any(filename.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"])
+
+
+def _can_auto_thread_in_message(message: discord.Message, bot_mentioned: bool) -> bool:
+    if not AUTO_IMAGE_THREAD_MONITOR_ENABLED:
+        return False
+    if not AUTO_IMAGE_THREAD_CHANNEL_IDS:
+        return False
+    if bot_mentioned:
+        # Keep this feature isolated from mention-triggered analysis flow.
+        return False
+    if message.guild is None:
+        return False
+    if isinstance(message.channel, discord.Thread):
+        return False
+    if int(getattr(message.channel, "id", 0) or 0) not in AUTO_IMAGE_THREAD_CHANNEL_IDS:
+        return False
+    if not getattr(message, "attachments", None):
+        return False
+    if not any(_is_image_attachment(a) for a in message.attachments):
+        return False
+    if bool(getattr(message, "has_thread", False)):
+        return False
+    if getattr(message, "thread", None) is not None:
+        return False
+    return True
+
+
+def _build_auto_image_thread_name(message: discord.Message) -> str:
+    display_name = str(getattr(message.author, "display_name", "") or getattr(message.author, "name", "") or "user").strip()
+    display_name = re.sub(r"\s+", " ", display_name)
+    ts_text = datetime.now().strftime("%m%d-%H%M")
+    base = f"{AUTO_IMAGE_THREAD_NAME_PREFIX}｜{display_name}｜{ts_text}"
+    return base[:100]
+
+
+async def _maybe_create_auto_image_thread(message: discord.Message, bot_mentioned: bool):
+    if not _can_auto_thread_in_message(message, bot_mentioned):
+        return
+    try:
+        thread_name = _build_auto_image_thread_name(message)
+        thread = await message.create_thread(
+            name=thread_name,
+            auto_archive_duration=AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN,
+        )
+        if AUTO_IMAGE_THREAD_POST_NOTE:
+            image_count = sum(1 for a in message.attachments if _is_image_attachment(a))
+            await thread.send(f"🧵 已自動建立圖片討論串（{image_count} 張）")
+    except discord.Forbidden:
+        print("⚠️ AUTO_IMAGE_THREAD: 權限不足，無法建立討論串", file=sys.stderr)
+    except Exception as e:
+        print(f"⚠️ AUTO_IMAGE_THREAD: 建立討論串失敗: {e}", file=sys.stderr)
+
+
 def _json_loads_loose(text: str):
     cleaned = (text or "").replace("```json", "").replace("```", "").strip()
     try:
@@ -3532,6 +3617,12 @@ async def on_ready():
         print(f"✅ 全域 Slash Commands 同步嘗試完成 (全球更新可能需 1 小時)")
     except Exception as e:
         print(f"⚠️ 全域同步失敗: {e}")
+    if AUTO_IMAGE_THREAD_MONITOR_ENABLED:
+        if AUTO_IMAGE_THREAD_CHANNEL_IDS:
+            ids_text = ", ".join(str(x) for x in sorted(AUTO_IMAGE_THREAD_CHANNEL_IDS))
+            print(f"🧵 AUTO_IMAGE_THREAD 已啟用，監控頻道: {ids_text}，封存分鐘: {AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN}")
+        else:
+            print("⚠️ AUTO_IMAGE_THREAD 已啟用，但未設定 AUTO_IMAGE_THREAD_CHANNEL_IDS")
 
 class PCSelect(discord.ui.Select):
     def __init__(self, candidates):
@@ -4248,7 +4339,12 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    if client.user in message.mentions:
+    bot_mentioned = client.user in message.mentions
+
+    # Independent feature: monitor specific channels and auto-create image discussion threads.
+    await _maybe_create_auto_image_thread(message, bot_mentioned)
+
+    if bot_mentioned:
         content_lower = message.content.lower().strip()
         
         # --- 強制同步指令 (文字備援方案) ---
@@ -4273,7 +4369,7 @@ async def on_message(message):
             content_lower = message.content.lower()
             valid_attachments = [
                 a for a in message.attachments
-                if any(a.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp'])
+                if _is_image_attachment(a)
             ]
             if not valid_attachments:
                 return
