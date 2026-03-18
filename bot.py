@@ -62,32 +62,6 @@ MAX_CONCURRENT_REPORTS = max(
     1, int(os.getenv("MAX_CONCURRENT_REPORTS", os.getenv("MAX_CONCURRENT_IMAGES", "6")))
 )
 MAX_CONCURRENT_POSTERS = max(1, int(os.getenv("MAX_CONCURRENT_POSTERS", "3")))
-AUTO_IMAGE_THREAD_MONITOR_ENABLED = str(os.getenv("AUTO_IMAGE_THREAD_MONITOR_ENABLED", "0")).strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-_AUTO_IMAGE_THREAD_CHANNEL_IDS_RAW = str(os.getenv("AUTO_IMAGE_THREAD_CHANNEL_IDS", "")).strip()
-AUTO_IMAGE_THREAD_CHANNEL_IDS = {
-    int(tok) for tok in re.split(r"[,\s;]+", _AUTO_IMAGE_THREAD_CHANNEL_IDS_RAW) if tok.strip().isdigit()
-}
-try:
-    _AUTO_IMAGE_THREAD_ARCHIVE_REQ = int(str(os.getenv("AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN", "1440")).strip())
-except Exception:
-    _AUTO_IMAGE_THREAD_ARCHIVE_REQ = 1440
-AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN = (
-    _AUTO_IMAGE_THREAD_ARCHIVE_REQ
-    if _AUTO_IMAGE_THREAD_ARCHIVE_REQ in (60, 1440, 4320, 10080)
-    else 1440
-)
-AUTO_IMAGE_THREAD_NAME_PREFIX = str(os.getenv("AUTO_IMAGE_THREAD_NAME_PREFIX", "圖片討論")).strip() or "圖片討論"
-AUTO_IMAGE_THREAD_POST_NOTE = str(os.getenv("AUTO_IMAGE_THREAD_POST_NOTE", "1")).strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -270,7 +244,7 @@ def _short_hex(value: str | None) -> str:
 
 
 def _clamp_profile_card_count(value: int | None) -> int:
-    if value in (1, 3, 4, 5, 10):
+    if value in (1, 3, 4, 5, 7, 10):
         return int(value)
     return 10
 
@@ -633,7 +607,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "收藏數量",
             "selectable_sbt_label": "可選 SBT",
             "setup_tip": "請選模板、SBT、卡片後按「生成海報」。若不選 SBT/卡片，會用預設（依 FMV 由高到低）。",
-            "template_placeholder": "1) 選擇模板（Top 1 / Top 3 / Top 4 / Top 5 / Top 10）",
+            "template_placeholder": "1) 選擇模板（Top 1 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10）",
             "background_placeholder": "2) 選擇背景（經典 / 超級甲賀忍蛙 / 妙蛙花 / 小智與皮卡丘）",
             "sbt_placeholder": "2) 複選 SBT（可略過）",
             "card_placeholder": "3) 複選卡片（可略過）",
@@ -667,7 +641,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "收藏数量",
             "selectable_sbt_label": "可选 SBT",
             "setup_tip": "请选择模板、SBT、卡片后点击“生成海报”。若不选 SBT/卡片，将使用默认（按 FMV 从高到低）。",
-            "template_placeholder": "1) 选择模板（Top 1 / Top 3 / Top 4 / Top 5 / Top 10）",
+            "template_placeholder": "1) 选择模板（Top 1 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10）",
             "background_placeholder": "2) 选择背景（经典 / 超级甲贺忍蛙 / 妙蛙花 / 小智与皮卡丘）",
             "sbt_placeholder": "2) 多选 SBT（可跳过）",
             "card_placeholder": "3) 多选卡片（可跳过）",
@@ -701,7 +675,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "컬렉션 수",
             "selectable_sbt_label": "선택 가능 SBT",
             "setup_tip": "템플릿, SBT, 카드를 선택한 뒤 \"포스터 생성\"을 누르세요. SBT/카드를 선택하지 않으면 기본값(FMV 내림차순)을 사용합니다.",
-            "template_placeholder": "1) 템플릿 선택 (Top 1 / Top 3 / Top 4 / Top 5 / Top 10)",
+            "template_placeholder": "1) 템플릿 선택 (Top 1 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10)",
             "background_placeholder": "2) 배경 선택 (Classic / 개굴닌자(유대변화) / 이상해꽃 / 지우와 피카츄)",
             "sbt_placeholder": "2) SBT 다중 선택 (선택 사항)",
             "card_placeholder": "3) 카드 다중 선택 (선택 사항)",
@@ -734,7 +708,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
         "collection_label": "Collection",
         "selectable_sbt_label": "Selectable SBT",
         "setup_tip": "Choose template, SBT, and cards, then click Generate Poster. If SBT/cards are not selected, defaults are used (FMV high to low).",
-        "template_placeholder": "1) Select template (Top 1 / Top 3 / Top 4 / Top 5 / Top 10)",
+        "template_placeholder": "1) Select template (Top 1 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10)",
         "background_placeholder": "2) Select background (Classic / Ash-Greninja / Venusaur / Ash & Pikachu)",
         "sbt_placeholder": "2) Select SBT (optional)",
         "card_placeholder": "3) Select cards (optional)",
@@ -2907,57 +2881,6 @@ def _is_image_attachment(att: discord.Attachment) -> bool:
     return any(filename.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"])
 
 
-def _can_auto_thread_in_message(message: discord.Message, bot_mentioned: bool) -> bool:
-    if not AUTO_IMAGE_THREAD_MONITOR_ENABLED:
-        return False
-    if not AUTO_IMAGE_THREAD_CHANNEL_IDS:
-        return False
-    if bot_mentioned:
-        # Keep this feature isolated from mention-triggered analysis flow.
-        return False
-    if message.guild is None:
-        return False
-    if isinstance(message.channel, discord.Thread):
-        return False
-    if int(getattr(message.channel, "id", 0) or 0) not in AUTO_IMAGE_THREAD_CHANNEL_IDS:
-        return False
-    if not getattr(message, "attachments", None):
-        return False
-    if not any(_is_image_attachment(a) for a in message.attachments):
-        return False
-    if bool(getattr(message, "has_thread", False)):
-        return False
-    if getattr(message, "thread", None) is not None:
-        return False
-    return True
-
-
-def _build_auto_image_thread_name(message: discord.Message) -> str:
-    display_name = str(getattr(message.author, "display_name", "") or getattr(message.author, "name", "") or "user").strip()
-    display_name = re.sub(r"\s+", " ", display_name)
-    ts_text = datetime.now().strftime("%m%d-%H%M")
-    base = f"{AUTO_IMAGE_THREAD_NAME_PREFIX}｜{display_name}｜{ts_text}"
-    return base[:100]
-
-
-async def _maybe_create_auto_image_thread(message: discord.Message, bot_mentioned: bool):
-    if not _can_auto_thread_in_message(message, bot_mentioned):
-        return
-    try:
-        thread_name = _build_auto_image_thread_name(message)
-        thread = await message.create_thread(
-            name=thread_name,
-            auto_archive_duration=AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN,
-        )
-        if AUTO_IMAGE_THREAD_POST_NOTE:
-            image_count = sum(1 for a in message.attachments if _is_image_attachment(a))
-            await thread.send(f"🧵 已自動建立圖片討論串（{image_count} 張）")
-    except discord.Forbidden:
-        print("⚠️ AUTO_IMAGE_THREAD: 權限不足，無法建立討論串", file=sys.stderr)
-    except Exception as e:
-        print(f"⚠️ AUTO_IMAGE_THREAD: 建立討論串失敗: {e}", file=sys.stderr)
-
-
 def _json_loads_loose(text: str):
     cleaned = (text or "").replace("```json", "").replace("```", "").strip()
     try:
@@ -3617,12 +3540,6 @@ async def on_ready():
         print(f"✅ 全域 Slash Commands 同步嘗試完成 (全球更新可能需 1 小時)")
     except Exception as e:
         print(f"⚠️ 全域同步失敗: {e}")
-    if AUTO_IMAGE_THREAD_MONITOR_ENABLED:
-        if AUTO_IMAGE_THREAD_CHANNEL_IDS:
-            ids_text = ", ".join(str(x) for x in sorted(AUTO_IMAGE_THREAD_CHANNEL_IDS))
-            print(f"🧵 AUTO_IMAGE_THREAD 已啟用，監控頻道: {ids_text}，封存分鐘: {AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN}")
-        else:
-            print("⚠️ AUTO_IMAGE_THREAD 已啟用，但未設定 AUTO_IMAGE_THREAD_CHANNEL_IDS")
 
 class PCSelect(discord.ui.Select):
     def __init__(self, candidates):
@@ -3755,6 +3672,7 @@ class ProfileTemplateSelect(discord.ui.Select):
             discord.SelectOption(label="Top 3", value="3", default=(default_count == 3)),
             discord.SelectOption(label="Top 4", value="4", default=(default_count == 4)),
             discord.SelectOption(label="Top 5", value="5", default=(default_count == 5)),
+            discord.SelectOption(label="Top 7", value="7", default=(default_count == 7)),
             discord.SelectOption(label="Top 10", value="10", default=(default_count == 10)),
         ]
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options, row=0)
@@ -4340,9 +4258,6 @@ async def on_message(message):
         return
 
     bot_mentioned = client.user in message.mentions
-
-    # Independent feature: monitor specific channels and auto-create image discussion threads.
-    await _maybe_create_auto_image_thread(message, bot_mentioned)
 
     if bot_mentioned:
         content_lower = message.content.lower().strip()

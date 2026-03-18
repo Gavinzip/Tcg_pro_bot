@@ -769,7 +769,67 @@
             padding: 0.68rem 0.55rem 0.78rem;
         }
 
-        .grid-layout-7, .grid-layout-8, .grid-layout-9, .grid-layout-10 { 
+        .grid-layout-7 { 
+            display: grid;
+            grid-template-columns: minmax(0, 1.34fr) repeat(3, minmax(0, 1fr));
+            grid-template-rows: repeat(2, minmax(0, 1fr));
+            column-gap: 0.98rem;
+            row-gap: 1.02rem;
+            align-content: center;
+            align-items: center;
+        }
+
+        .grid-layout-7 .item-card:first-child {
+            grid-column: 1 / 2;
+            grid-row: 1 / 3;
+            width: 100%;
+            max-width: 360px;
+            align-self: stretch;
+            justify-self: center;
+            padding: 0.34rem 0.2rem 0.62rem;
+        }
+
+        .grid-layout-7 .item-card:first-child .card-frame {
+            margin-bottom: 0.58rem;
+        }
+
+        .grid-layout-7 .item-card:not(:first-child) {
+            width: 100%;
+            max-width: 166px;
+            justify-self: center;
+            padding: 0.24rem 0.2rem 0.42rem;
+            border-radius: 1rem;
+        }
+
+        .grid-layout-7 .item-card:not(:first-child) .card-frame {
+            margin-bottom: 0.32rem;
+        }
+
+        .grid-layout-7 .item-card:first-child .price-value {
+            font-size: 2.16rem;
+        }
+
+        .grid-layout-7 .item-card:first-child .price-currency {
+            font-size: 1.18rem;
+        }
+
+        .grid-layout-7 .item-card:first-child .price-unit {
+            font-size: 0.76rem;
+        }
+
+        .grid-layout-7 .item-card:not(:first-child) .price-value {
+            font-size: 1.25rem;
+        }
+
+        .grid-layout-7 .item-card:not(:first-child) .price-currency {
+            font-size: 0.82rem;
+        }
+
+        .grid-layout-7 .item-card:not(:first-child) .price-unit {
+            font-size: 0.56rem;
+        }
+
+        .grid-layout-8, .grid-layout-9, .grid-layout-10 { 
             display: grid; 
             grid-template-columns: repeat(5, minmax(0, 1fr)); 
             column-gap: 0.95rem;
@@ -777,7 +837,6 @@
             align-content: center;
         }
 
-        .grid-layout-7 .item-card,
         .grid-layout-8 .item-card,
         .grid-layout-9 .item-card,
         .grid-layout-10 .item-card {
@@ -788,28 +847,24 @@
             border-radius: 1rem;
         }
 
-        .grid-layout-7 .item-card .card-frame,
         .grid-layout-8 .item-card .card-frame,
         .grid-layout-9 .item-card .card-frame,
         .grid-layout-10 .item-card .card-frame {
             margin-bottom: 0.42rem;
         }
 
-        .grid-layout-7 .price-value,
         .grid-layout-8 .price-value,
         .grid-layout-9 .price-value,
         .grid-layout-10 .price-value {
             font-size: 1.42rem;
         }
 
-        .grid-layout-7 .price-currency,
         .grid-layout-8 .price-currency,
         .grid-layout-9 .price-currency,
         .grid-layout-10 .price-currency {
             font-size: 0.92rem;
         }
 
-        .grid-layout-7 .price-unit,
         .grid-layout-8 .price-unit,
         .grid-layout-9 .price-unit,
         .grid-layout-10 .price-unit {
