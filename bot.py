@@ -16,7 +16,9 @@ import re
 import html as html_lib
 import time
 import mimetypes
+from collections import Counter, defaultdict
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 import requests
 import market_report_vision
 import image_generator
@@ -70,17 +72,28 @@ POSTER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_POSTERS)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # /profile uses an isolated template bundle to avoid impacting normal card posters.
 PROFILE_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile＿beta.html")
+PROFILE_HISTORY_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_history_beta.html")
 PROFILE_LOGO_PATH = os.path.join(BASE_DIR, "templates", "profile", "logo.png")
 PROFILE_BACKGROUND_DIR = os.path.join(BASE_DIR, "templates", "backgorund")
 PROFILE_PREVIEW_DEMO_DIR = os.path.join(BASE_DIR, "templates", "backgorund", "demo")
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
 RENAISS_SBT_BADGES_URL = "https://www.renaiss.xyz/api/trpc/sbt.getUserBadges"
+RENAISS_ACTIVITY_LIST_URL = "https://www.renaiss.xyz/api/trpc/activity.getSubgraphUserActivities"
 PROFILE_PAGE_LIMIT = max(10, min(100, int(os.getenv("PROFILE_PAGE_LIMIT", "100"))))
 PROFILE_SCAN_MAX_OFFSET = max(PROFILE_PAGE_LIMIT, int(os.getenv("PROFILE_SCAN_MAX_OFFSET", "5000")))
 PROFILE_API_MAX_RETRIES = max(1, int(os.getenv("PROFILE_API_MAX_RETRIES", "4")))
 PROFILE_API_RETRY_BACKOFF_SEC = max(0.2, float(os.getenv("PROFILE_API_RETRY_BACKOFF_SEC", "0.8")))
+PROFILE_ACTIVITY_PAGE_LIMIT = max(20, min(100, int(os.getenv("PROFILE_ACTIVITY_PAGE_LIMIT", "20"))))
+PROFILE_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_ACTIVITY_MAX_PAGES", "120")))
+PROFILE_CARD_WITHDRAW_ADDRESS = str(
+    os.getenv("PROFILE_CARD_WITHDRAW_ADDRESS", "0x341Edb3EdC1E45612E5704F29eC8d26fBb4072b4")
+).strip().lower()
+# SellActivity amount is gross (pre-fee) in current upstream data; convert to net received.
+PROFILE_MARKET_SELL_GROSS_DIVISOR = Decimal(os.getenv("PROFILE_MARKET_SELL_GROSS_DIVISOR", "1.02"))
 _WALLET_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _TRANSPARENT_CARD_IMAGE = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="
+_WEI_DECIMAL = Decimal("1000000000000000000")
+_CARD_FMV_CACHE: dict[str, Decimal] = {}
 _PROFILE_BACKGROUND_FILES = {
     "classic": None,
     "1": "1.jpg",
@@ -134,6 +147,53 @@ def _format_fmv_usd(value: int | None) -> str:
     if value is None:
         return "$0"
     return f"${(value / 100):,.0f}"
+
+
+def _to_decimal(value) -> Decimal:
+    if value is None or isinstance(value, bool):
+        return Decimal("0")
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        return Decimal(str(value))
+    text = str(value).strip()
+    if not text:
+        return Decimal("0")
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+def _wei_to_usdt(value) -> Decimal:
+    wei = _to_decimal(value)
+    if wei == 0:
+        return Decimal("0")
+    return wei / _WEI_DECIMAL
+
+
+def _format_usdt_decimal(value: Decimal | None, signed: bool = False) -> str:
+    amount = _to_decimal(value).quantize(Decimal("0.01"))
+    if signed:
+        return f"{amount:+,.2f}"
+    return f"{amount:,.2f}"
+
+
+def _format_usdt_currency(value: Decimal | None, signed: bool = False) -> str:
+    amount = _to_decimal(value).quantize(Decimal("0.01"))
+    if not signed:
+        return f"${amount:,.2f}"
+    sign = "+" if amount > 0 else "-" if amount < 0 else ""
+    return f"{sign}${abs(amount):,.2f}"
+
+
+def _short_hex(value: str | None) -> str:
+    text = str(value or "").strip()
+    if len(text) <= 12:
+        return text
+    return f"{text[:8]}...{text[-6:]}"
 
 
 def _clamp_profile_card_count(value: int | None) -> int:
@@ -240,6 +300,203 @@ def _profile_ui_labels(lang: str) -> dict[str, str]:
         "brand_name": "Renaiss",
         "brand_site": "renaiss.xyz",
     }
+
+
+def _profile_history_labels(lang: str) -> dict[str, str]:
+    if lang == "zh":
+        return {
+            "title": "Collection History",
+            "subtitle": "抽卡與交易歷史統計",
+            "kpi_opened": "開包次數",
+            "kpi_pack_spent": "抽卡花費",
+            "kpi_card_withdraw": "提領卡片金額",
+            "kpi_total_spent": "總花費",
+            "kpi_total_earned": "總賺取",
+            "kpi_total_spent_note": "抽卡花費＋市場買入",
+            "kpi_total_earned_note": "BUYBACK＋市場賣出",
+            "kpi_net": "淨值",
+            "kpi_net_note": "含提領卡片",
+            "kpi_cash_net": "淨值",
+            "kpi_trade_volume": "交易總額",
+            "kpi_assets_value": "目前卡片價值",
+            "kpi_buyback": "Buyback 總額",
+            "kpi_market_buy": "市場買入總額",
+            "kpi_market_sell": "市場賣出總額",
+            "kpi_active_days": "參與項目天數",
+            "section_contract": "合約 / 包型明細",
+            "section_activity": "活動筆數",
+            "section_note": "計算說明",
+            "head_pack": "包型",
+            "head_contract": "合約",
+            "head_open_count": "開包",
+            "head_direct_count": "直接對價",
+            "head_inferred_count": "補價",
+            "head_unit_price": "單價(USDT)",
+            "head_spent_total": "合計(USDT)",
+            "empty_contract": "無可用開包資料",
+            "activity_total": "總活動",
+            "chip_direct": "直接",
+            "chip_inferred": "補價",
+            "chip_unknown": "未知",
+            "note_line_1": "PerpetualPullActivity 先做直接計價；缺值時用同合約的既有單價補齊。",
+            "note_line_2": "淨值 = 總賺取 - 總花費；持倉總值(FMV)獨立展示。",
+        }
+    if lang == "zhs":
+        return {
+            "title": "Collection History",
+            "subtitle": "抽卡与交易历史统计",
+            "kpi_opened": "开包次数",
+            "kpi_pack_spent": "抽卡花费",
+            "kpi_card_withdraw": "提领卡片金额",
+            "kpi_total_spent": "总花费",
+            "kpi_total_earned": "总赚取",
+            "kpi_total_spent_note": "抽卡花费＋市场买入",
+            "kpi_total_earned_note": "BUYBACK＋市场卖出",
+            "kpi_net": "净值",
+            "kpi_net_note": "含提领卡片",
+            "kpi_cash_net": "净值",
+            "kpi_trade_volume": "交易总额",
+            "kpi_assets_value": "目前卡片价值",
+            "kpi_buyback": "Buyback 总额",
+            "kpi_market_buy": "市场买入总额",
+            "kpi_market_sell": "市场卖出总额",
+            "kpi_active_days": "参与项目天数",
+            "section_contract": "合约 / 包型明细",
+            "section_activity": "活动笔数",
+            "section_note": "计算说明",
+            "head_pack": "包型",
+            "head_contract": "合约",
+            "head_open_count": "开包",
+            "head_direct_count": "直接对价",
+            "head_inferred_count": "补价",
+            "head_unit_price": "单价(USDT)",
+            "head_spent_total": "合计(USDT)",
+            "empty_contract": "暂无可用开包数据",
+            "activity_total": "总活动",
+            "chip_direct": "直接",
+            "chip_inferred": "补价",
+            "chip_unknown": "未知",
+            "note_line_1": "先用 PerpetualPullActivity 直接计价；缺值时用同合约已有单价补齐。",
+            "note_line_2": "净值 = 总赚取 - 总花费；持仓总值(FMV)独立展示。",
+        }
+    if lang == "ko":
+        return {
+            "title": "Collection History",
+            "subtitle": "팩 오픈 및 거래 히스토리",
+            "kpi_opened": "팩 오픈",
+            "kpi_pack_spent": "오픈 비용",
+            "kpi_card_withdraw": "카드 출고 금액",
+            "kpi_total_spent": "총 지출",
+            "kpi_total_earned": "총 수익",
+            "kpi_total_spent_note": "팩 비용＋마켓 매수",
+            "kpi_total_earned_note": "BUYBACK＋마켓 매도",
+            "kpi_net": "순손익",
+            "kpi_net_note": "카드 출고 포함",
+            "kpi_cash_net": "순손익",
+            "kpi_trade_volume": "거래 총액",
+            "kpi_assets_value": "보유자산 가치",
+            "kpi_buyback": "Buyback 총액",
+            "kpi_market_buy": "마켓 매수 총액",
+            "kpi_market_sell": "마켓 매도 총액",
+            "kpi_active_days": "프로젝트 참여 일수",
+            "section_contract": "컨트랙트 / 팩 상세",
+            "section_activity": "활동 건수",
+            "section_note": "계산 규칙",
+            "head_pack": "팩",
+            "head_contract": "컨트랙트",
+            "head_open_count": "오픈",
+            "head_direct_count": "직접 가격",
+            "head_inferred_count": "보정",
+            "head_unit_price": "단가(USDT)",
+            "head_spent_total": "합계(USDT)",
+            "empty_contract": "오픈 데이터가 없습니다",
+            "activity_total": "총 활동",
+            "chip_direct": "직접",
+            "chip_inferred": "보정",
+            "chip_unknown": "미확인",
+            "note_line_1": "PerpetualPullActivity 가격을 우선 사용하고, 누락 시 같은 컨트랙트 단가로 보정합니다.",
+            "note_line_2": "순손익 = 총수익 - 총지출, 보유자산(FMV)은 별도 표기.",
+        }
+    return {
+        "title": "Collection History",
+        "subtitle": "Pack and trade history overview",
+        "kpi_opened": "Packs Opened",
+        "kpi_pack_spent": "Pack Spend",
+        "kpi_card_withdraw": "Card Withdrawal Value",
+        "kpi_total_spent": "Total Spent",
+        "kpi_total_earned": "Total Earned",
+        "kpi_total_spent_note": "Pack Spend + Market Buy",
+        "kpi_total_earned_note": "BUYBACK + Market Sell",
+        "kpi_net": "Net",
+        "kpi_net_note": "incl. Card Withdrawal",
+        "kpi_cash_net": "Net",
+        "kpi_trade_volume": "Trade Volume",
+        "kpi_assets_value": "Holdings Value",
+        "kpi_buyback": "Buyback Total",
+        "kpi_market_buy": "Market Buy Total",
+        "kpi_market_sell": "Market Sell Total",
+        "kpi_active_days": "Active Days",
+        "section_contract": "Contract / Pack Breakdown",
+        "section_activity": "Activity Counts",
+        "section_note": "Calculation Notes",
+        "head_pack": "Pack",
+        "head_contract": "Contract",
+        "head_open_count": "Opened",
+        "head_direct_count": "Direct",
+        "head_inferred_count": "Inferred",
+        "head_unit_price": "Unit (USDT)",
+        "head_spent_total": "Total (USDT)",
+        "empty_contract": "No pack-open data available",
+        "activity_total": "Total Activities",
+        "chip_direct": "Direct",
+        "chip_inferred": "Inferred",
+        "chip_unknown": "Unknown",
+        "note_line_1": "Prices use PerpetualPullActivity first; missing rows are inferred from the same contract price.",
+        "note_line_2": "Net = Total Earned - Total Spent; Holdings FMV is shown separately.",
+    }
+
+
+def _profile_activity_display_name(activity_type: str, lang: str) -> str:
+    mappings = {
+        "PerpetualReleaseTokenActivity": {
+            "zh": "總開包數",
+            "zhs": "总开包数",
+            "ko": "총 팩 오픈",
+            "en": "Total Packs Opened",
+        },
+        "PerpetualPullActivity": {
+            "zh": "抽卡扣款",
+            "zhs": "抽卡扣款",
+            "ko": "팩 결제",
+            "en": "Pack Pull Charge",
+        },
+        "PerpetualBuybackActivity": {
+            "zh": "回購賣出",
+            "zhs": "回购卖出",
+            "ko": "바이백 수익",
+            "en": "Buyback Earn",
+        },
+        "BuyActivity": {
+            "zh": "市場買入",
+            "zhs": "市场买入",
+            "ko": "마켓 매수",
+            "en": "Market Buy",
+        },
+        "SellActivity": {
+            "zh": "市場賣出",
+            "zhs": "市场卖出",
+            "ko": "마켓 매도",
+            "en": "Market Sell",
+        },
+        "SBTMintActivity": {
+            "zh": "SBT 鑄造",
+            "zhs": "SBT 铸造",
+            "ko": "SBT 민팅",
+            "en": "SBT Mint",
+        },
+    }
+    entry = mappings.get(activity_type) or {}
+    return entry.get(lang) or entry.get("en") or activity_type
 
 
 def _profile_wizard_texts(lang: str) -> dict[str, str]:
@@ -674,6 +931,435 @@ def _trpc_collectible_list(query_payload: dict) -> dict:
     raise RuntimeError(f"collectible.list 請求失敗（已重試 {PROFILE_API_MAX_RETRIES} 次）：{last_err}")
 
 
+def _trpc_user_activities(wallet_address: str, cursor: str | None = None, limit: int = PROFILE_ACTIVITY_PAGE_LIMIT) -> dict:
+    payload = {
+        "address": str(wallet_address or "").strip().lower(),
+        "filter": "all",
+        "mode": "private",
+        "limit": int(limit),
+        "cursor": cursor,
+    }
+    row = {"json": payload}
+    if cursor is None:
+        # tRPC endpoint expects explicit undefined-cursor meta on first page.
+        row["meta"] = {"values": {"cursor": ["undefined"]}}
+
+    params = {
+        "batch": "1",
+        "input": json.dumps({"0": row}, separators=(",", ":"), ensure_ascii=False),
+    }
+
+    last_err = None
+    for attempt in range(1, PROFILE_API_MAX_RETRIES + 1):
+        try:
+            resp = requests.get(RENAISS_ACTIVITY_LIST_URL, params=params, timeout=25)
+            status = int(resp.status_code or 0)
+            if status == 429 or status >= 500:
+                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp.raise_for_status()
+
+            data = resp.json()
+            if not isinstance(data, list) or not data:
+                raise RuntimeError("activity.getSubgraphUserActivities 回傳格式異常")
+            root = data[0]
+            if root.get("error"):
+                err = root.get("error", {}).get("json", {}).get("message") or "unknown error"
+                raise RuntimeError(f"activity.getSubgraphUserActivities error: {err}")
+
+            result = (((root.get("result") or {}).get("data") or {}).get("json") or {})
+            if not isinstance(result, dict):
+                raise RuntimeError("activity.getSubgraphUserActivities result 缺失")
+            return result
+        except Exception as e:
+            last_err = e
+            status = None
+            if isinstance(e, requests.RequestException) and getattr(e, "response", None) is not None:
+                status = int(e.response.status_code or 0)
+            retryable = status in (408, 409, 425, 429) or (status is not None and status >= 500) or status is None
+            if retryable and attempt < PROFILE_API_MAX_RETRIES:
+                wait_sec = PROFILE_API_RETRY_BACKOFF_SEC * (2 ** (attempt - 1))
+                time.sleep(wait_sec)
+                continue
+            break
+
+    raise RuntimeError(f"activity.getSubgraphUserActivities 請求失敗（已重試 {PROFILE_API_MAX_RETRIES} 次）：{last_err}")
+
+
+def _card_price_to_usd(value) -> Decimal:
+    amount = _to_decimal(value)
+    if amount <= 0:
+        return Decimal("0")
+    # Card page usually stores USD in cent-like integer units (e.g. 10815 -> 108.15).
+    if amount == amount.to_integral_value() and amount >= Decimal("1000"):
+        return amount / Decimal("100")
+    return amount
+
+
+def _extract_card_field_value(text: str, field: str) -> Decimal:
+    normalized = str(text or "").replace('\\"', '"')
+    patterns = [
+        rf'"{re.escape(field)}"\s*:\s*"([0-9]+(?:\.[0-9]+)?)"',
+        rf'"{re.escape(field)}"\s*:\s*([0-9]+(?:\.[0-9]+)?)',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, normalized)
+        if m:
+            return _to_decimal(m.group(1))
+    return Decimal("0")
+
+
+def _fetch_card_fmv_by_token_id(token_id: str) -> Decimal:
+    tid = str(token_id or "").strip()
+    if not tid:
+        return Decimal("0")
+    if tid in _CARD_FMV_CACHE:
+        return _CARD_FMV_CACHE[tid]
+
+    url = f"https://www.renaiss.xyz/card/{tid}"
+    value = Decimal("0")
+    try:
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        html = resp.text or ""
+        fmv_raw = _extract_card_field_value(html, "fmvPriceInUSD")
+        buyback_raw = _extract_card_field_value(html, "buybackBaseValueInUSD")
+        ask_raw = _extract_card_field_value(html, "askPriceInUSDT")
+        for candidate in (
+            _card_price_to_usd(fmv_raw),
+            _card_price_to_usd(buyback_raw),
+            _card_price_to_usd(ask_raw),
+        ):
+            if candidate > 0:
+                value = candidate
+                break
+    except Exception:
+        value = Decimal("0")
+
+    _CARD_FMV_CACHE[tid] = value
+    return value
+
+
+def _fetch_user_activities(wallet_address: str) -> list[dict]:
+    all_rows: list[dict] = []
+    seen_cursors: set[str] = set()
+    cursor: str | None = None
+
+    for _ in range(PROFILE_ACTIVITY_MAX_PAGES):
+        page = _trpc_user_activities(wallet_address, cursor=cursor)
+        activities = page.get("activities") or []
+        if isinstance(activities, list):
+            all_rows.extend([x for x in activities if isinstance(x, dict)])
+        next_cursor = page.get("nextCursor")
+        if not next_cursor:
+            break
+        next_cursor = str(next_cursor)
+        if next_cursor in seen_cursors:
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+    return all_rows
+
+
+def _pick_contract_unit_price(price_counter: Counter) -> Decimal:
+    if not price_counter:
+        return Decimal("0")
+    # Prefer the most frequent observed price for this contract.
+    pairs = sorted(price_counter.items(), key=lambda x: (x[1], x[0]), reverse=True)
+    return _to_decimal(pairs[0][0])
+
+
+def _pack_label_from_pull_item(item: dict | None) -> str:
+    obj = item or {}
+    title = str(obj.get("title") or "").strip()
+    subtitle = str(obj.get("subtitle") or "").strip()
+    if title and subtitle:
+        return f"{title} | {subtitle}"
+    if title:
+        return title
+    if subtitle:
+        return subtitle
+    return "Unknown Pack"
+
+
+def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en") -> dict:
+    lang = _profile_lang_from_locale(profile_lang)
+    labels = _profile_history_labels(lang)
+    wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
+    activities = _fetch_user_activities(wallet_norm)
+
+    type_counts: Counter = Counter()
+    pull_price_by_checkout: dict[str, Decimal] = {}
+    contract_pull_price_counter: defaultdict[str, Counter] = defaultdict(Counter)
+    contract_pack_counter: defaultdict[str, Counter] = defaultdict(Counter)
+    contract_pack_name: dict[str, str] = {}
+    contract_open_count: defaultdict[str, int] = defaultdict(int)
+    contract_direct_count: defaultdict[str, int] = defaultdict(int)
+    contract_inferred_count: defaultdict[str, int] = defaultdict(int)
+    contract_spent_total: defaultdict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+
+    pull_spent_total = Decimal("0")
+    buyback_earned_total = Decimal("0")
+    trade_spent_total = Decimal("0")
+    trade_earned_total = Decimal("0")
+    card_withdraw_total = Decimal("0")
+    direct_price_count = 0
+    inferred_price_count = 0
+    unknown_price_count = 0
+    inferred_spent_total = Decimal("0")
+
+    ts_values: list[int] = []
+    legacy_missing_price_keys: list[str] = []
+    release_seen_open_keys: set[str] = set()
+    legacy_seen_open_keys: set[str] = set()
+    seen_withdraw_events: set[str] = set()
+
+    for row in activities:
+        row_type = str(row.get("__typename") or "").strip()
+        if not row_type:
+            continue
+        type_counts[row_type] += 1
+
+        ts = _parse_int(row.get("timestamp"))
+        if ts and ts > 0:
+            ts_values.append(ts)
+
+        if row_type == "PerpetualPullActivity":
+            checkout_id = str(row.get("checkoutId") or "").strip()
+            contract = str(row.get("contractAddress") or "").strip().lower()
+            price = _wei_to_usdt(row.get("priceInUsdt"))
+            if checkout_id and price > 0:
+                pull_price_by_checkout[checkout_id] = price
+            if contract and price > 0:
+                contract_pull_price_counter[contract][price] += 1
+                pull_spent_total += price
+            if contract:
+                pack_label = _pack_label_from_pull_item(row.get("item") if isinstance(row.get("item"), dict) else None)
+                contract_pack_counter[contract][pack_label] += 1
+                if contract not in contract_pack_name:
+                    contract_pack_name[contract] = pack_label
+        elif row_type == "PullActivity":
+            checkout_id = str(row.get("checkoutId") or "").strip()
+            pack_id = str(row.get("packId") or "").strip()
+            pack_label = _pack_label_from_pull_item(row.get("item") if isinstance(row.get("item"), dict) else None)
+            # Legacy pull events may not include contractAddress, so group by packId/name.
+            legacy_key = f"legacy:{pack_id}" if pack_id else f"legacy-name:{pack_label}"
+            legacy_event_key = checkout_id or str(row.get("id") or "").strip() or f"{legacy_key}:{_parse_int(row.get('timestamp')) or 0}"
+            if legacy_event_key not in legacy_seen_open_keys:
+                legacy_seen_open_keys.add(legacy_event_key)
+                contract_open_count[legacy_key] += 1
+            contract_pack_counter[legacy_key][pack_label] += 1
+            if legacy_key not in contract_pack_name:
+                contract_pack_name[legacy_key] = pack_label
+
+            price = _wei_to_usdt(row.get("priceInUsdt"))
+            if checkout_id and price > 0:
+                pull_price_by_checkout[checkout_id] = price
+            if price > 0:
+                contract_pull_price_counter[legacy_key][price] += 1
+                pull_spent_total += price
+                direct_price_count += 1
+                contract_direct_count[legacy_key] += 1
+                contract_spent_total[legacy_key] += price
+            else:
+                legacy_missing_price_keys.append(legacy_key)
+        elif row_type in ("PerpetualBuybackActivity", "BuybackActivity"):
+            buyback_price = _wei_to_usdt(row.get("priceInUsdt"))
+            if buyback_price <= 0:
+                buyback_price = _wei_to_usdt(row.get("amount"))
+            if buyback_price > 0:
+                buyback_earned_total += buyback_price
+        elif row_type in ("BuyActivity", "SellActivity"):
+            amount = _wei_to_usdt(row.get("amount"))
+            if amount <= 0:
+                continue
+            bidder = str(row.get("bidder") or "").strip().lower()
+            asker = str(row.get("asker") or "").strip().lower()
+            if bidder == wallet_norm:
+                trade_spent_total += amount
+            if asker == wallet_norm:
+                divisor = PROFILE_MARKET_SELL_GROSS_DIVISOR if PROFILE_MARKET_SELL_GROSS_DIVISOR > 0 else Decimal("1")
+                trade_earned_total += (amount / divisor)
+        elif row_type == "TransferActivity":
+            target = str(row.get("to") or "").strip().lower()
+            if target != PROFILE_CARD_WITHDRAW_ADDRESS:
+                continue
+            row_item = row.get("item") if isinstance(row.get("item"), dict) else {}
+            token_id = str(row.get("tokenId") or row_item.get("tokenId") or "").strip()
+            tx_hash = str(row.get("txHash") or "").strip().lower()
+            if not tx_hash and not token_id:
+                continue
+            event_key = f"{tx_hash}:{token_id}"
+            if event_key in seen_withdraw_events:
+                continue
+            seen_withdraw_events.add(event_key)
+            card_withdraw_total += _fetch_card_fmv_by_token_id(token_id)
+
+    release_rows = [x for x in activities if str(x.get("__typename") or "").strip() == "PerpetualReleaseTokenActivity"]
+    legacy_pull_rows = [x for x in activities if str(x.get("__typename") or "").strip() == "PullActivity"]
+    for row in release_rows:
+        contract = str(row.get("contractAddress") or "").strip().lower()
+        checkout_id = str(row.get("checkoutId") or "").strip()
+        release_event_key = checkout_id or str(row.get("id") or "").strip() or f"{contract}:{_parse_int(row.get('timestamp')) or 0}"
+        if contract and release_event_key not in release_seen_open_keys:
+            release_seen_open_keys.add(release_event_key)
+            contract_open_count[contract] += 1
+
+        price = Decimal("0")
+        direct_hit = False
+        if checkout_id and checkout_id in pull_price_by_checkout:
+            price = pull_price_by_checkout[checkout_id]
+            direct_hit = price > 0
+        if not direct_hit:
+            inferred = _pick_contract_unit_price(contract_pull_price_counter.get(contract) or Counter())
+            if inferred > 0:
+                price = inferred
+                inferred_price_count += 1
+                inferred_spent_total += inferred
+                if contract:
+                    contract_inferred_count[contract] += 1
+            else:
+                unknown_price_count += 1
+        else:
+            direct_price_count += 1
+            if contract:
+                contract_direct_count[contract] += 1
+
+        if contract and price > 0:
+            contract_spent_total[contract] += price
+
+    # Legacy pull rows can miss priceInUsdt; infer by same pack key's observed unit price.
+    for legacy_key in legacy_missing_price_keys:
+        inferred = _pick_contract_unit_price(contract_pull_price_counter.get(legacy_key) or Counter())
+        if inferred > 0:
+            inferred_price_count += 1
+            inferred_spent_total += inferred
+            contract_inferred_count[legacy_key] += 1
+            contract_spent_total[legacy_key] += inferred
+        else:
+            unknown_price_count += 1
+
+    pack_spent_total = pull_spent_total + inferred_spent_total
+    total_spent = pack_spent_total + trade_spent_total
+    total_earned = buyback_earned_total + trade_earned_total
+    net_total = total_earned - total_spent + card_withdraw_total
+    trade_volume = trade_spent_total + trade_earned_total
+
+    contract_rows = []
+    all_contracts = sorted(set(contract_open_count.keys()) | set(contract_pull_price_counter.keys()))
+    for contract in all_contracts:
+        price_counter = contract_pull_price_counter.get(contract) or Counter()
+        unit_price = _pick_contract_unit_price(price_counter)
+        pack_counter = contract_pack_counter.get(contract) or Counter()
+        if pack_counter:
+            pack_name = pack_counter.most_common(1)[0][0]
+        else:
+            pack_name = contract_pack_name.get(contract) or f"Contract {_short_hex(contract)}"
+        is_legacy_pack = contract.startswith("legacy")
+        contract_full = "-" if is_legacy_pack else contract
+        contract_short = "-" if is_legacy_pack else _short_hex(contract)
+        contract_rows.append(
+            {
+                "pack_name": pack_name,
+                "contract": contract_full,
+                "contract_short": contract_short,
+                "open_count": int(contract_open_count.get(contract, 0)),
+                "direct_count": int(contract_direct_count.get(contract, 0)),
+                "inferred_count": int(contract_inferred_count.get(contract, 0)),
+                "unit_price": _format_usdt_decimal(unit_price) if unit_price > 0 else "-",
+                "spent_total": _format_usdt_decimal(contract_spent_total.get(contract)),
+                "spent_total_raw": contract_spent_total.get(contract, Decimal("0")),
+            }
+        )
+    contract_rows.sort(key=lambda x: (x["spent_total_raw"], x["open_count"]), reverse=True)
+    for row in contract_rows:
+        row.pop("spent_total_raw", None)
+
+    opened_pack_ids = set(release_seen_open_keys) | set(legacy_seen_open_keys)
+
+    ordered_activity_types = [
+        "PerpetualReleaseTokenActivity",
+        "PerpetualPullActivity",
+        "PerpetualBuybackActivity",
+        "BuyActivity",
+        "SellActivity",
+        "SBTMintActivity",
+    ]
+    hidden_activity_types = {
+        "PerpetualPullActivity",
+        "SBTMintActivity",
+        "BuybackActivity",
+        "MintActivity",
+        "PullActivity",
+        "TransferActivity",
+    }
+    total_buyback_count = int(type_counts.get("PerpetualBuybackActivity", 0) + type_counts.get("BuybackActivity", 0))
+    activity_rows = []
+    for t in ordered_activity_types:
+        if t in hidden_activity_types:
+            continue
+        count_val = int(type_counts.get(t, 0))
+        if t == "PerpetualReleaseTokenActivity":
+            count_val = len(opened_pack_ids)
+        elif t == "PerpetualBuybackActivity":
+            count_val = total_buyback_count
+        if count_val <= 0:
+            continue
+        activity_rows.append(
+            {
+                "name": _profile_activity_display_name(t, lang),
+                "count": count_val,
+                "type": t,
+                "highlight": (t == "PerpetualReleaseTokenActivity"),
+            }
+        )
+    known_types = set(ordered_activity_types)
+    for t, c in sorted(type_counts.items()):
+        if t in known_types or t in hidden_activity_types:
+            continue
+        activity_rows.append(
+            {
+                "name": _profile_activity_display_name(t, lang),
+                "count": int(c),
+                "type": t,
+                "highlight": False,
+            }
+        )
+
+    history_range = "-"
+    active_days_count = 0
+    if ts_values:
+        ts_min = min(ts_values)
+        ts_max = max(ts_values)
+        dt_min = datetime.utcfromtimestamp(ts_min).strftime("%Y-%m-%d")
+        dt_max = datetime.utcfromtimestamp(ts_max).strftime("%Y-%m-%d")
+        history_range = dt_min if dt_min == dt_max else f"{dt_min} ~ {dt_max}"
+        active_days_count = max(1, int((ts_max - ts_min) // 86400) + 1)
+
+    return {
+        "labels": labels,
+        "history_range": history_range,
+        "wallet_short": f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm,
+        "activity_total_count": len(activities),
+        "opened_packs_count": len(opened_pack_ids),
+        "direct_price_count": direct_price_count,
+        "inferred_price_count": inferred_price_count,
+        "unknown_price_count": unknown_price_count,
+        "pack_spent_total": pack_spent_total,
+        "total_spent": total_spent,
+        "total_earned": total_earned,
+        "net_total": net_total,
+        "trade_volume": trade_volume,
+        "buyback_total": buyback_earned_total,
+        "market_buy_total": trade_spent_total,
+        "market_sell_total": trade_earned_total,
+        "card_withdraw_total": card_withdraw_total,
+        "active_days_count": active_days_count,
+        "contract_rows": contract_rows,
+        "activity_rows": activity_rows,
+    }
+
+
 def _fetch_user_sbt_badges(username: str | None) -> list[dict]:
     uname = str(username or "").strip()
     if not uname:
@@ -992,6 +1678,100 @@ def _build_wallet_profile_context(
                 "value": _format_fmv_display(fmv),
             }
         )
+
+    try:
+        history_data = _build_wallet_activity_history(wallet_address, profile_lang=profile_lang)
+    except Exception as e:
+        print(f"⚠️ activity history build failed: {e}", file=sys.stderr)
+        history_data = {
+            "labels": _profile_history_labels(profile_lang),
+            "history_range": "-",
+            "wallet_short": short_wallet,
+            "activity_total_count": 0,
+            "opened_packs_count": 0,
+            "direct_price_count": 0,
+            "inferred_price_count": 0,
+            "unknown_price_count": 0,
+            "pack_spent_total": Decimal("0"),
+            "total_spent": Decimal("0"),
+            "total_earned": Decimal("0"),
+            "net_total": Decimal("0"),
+            "trade_volume": Decimal("0"),
+            "buyback_total": Decimal("0"),
+            "market_buy_total": Decimal("0"),
+            "market_sell_total": Decimal("0"),
+            "active_days_count": 0,
+            "contract_rows": [],
+            "activity_rows": [],
+        }
+    history_labels = history_data.get("labels") or _profile_history_labels(profile_lang)
+    history_activity_rows = history_data.get("activity_rows") or []
+    history_contract_rows = history_data.get("contract_rows") or []
+    holdings_value = _to_decimal(total_fmv) / Decimal("100")
+    cash_net = _to_decimal(history_data.get("net_total"))
+    net_with_holdings = cash_net + holdings_value
+
+    history_template_context = {
+        "collection_name": f"{username or 'Unknown'} Collection",
+        "brand_name": ui_labels["brand_name"],
+        "brand_site": ui_labels["brand_site"],
+        "wallet_short": history_data.get("wallet_short") or short_wallet,
+        "update_date": datetime.now().strftime("%Y-%m-%d"),
+        "history_title": history_labels.get("title", "Collection History"),
+        "history_subtitle": history_labels.get("subtitle", "Pack and trade history overview"),
+        "history_range": history_data.get("history_range") or "-",
+        "section_contract": history_labels.get("section_contract", "Contract / Pack Breakdown"),
+        "section_activity": history_labels.get("section_activity", "Activity Counts"),
+        "section_note": history_labels.get("section_note", "Calculation Notes"),
+        "head_pack": history_labels.get("head_pack", "Pack"),
+        "head_contract": history_labels.get("head_contract", "Contract"),
+        "head_open_count": history_labels.get("head_open_count", "Opened"),
+        "head_direct_count": history_labels.get("head_direct_count", "Direct"),
+        "head_inferred_count": history_labels.get("head_inferred_count", "Inferred"),
+        "head_unit_price": history_labels.get("head_unit_price", "Unit (USDT)"),
+        "head_spent_total": history_labels.get("head_spent_total", "Total (USDT)"),
+        "empty_contract": history_labels.get("empty_contract", "No pack-open data available"),
+        "metric_opened_label": history_labels.get("kpi_opened", "Packs Opened"),
+        "metric_opened_value": _format_number(history_data.get("opened_packs_count")),
+        "metric_pack_spent_label": history_labels.get("kpi_pack_spent", "Pack Spend"),
+        "metric_pack_spent_value": _format_usdt_decimal(history_data.get("pack_spent_total")),
+        "metric_card_withdraw_label": history_labels.get("kpi_card_withdraw", "Card Withdrawal Value"),
+        "metric_card_withdraw_value": _format_usdt_decimal(history_data.get("card_withdraw_total")),
+        "metric_total_spent_label": history_labels.get("kpi_total_spent", "Total Spent"),
+        "metric_total_spent_note": history_labels.get("kpi_total_spent_note", ""),
+        "metric_total_spent_value": _format_usdt_decimal(history_data.get("total_spent")),
+        "metric_total_earned_label": history_labels.get("kpi_total_earned", "Total Earned"),
+        "metric_total_earned_note": history_labels.get("kpi_total_earned_note", ""),
+        "metric_total_earned_value": _format_usdt_decimal(history_data.get("total_earned")),
+        "metric_net_label": history_labels.get("kpi_net", "Net PnL"),
+        "metric_net_note": history_labels.get("kpi_net_note", ""),
+        "metric_net_value": _format_usdt_currency(net_with_holdings, signed=True),
+        "metric_trade_volume_label": history_labels.get("kpi_trade_volume", "Trade Volume"),
+        "metric_trade_volume_value": _format_usdt_decimal(history_data.get("trade_volume")),
+        "metric_assets_value_label": history_labels.get("kpi_assets_value", "Holdings Value"),
+        "metric_assets_value_value": _format_usdt_decimal(holdings_value),
+        "metric_buyback_label": history_labels.get("kpi_buyback", "Buyback Total"),
+        "metric_buyback_value": _format_usdt_decimal(history_data.get("buyback_total")),
+        "metric_market_buy_label": history_labels.get("kpi_market_buy", "Market Buy Total"),
+        "metric_market_buy_value": _format_usdt_decimal(history_data.get("market_buy_total")),
+        "metric_market_sell_label": history_labels.get("kpi_market_sell", "Market Sell Total"),
+        "metric_market_sell_value": _format_usdt_decimal(history_data.get("market_sell_total")),
+        "active_days_label": history_labels.get("kpi_active_days", "Active Days"),
+        "active_days_value": _format_number(history_data.get("active_days_count")),
+        "activity_total_label": history_labels.get("activity_total", "Total Activities"),
+        "activity_total_value": _format_number(history_data.get("activity_total_count")),
+        "chip_direct_label": history_labels.get("chip_direct", "Direct"),
+        "chip_inferred_label": history_labels.get("chip_inferred", "Inferred"),
+        "chip_unknown_label": history_labels.get("chip_unknown", "Unknown"),
+        "direct_price_count": _format_number(history_data.get("direct_price_count")),
+        "inferred_price_count": _format_number(history_data.get("inferred_price_count")),
+        "unknown_price_count": _format_number(history_data.get("unknown_price_count")),
+        "note_line_1": history_labels.get("note_line_1", ""),
+        "note_line_2": history_labels.get("note_line_2", ""),
+        "contract_rows": history_contract_rows,
+        "activity_rows": history_activity_rows,
+    }
+
     return {
         "username": str(username or "Unknown User"),
         "user_id": user_id,
@@ -1019,6 +1799,19 @@ def _build_wallet_profile_context(
             "enable_tilt": bool(enable_tilt),
             "background_key": background_key,
             "background_image": background_image,
+        },
+        "history_template_context": history_template_context,
+        "history_summary": {
+            "opened_packs": history_data.get("opened_packs_count", 0),
+            "total_spent": history_data.get("total_spent", Decimal("0")),
+            "total_earned": history_data.get("total_earned", Decimal("0")),
+            "net_total": net_with_holdings,
+            "cash_net": cash_net,
+            "holdings_value": holdings_value,
+            "buyback_total": history_data.get("buyback_total", Decimal("0")),
+            "market_buy_total": history_data.get("market_buy_total", Decimal("0")),
+            "market_sell_total": history_data.get("market_sell_total", Decimal("0")),
+            "card_withdraw_total": history_data.get("card_withdraw_total", Decimal("0")),
         },
         "replacements": {
             "{{ card_name }}": html_lib.escape(f"{username or 'Unknown'} Vault"),
@@ -1086,6 +1879,51 @@ async def _render_wallet_profile_poster(template_payload: dict, out_dir: str, sa
     os.makedirs(out_dir, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_]+", "_", safe_name).strip("_") or "wallet_profile"
     out_path = os.path.join(out_dir, f"{safe}_profile.png")
+    await image_generator._render_single_html_poster(
+        html_doc,
+        out_path,
+        width=1200,
+        height=900,
+        device_scale_factor=2,
+    )
+    return out_path
+
+
+async def _render_wallet_profile_history_poster(template_payload: dict, out_dir: str, safe_name: str = "wallet_profile") -> str:
+    if not os.path.exists(PROFILE_HISTORY_TEMPLATE_PATH):
+        raise FileNotFoundError(f"找不到 profile history template: {PROFILE_HISTORY_TEMPLATE_PATH}")
+
+    if isinstance(template_payload, dict):
+        template_context = template_payload.get("history_template_context") or {}
+        replacements = template_payload.get("history_replacements") or {}
+    else:
+        template_context = {}
+        replacements = {}
+
+    with open(PROFILE_HISTORY_TEMPLATE_PATH, "r", encoding="utf-8") as f:
+        html_doc = f.read()
+
+    if os.path.exists(PROFILE_LOGO_PATH):
+        with open(PROFILE_LOGO_PATH, "rb") as logo_f:
+            logo_bytes = logo_f.read()
+        logo_bytes = image_generator._strip_white_border_background_png(logo_bytes)
+        logo_b64 = base64.b64encode(logo_bytes).decode("utf-8")
+        logo_src = f"data:image/png;base64,{logo_b64}"
+        html_doc = html_doc.replace('src="logo.png"', f'src="{logo_src}"').replace("src='logo.png'", f"src='{logo_src}'")
+
+    if template_context and ("{%" in html_doc or "{{" in html_doc):
+        try:
+            from jinja2 import Template
+        except ModuleNotFoundError as e:
+            raise RuntimeError("缺少套件 jinja2，請先安裝 `pip install -r requirements.txt`") from e
+        html_doc = Template(html_doc).render(**template_context)
+
+    for key, value in replacements.items():
+        html_doc = html_doc.replace(key, str(value))
+
+    os.makedirs(out_dir, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_]+", "_", safe_name).strip("_") or "wallet_profile"
+    out_path = os.path.join(out_dir, f"{safe}_profile_history.png")
     await image_generator._render_single_html_poster(
         html_doc,
         out_path,
@@ -2210,13 +3048,20 @@ class ProfileConfigView(discord.ui.View):
             safe_name = f"{self.username}_{self.wallet[-6:]}"
             async with POSTER_SEMAPHORE:
                 poster_path = await _render_wallet_profile_poster(profile_ctx, out_dir, safe_name=safe_name)
+                history_path = await _render_wallet_profile_history_poster(profile_ctx, out_dir, safe_name=safe_name)
+            history_summary = profile_ctx.get("history_summary") or {}
             summary = (
                 f"✅ **{self.username}** · {self.texts['summary_done']}\n"
                 f"{self.texts['wallet_label']}: `{self.wallet}`\n"
                 f"{self.texts['shown_label']}: **{profile_ctx.get('shown_count', 0)}** | "
-                f"{self.texts['shown_fmv_label']}: **{_format_fmv_usd(_parse_int(profile_ctx.get('shown_fmv')))}**"
+                f"{self.texts['shown_fmv_label']}: **{_format_fmv_usd(_parse_int(profile_ctx.get('shown_fmv')))}**\n"
+                f"History · Opened Packs: **{_format_number(history_summary.get('opened_packs'))}** | "
+                f"Net: **{_format_usdt_currency(history_summary.get('net_total'), signed=True)}**"
             )
-            await interaction.followup.send(summary, file=discord.File(poster_path))
+            await interaction.followup.send(
+                summary,
+                files=[discord.File(poster_path), discord.File(history_path)],
+            )
         except Exception as e:
             print(f"❌ ProfileConfigView 生成失敗: {e}", file=sys.stderr)
             print(traceback.format_exc(), file=sys.stderr)

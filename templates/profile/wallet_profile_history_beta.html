@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Collection History</title>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; }
+
+    :root {
+      --glass-bg: rgba(255, 255, 255, 0.42);
+      --glass-border: rgba(255, 255, 255, 0.86);
+      --glass-shadow: 0 12px 30px rgba(145, 164, 198, 0.14);
+      --text-main: #1f2b42;
+      --text-muted: #6c7e99;
+      --label: #7a8ca6;
+      --positive: #0f8e72;
+      --negative: #d96562;
+      --gold: #b58b29;
+      --radius: 18px;
+    }
+
+    body {
+      margin: 0;
+      width: 1200px;
+      height: 900px;
+      font-family: "Manrope", "Noto Sans TC", sans-serif;
+      color: var(--text-main);
+      background:
+        radial-gradient(860px 540px at 5% -8%, rgba(255, 212, 138, 0.30), rgba(255, 212, 138, 0) 62%),
+        radial-gradient(920px 520px at 98% 102%, rgba(172, 201, 255, 0.32), rgba(172, 201, 255, 0) 64%),
+        linear-gradient(145deg, #f7f9ff 0%, #fdfbf7 52%, #f6f8fc 100%);
+      overflow: hidden;
+    }
+
+    .poster {
+      position: relative;
+      width: 1200px;
+      height: 900px;
+      padding: 36px 36px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      isolation: isolate;
+    }
+
+    .blob {
+      position: absolute;
+      border-radius: 999px;
+      pointer-events: none;
+      filter: blur(70px);
+      z-index: 0;
+      opacity: 0.55;
+    }
+
+    .blob-a { width: 420px; height: 420px; top: -120px; left: -120px; background: rgba(255, 212, 130, 0.28); }
+    .blob-b { width: 470px; height: 470px; right: -160px; top: 120px; background: rgba(130, 180, 255, 0.24); }
+    .blob-c { width: 360px; height: 360px; left: 380px; bottom: -150px; background: rgba(140, 225, 192, 0.20); }
+
+    .header,
+    .stats-grid,
+    .main,
+    .footer {
+      position: relative;
+      z-index: 1;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 2px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand img {
+      width: auto;
+      height: 60px;
+      object-fit: contain;
+      filter: drop-shadow(0 6px 16px rgba(106, 136, 187, 0.16));
+    }
+
+    .brand-name {
+      font-size: 32px;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: 0.01em;
+      color: #243754;
+      text-shadow: 0 2px 10px rgba(157, 183, 225, 0.24);
+    }
+
+    .brand-suffix {
+      font-size: 0.52em;
+      letter-spacing: 0.08em;
+      opacity: 0.86;
+    }
+
+    .title-wrap {
+      max-width: 64%;
+      text-align: right;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 52px;
+      line-height: 1.02;
+      letter-spacing: -0.03em;
+      font-weight: 900;
+      background: linear-gradient(96deg, #ff5f2f 0%, #ffbf1f 28%, #22bc86 52%, #15bad8 72%, #2162ff 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      text-shadow: 0 8px 20px rgba(101, 126, 166, 0.20);
+    }
+
+    .subtitle {
+      margin-top: 5px;
+      font-size: 14px;
+      color: var(--text-muted);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    .meta {
+      margin-top: 6px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: #7286a3;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 2px;
+    }
+
+    .glass-card {
+      position: relative;
+      border-radius: var(--radius);
+      background: var(--glass-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--glass-border);
+      box-shadow: var(--glass-shadow);
+      overflow: hidden;
+    }
+
+    .glass-card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      padding: 1px;
+      background: linear-gradient(120deg, rgba(255, 175, 79, 0.40), rgba(117, 188, 255, 0.38), rgba(160, 138, 255, 0.35), rgba(255, 158, 170, 0.34), rgba(255, 175, 79, 0.40));
+      -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude;
+      opacity: 0.7;
+      pointer-events: none;
+    }
+
+    .glass-card::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background: linear-gradient(180deg, rgba(255,255,255,0.36) 0%, rgba(255,255,255,0.06) 42%, rgba(255,255,255,0) 100%);
+      pointer-events: none;
+      opacity: 0.52;
+    }
+
+    .stat-card {
+      min-height: 88px;
+      padding: 12px 13px 11px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .stat-label {
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--label);
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    .stat-note {
+      font-size: 9px;
+      letter-spacing: 0.04em;
+      color: #8ea0b8;
+      font-weight: 700;
+      margin-top: 1px;
+      line-height: 1.15;
+    }
+
+    .stat-value {
+      line-height: 1;
+      font-size: 34px;
+      font-weight: 900;
+      letter-spacing: -0.03em;
+      color: var(--text-main);
+      text-shadow: 0 4px 14px rgba(148, 168, 204, 0.16);
+    }
+
+    .stat-value.usdt::before {
+      content: "$";
+      font-size: 0.52em;
+      margin-right: 4px;
+      vertical-align: 0.24em;
+      color: var(--gold);
+      font-weight: 800;
+    }
+
+    .stat-value.gold {
+      color: var(--gold);
+      text-shadow: 0 4px 14px rgba(194, 165, 103, 0.18);
+    }
+
+    .stat-value.positive { color: var(--positive); }
+    .stat-value.negative { color: var(--negative); }
+    .stat-value.net-gold { color: var(--gold); text-shadow: 0 4px 14px rgba(194, 165, 103, 0.18); }
+
+    .stat-value.metal-red,
+    .stat-value.metal-green,
+    .stat-value.metal-gold {
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      background-size: auto, 210% 210%;
+      background-position: 0 0, 24% 46%;
+    }
+
+    .stat-value.metal-red {
+      background-image:
+        repeating-linear-gradient(
+          101deg,
+          rgba(255,255,255,0.00) 0px,
+          rgba(255,255,255,0.00) 6px,
+          rgba(255,255,255,0.009) 6px,
+          rgba(255,255,255,0.009) 8px,
+          rgba(255,255,255,0.00) 8px,
+          rgba(255,255,255,0.00) 14px,
+          rgba(255,255,255,0.006) 14px,
+          rgba(255,255,255,0.006) 17px,
+          rgba(255,255,255,0.00) 17px,
+          rgba(255,255,255,0.00) 26px
+        ),
+        linear-gradient(
+          159deg,
+          #ffd1c7 0%,
+          #e9524d 17%,
+          #ff9e90 33%,
+          #cb3f45 49%,
+          #ffc9bf 66%,
+          #e45952 82%,
+          #ffe0d9 100%
+        );
+      text-shadow: 0 1px 3px rgba(216, 96, 96, 0.01);
+    }
+
+    .stat-value.metal-green {
+      background-image:
+        repeating-linear-gradient(
+          101deg,
+          rgba(255,255,255,0.00) 0px,
+          rgba(255,255,255,0.00) 7px,
+          rgba(255,255,255,0.008) 7px,
+          rgba(255,255,255,0.008) 10px,
+          rgba(255,255,255,0.00) 10px,
+          rgba(255,255,255,0.00) 16px,
+          rgba(255,255,255,0.005) 16px,
+          rgba(255,255,255,0.005) 20px,
+          rgba(255,255,255,0.00) 20px,
+          rgba(255,255,255,0.00) 29px
+        ),
+        linear-gradient(
+          159deg,
+          #bff6e3 0%,
+          #1eb484 19%,
+          #72e2bb 36%,
+          #0f9b71 52%,
+          #bcf2de 68%,
+          #1faa7d 82%,
+          #d7fbef 100%
+        );
+      text-shadow: 0 1px 3px rgba(25, 138, 106, 0.01);
+    }
+
+    .stat-value.metal-gold {
+      background-image:
+        repeating-linear-gradient(
+          101deg,
+          rgba(255,255,255,0.00) 0px,
+          rgba(255,255,255,0.00) 6px,
+          rgba(255,255,255,0.009) 6px,
+          rgba(255,255,255,0.009) 9px,
+          rgba(255,255,255,0.00) 9px,
+          rgba(255,255,255,0.00) 14px,
+          rgba(255,255,255,0.006) 14px,
+          rgba(255,255,255,0.006) 18px,
+          rgba(255,255,255,0.00) 18px,
+          rgba(255,255,255,0.00) 27px
+        ),
+        linear-gradient(
+          159deg,
+          #ffefb0 0%,
+          #d9a22a 18%,
+          #ffd36a 34%,
+          #b67d12 49%,
+          #ffe2a0 64%,
+          #d39b24 82%,
+          #fff1bf 100%
+        );
+      text-shadow: 0 1px 3px rgba(190, 155, 76, 0.01);
+    }
+
+    .main {
+      display: grid;
+      grid-template-columns: 1.45fr 1fr;
+      gap: 12px;
+      min-height: 0;
+      flex: 1;
+    }
+
+    .panel {
+      padding: 12px 14px;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .panel-title {
+      font-size: 13px;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+      color: #6a7d97;
+      font-weight: 800;
+    }
+
+    .panel-right {
+      background: rgba(248, 250, 255, 0.58);
+      border-color: rgba(243, 247, 255, 0.92);
+      box-shadow: 0 14px 30px rgba(128, 149, 184, 0.16);
+    }
+
+    .table-wrap {
+      flex: 1;
+      min-height: 0;
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid rgba(236, 243, 254, 0.96);
+      background: rgba(255, 255, 255, 0.42);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 11px;
+    }
+
+    thead th {
+      text-align: left;
+      font-size: 10px;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      color: #7e90ab;
+      font-weight: 800;
+      padding: 8px 8px;
+      border-bottom: 1px solid rgba(228, 236, 248, 0.95);
+      background: rgba(253, 255, 255, 0.64);
+      white-space: nowrap;
+    }
+
+    tbody td {
+      padding: 7px 8px;
+      color: #334866;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    tbody tr:nth-child(odd) {
+      background: rgba(246, 250, 255, 0.30);
+    }
+
+    tbody tr:nth-child(even) {
+      background: rgba(255, 255, 255, 0.10);
+    }
+
+    .num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pack-name { color: #233858; font-weight: 800; }
+    .contract { color: #69809d; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .total-box {
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.46);
+      border: 1px solid rgba(241, 247, 255, 0.94);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66);
+    }
+
+    .total-label {
+      font-size: 10px;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: #7b8ea7;
+      font-weight: 800;
+    }
+
+    .total-value {
+      margin-top: 3px;
+      font-size: 34px;
+      line-height: 1;
+      letter-spacing: -0.03em;
+      color: #273b5a;
+      font-weight: 900;
+    }
+
+    .activity-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .activity-item {
+      min-height: 74px;
+      padding: 8px 9px;
+      border-radius: 14px;
+      border: 1px solid rgba(239, 245, 255, 0.94);
+      background: rgba(255, 255, 255, 0.44);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.66);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 4px;
+    }
+
+    .activity-item-highlight {
+      border: 1px solid transparent;
+      background:
+        linear-gradient(145deg, rgba(255,255,255,0.74), rgba(255,255,255,0.62)) padding-box,
+        linear-gradient(120deg, rgba(255, 184, 95, 0.88), rgba(122, 194, 255, 0.86), rgba(175, 150, 255, 0.84), rgba(255, 166, 178, 0.78), rgba(255, 184, 95, 0.88)) border-box;
+      box-shadow: 0 10px 20px rgba(149, 176, 214, 0.22);
+    }
+
+    .activity-item-days {
+      grid-column: 1 / -1;
+      min-height: 66px;
+    }
+
+    .activity-name {
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #7388a2;
+      font-weight: 800;
+      line-height: 1.2;
+    }
+
+    .activity-count {
+      font-size: 34px;
+      line-height: 1;
+      letter-spacing: -0.03em;
+      font-weight: 900;
+      color: #273b5a;
+    }
+
+    .activity-count-gold {
+      text-shadow: 0 1px 3px rgba(190, 155, 76, 0.01);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      background-size: auto, 210% 210%;
+      background-position: 0 0, 24% 46%;
+      background-image:
+        repeating-linear-gradient(
+          101deg,
+          rgba(255,255,255,0.00) 0px,
+          rgba(255,255,255,0.00) 6px,
+          rgba(255,255,255,0.009) 6px,
+          rgba(255,255,255,0.009) 9px,
+          rgba(255,255,255,0.00) 9px,
+          rgba(255,255,255,0.00) 14px,
+          rgba(255,255,255,0.006) 14px,
+          rgba(255,255,255,0.006) 18px,
+          rgba(255,255,255,0.00) 18px,
+          rgba(255,255,255,0.00) 27px
+        ),
+        linear-gradient(
+          159deg,
+          #ffefb0 0%,
+          #d9a22a 18%,
+          #ffd36a 34%,
+          #b67d12 49%,
+          #ffe2a0 64%,
+          #d39b24 82%,
+          #fff1bf 100%
+        );
+    }
+
+    .open-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: rgba(237, 244, 255, 0.92);
+      color: #2e4568;
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.02em;
+    }
+
+    .notes {
+      margin-top: 2px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(239, 246, 255, 0.94);
+      background: rgba(255, 255, 255, 0.46);
+      color: #4c607b;
+      font-size: 11px;
+      line-height: 1.38;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.66);
+    }
+
+    .notes-label {
+      margin: 0;
+      font-size: 11px;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      color: #7b8ea7;
+      font-weight: 800;
+      line-height: 1.2;
+    }
+
+    .notes-value {
+      margin-top: 4px;
+      font-size: 34px;
+      line-height: 1;
+      letter-spacing: -0.03em;
+      font-weight: 900;
+      color: #0f8e72;
+      text-shadow: 0 1px 3px rgba(25, 138, 106, 0.01);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      background-size: auto, 210% 210%;
+      background-position: 0 0, 24% 46%;
+      background-image:
+        repeating-linear-gradient(
+          101deg,
+          rgba(255,255,255,0.00) 0px,
+          rgba(255,255,255,0.00) 7px,
+          rgba(255,255,255,0.008) 7px,
+          rgba(255,255,255,0.008) 10px,
+          rgba(255,255,255,0.00) 10px,
+          rgba(255,255,255,0.00) 16px,
+          rgba(255,255,255,0.005) 16px,
+          rgba(255,255,255,0.005) 20px,
+          rgba(255,255,255,0.00) 20px,
+          rgba(255,255,255,0.00) 29px
+        ),
+        linear-gradient(
+          159deg,
+          #bff6e3 0%,
+          #1eb484 19%,
+          #72e2bb 36%,
+          #0f9b71 52%,
+          #bcf2de 68%,
+          #1faa7d 82%,
+          #d7fbef 100%
+        );
+    }
+
+    .chips {
+      margin-top: 5px;
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+
+    .chip {
+      border-radius: 999px;
+      border: 1px solid rgba(224, 234, 248, 0.96);
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 800;
+      color: #607691;
+      background: rgba(252, 255, 255, 0.74);
+    }
+
+    .footer {
+      margin-top: auto;
+      padding-top: 7px;
+      border-top: 1px solid rgba(226, 236, 248, 0.92);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: #7b8ea8;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 800;
+    }
+  </style>
+</head>
+<body>
+  <div class="poster" data-poster-root="true">
+    <div class="blob blob-a"></div>
+    <div class="blob blob-b"></div>
+    <div class="blob blob-c"></div>
+
+    <div class="header">
+      <div class="brand">
+        <img src="logo.png" alt="Logo" />
+        <div class="brand-name">{{ brand_name }}<span class="brand-suffix">.XYZ</span></div>
+      </div>
+      <div class="title-wrap">
+        <h1 class="title">{{ history_title }}</h1>
+        <div class="subtitle">{{ collection_name }} · {{ history_subtitle }}</div>
+        <div class="meta">
+          <span>{{ wallet_short }}</span>
+          <span>{{ history_range }}</span>
+          <span>{{ update_date }}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="glass-card stat-card">
+        <div class="stat-label">{{ metric_pack_spent_label }}</div>
+        <div class="stat-value usdt metal-red">{{ metric_pack_spent_value }}</div>
+      </div>
+      <div class="glass-card stat-card">
+        <div class="stat-label">{{ metric_market_buy_label }}</div>
+        <div class="stat-value usdt metal-red">{{ metric_market_buy_value }}</div>
+      </div>
+      <div class="glass-card stat-card">
+        <div class="stat-label">{{ metric_total_spent_label }}</div>
+        <div class="stat-note">({{ metric_total_spent_note }})</div>
+        <div class="stat-value usdt metal-red">{{ metric_total_spent_value }}</div>
+      </div>
+      <div class="glass-card stat-card">
+        <div class="stat-label">{{ metric_assets_value_label }}</div>
+        <div class="stat-value usdt metal-gold">{{ metric_assets_value_value }}</div>
+      </div>
+      <div class="glass-card stat-card">
+        <div class="stat-label">{{ metric_buyback_label }}</div>
+        <div class="stat-value usdt metal-green">{{ metric_buyback_value }}</div>
+      </div>
+      <div class="glass-card stat-card">
+        <div class="stat-label">{{ metric_market_sell_label }}</div>
+        <div class="stat-value usdt metal-green">{{ metric_market_sell_value }}</div>
+      </div>
+      <div class="glass-card stat-card">
+        <div class="stat-label">{{ metric_total_earned_label }}</div>
+        <div class="stat-note">({{ metric_total_earned_note }})</div>
+        <div class="stat-value usdt metal-green">{{ metric_total_earned_value }}</div>
+      </div>
+      <div class="glass-card stat-card">
+        <div class="stat-label">{{ metric_net_label }}</div>
+        <div class="stat-note">({{ metric_net_note }})</div>
+        <div class="stat-value net-gold metal-gold">{{ metric_net_value }}</div>
+      </div>
+    </div>
+
+    <div class="main">
+      <div class="glass-card panel panel-left">
+        <div class="panel-title">{{ section_contract }}</div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 28%;">{{ head_pack }}</th>
+                <th style="width: 22%;">{{ head_contract }}</th>
+                <th class="num" style="width: 12%;">{{ head_open_count }}</th>
+                <th class="num" style="width: 16%;">{{ head_unit_price }}</th>
+                <th class="num" style="width: 16%;">{{ head_spent_total }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if contract_rows and contract_rows|length > 0 %}
+                {% for row in contract_rows %}
+                <tr>
+                  <td class="pack-name" title="{{ row.pack_name }}">{{ row.pack_name }}</td>
+                  <td class="contract" title="{{ row.contract }}">{{ row.contract_short }}</td>
+                  <td class="num"><span class="open-pill">{{ row.open_count }}</span></td>
+                  <td class="num">{{ row.unit_price }}</td>
+                  <td class="num">{{ row.spent_total }}</td>
+                </tr>
+                {% endfor %}
+              {% else %}
+                <tr><td colspan="5">{{ empty_contract }}</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="glass-card panel panel-right">
+        <div class="panel-title">{{ section_activity }}</div>
+        <div class="total-box">
+          <div class="total-label">{{ activity_total_label }}</div>
+          <div class="total-value">{{ activity_total_value }}</div>
+        </div>
+
+        <div class="activity-list">
+          {% for row in activity_rows %}
+          <div class="activity-item{% if row.highlight %} activity-item-highlight{% endif %}">
+            <div class="activity-name">{{ row.name }}</div>
+            <div class="activity-count">{{ row.count }}</div>
+          </div>
+          {% endfor %}
+          <div class="activity-item activity-item-days">
+            <div class="activity-name">{{ active_days_label }}</div>
+            <div class="activity-count activity-count-gold">{{ active_days_value }}</div>
+          </div>
+        </div>
+
+        <div class="notes">
+          <div class="notes-label">{{ metric_card_withdraw_label }}</div>
+          <div class="notes-value">${{ metric_card_withdraw_value }}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <span>{{ brand_site }}</span>
+      <span>{{ update_date }}</span>
+    </div>
+  </div>
+</body>
+</html>
