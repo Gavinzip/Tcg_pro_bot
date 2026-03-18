@@ -40,29 +40,25 @@ async def main():
 
     print("🖼️  Rendering poster 1 (collection)...", flush=True)
     try:
-        p1 = await bot._render_wallet_profile_poster(profile_ctx, OUT_DIR, safe_name=safe_name)
+        rendered = await bot._render_wallet_profile_posters_bundle(
+            profile_ctx,
+            OUT_DIR,
+            safe_name=safe_name,
+            render_profile=True,
+        )
+        p1 = rendered.get("profile")
+        p2 = rendered.get("history")
+        p3 = rendered.get("extremes")
         print(f"  ✅ {p1}", flush=True)
-    except Exception as e:
-        print(f"  ❌ Poster 1 failed: {e}", flush=True)
-        traceback.print_exc()
-        p1 = None
-
-    print("🖼️  Rendering poster 2 (history)...", flush=True)
-    try:
-        p2 = await bot._render_wallet_profile_history_poster(profile_ctx, OUT_DIR, safe_name=safe_name)
+        print("🖼️  Rendering poster 2 (history)...", flush=True)
         print(f"  ✅ {p2}", flush=True)
-    except Exception as e:
-        print(f"  ❌ Poster 2 failed: {e}", flush=True)
-        traceback.print_exc()
-        p2 = None
-
-    print("🖼️  Rendering poster 3 (extremes)...", flush=True)
-    try:
-        p3 = await bot._render_wallet_profile_extreme_poster(profile_ctx, OUT_DIR, safe_name=safe_name)
+        print("🖼️  Rendering poster 3 (extremes)...", flush=True)
         print(f"  ✅ {p3}", flush=True)
     except Exception as e:
-        print(f"  ❌ Poster 3 failed: {e}", flush=True)
+        print(f"  ❌ Bundle render failed: {e}", flush=True)
         traceback.print_exc()
+        p1 = None
+        p2 = None
         p3 = None
 
     print("\n✅ Done! Output files:", flush=True)

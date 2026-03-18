@@ -11,3 +11,4 @@ run_debug_*.log
 _archive/
 debug_wallet_profile_latest/
 logs/
+templates/profile/cache_cards/
