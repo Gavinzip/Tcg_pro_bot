@@ -131,6 +131,16 @@ def _safe_tzinfo(name: str):
 
 NFT_SYNC_RUN_TIME = dt_time(hour=NFT_SYNC_HOUR, minute=NFT_SYNC_MINUTE, tzinfo=_safe_tzinfo(NFT_SYNC_TZ))
 
+RANK_SYNC_ENABLE = _env_true("RANK_SYNC_ENABLE", True)
+RANK_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "update_rankings.py")
+RANK_SYNC_STARTUP_DONE = False
+RANK_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
+RANK_SYNC_TZ = str(os.getenv("RANK_SYNC_TZ", "Asia/Taipei")).strip() or "Asia/Taipei"
+RANK_SYNC_COMPARE_ON_STARTUP = _env_true("RANK_SYNC_COMPARE_ON_STARTUP", False)
+RANK_SYNC_HOUR = max(0, min(23, int(os.getenv("RANK_SYNC_HOUR", "12"))))
+RANK_SYNC_MINUTE = max(0, min(59, int(os.getenv("RANK_SYNC_MINUTE", "0"))))
+RANK_SYNC_RUN_TIME = dt_time(hour=RANK_SYNC_HOUR, minute=RANK_SYNC_MINUTE, tzinfo=_safe_tzinfo(RANK_SYNC_TZ))
+
 
 def _nft_sync_data_dir() -> str:
     app_env = str(os.getenv("APP_ENV", "local")).strip().lower() or "local"
@@ -141,6 +151,72 @@ def _nft_sync_data_dir() -> str:
 def _nft_sync_status_path() -> str:
     token_id = str(os.getenv("NFT_TOKEN_ID", "13")).strip() or "13"
     return os.path.join(_nft_sync_data_dir(), "state", f"nft_{token_id}_status.json")
+
+
+def _rank_sync_data_dir() -> str:
+    app_env = str(os.getenv("APP_ENV", "local")).strip().lower() or "local"
+    default_dir = "/data/renaiss_sync/rankings" if app_env == "server" else "./data/renaiss_sync/rankings"
+    return str(os.getenv("RANK_SYNC_DATA_DIR", os.getenv("RANKING_DATA_DIR", default_dir))).strip() or default_dir
+
+
+def _rank_sync_status_path() -> str:
+    return os.path.join(_rank_sync_data_dir(), "state", "ranking_status.json")
+
+
+_RANKING_LATEST_CACHE: dict[str, object] = {
+    "path": "",
+    "mtime": -1.0,
+    "wallet_map": {},
+}
+
+
+def _load_rankings_wallet_map() -> dict[str, dict]:
+    latest_path = os.path.join(_rank_sync_data_dir(), "latest.json")
+    try:
+        mtime = os.path.getmtime(latest_path)
+    except OSError:
+        return {}
+
+    if (
+        _RANKING_LATEST_CACHE.get("path") == latest_path
+        and _RANKING_LATEST_CACHE.get("mtime") == mtime
+        and isinstance(_RANKING_LATEST_CACHE.get("wallet_map"), dict)
+    ):
+        return _RANKING_LATEST_CACHE.get("wallet_map")  # type: ignore[return-value]
+
+    try:
+        with open(latest_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+
+    rows = data.get("wallets") if isinstance(data, dict) and isinstance(data.get("wallets"), list) else []
+    wallet_map: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        addr = _normalize_wallet_address(str(row.get("address") or ""))
+        if not addr:
+            continue
+        wallet_map[addr] = row
+
+    _RANKING_LATEST_CACHE["path"] = latest_path
+    _RANKING_LATEST_CACHE["mtime"] = mtime
+    _RANKING_LATEST_CACHE["wallet_map"] = wallet_map
+    return wallet_map
+
+
+def _rank_chip_payload(rank_value: object) -> dict[str, str]:
+    rank_int = _parse_int(rank_value)
+    if rank_int is None or rank_int <= 0:
+        return {"text": "-", "tier": "none"}
+    if rank_int <= 10:
+        tier = "gold"
+    elif rank_int <= 100:
+        tier = "silver"
+    else:
+        tier = "bronze"
+    return {"text": str(rank_int), "tier": tier}
 # /profile uses an isolated template bundle to avoid impacting normal card posters.
 PROFILE_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile＿beta.html")
 PROFILE_HISTORY_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_history_beta.html")
@@ -2396,6 +2472,7 @@ def _build_wallet_profile_context(
         user_id, username = None, None
     wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
     short_wallet = f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm
+    ranking_row = _load_rankings_wallet_map().get(wallet_norm, {}) if wallet_norm else {}
     if user_id:
         try:
             collection = _fetch_user_collection(user_id)
@@ -2470,6 +2547,14 @@ def _build_wallet_profile_context(
     profile_name = str(username or short_wallet or "Unknown User")
     sbt_badges = _fetch_user_sbt_badges(username)
     sbt_total = sum((b.get("balance") or 0) for b in sbt_badges)
+    sbt_rank_value = _parse_int((ranking_row or {}).get("sbt_owned_total"))
+    if sbt_rank_value is None:
+        sbt_rank_value = int(sbt_total)
+    volume_rank_chip = _rank_chip_payload((ranking_row or {}).get("volume_rank"))
+    holdings_rank_chip = _rank_chip_payload((ranking_row or {}).get("holdings_rank"))
+    pnl_rank_chip = _rank_chip_payload((ranking_row or {}).get("pnl_rank"))
+    participation_rank_chip = _rank_chip_payload((ranking_row or {}).get("participation_days_rank"))
+    sbt_rank_chip = _rank_chip_payload((ranking_row or {}).get("sbt_rank"))
     owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
 
     selected_lookup = {str(x).strip().lower() for x in (selected_sbt_names or []) if str(x).strip()}
@@ -2588,10 +2673,20 @@ def _build_wallet_profile_context(
         "metric_net_label": history_labels.get("kpi_net", "Net PnL"),
         "metric_net_note": history_labels.get("kpi_net_note", ""),
         "metric_net_value": _format_usdt_currency(net_with_holdings, signed=True),
+        "metric_net_rank": pnl_rank_chip["text"],
+        "metric_net_rank_tier": pnl_rank_chip["tier"],
         "metric_trade_volume_label": history_labels.get("kpi_trade_volume", "Trade Volume"),
         "metric_trade_volume_value": _format_usdt_decimal(history_data.get("trade_volume")),
+        "metric_trade_volume_rank": volume_rank_chip["text"],
+        "metric_trade_volume_rank_tier": volume_rank_chip["tier"],
         "metric_assets_value_label": history_labels.get("kpi_assets_value", "Holdings Value"),
         "metric_assets_value_value": _format_usdt_decimal(holdings_value),
+        "metric_assets_value_rank": holdings_rank_chip["text"],
+        "metric_assets_value_rank_tier": holdings_rank_chip["tier"],
+        "metric_sbt_label": "SBT",
+        "metric_sbt_value": _format_number(sbt_rank_value),
+        "metric_sbt_rank": sbt_rank_chip["text"],
+        "metric_sbt_rank_tier": sbt_rank_chip["tier"],
         "metric_buyback_label": history_labels.get("kpi_buyback", "Buyback Total"),
         "metric_buyback_value": _format_usdt_decimal(history_data.get("buyback_total")),
         "metric_market_buy_label": history_labels.get("kpi_market_buy", "Market Buy Total"),
@@ -2600,6 +2695,8 @@ def _build_wallet_profile_context(
         "metric_market_sell_value": _format_usdt_decimal(history_data.get("market_sell_total")),
         "active_days_label": history_labels.get("kpi_active_days", "Active Days"),
         "active_days_value": _format_number(history_data.get("active_days_count")),
+        "active_days_rank": participation_rank_chip["text"],
+        "active_days_rank_tier": participation_rank_chip["tier"],
         "activity_total_label": history_labels.get("activity_total", "Total Activities"),
         "activity_total_value": _format_number(history_data.get("activity_total_count")),
         "chip_direct_label": history_labels.get("chip_direct", "Direct"),
@@ -3384,6 +3481,9 @@ async def _handle_image_impl(
     message,
     lang="zh",
     existing_thread: discord.Thread | None = None,
+    vision_provider_override: str | None = None,
+    google_model_override: str | None = None,
+    openai_model_override: str | None = None,
 ):
     """
     ** 並發核心函數（stream 模式）**
@@ -3436,6 +3536,22 @@ async def _handle_image_impl(
     )
     await thread.send(analyzing_msg)
 
+    # 回貼原始圖片到討論串，避免使用者只看到文字流程
+    try:
+        original_file = await attachment.to_file(use_cached=True)
+        await thread.send(
+            _t(
+                lang,
+                "🖼️ 你上傳的原始圖片：",
+                "🖼️ Your uploaded image:",
+                "🖼️ 업로드한 원본 이미지:",
+                "🖼️ 你上传的原始图片："
+            ),
+            file=original_file
+        )
+    except Exception as e:
+        print(f"⚠️ 無法回貼原始圖片到討論串: {e}")
+
     # 3. 建立暫存資料夾（海報存這裡）
     card_out_dir = tempfile.mkdtemp(prefix=f"tcg_bot_{message.id}_")
     img_path = os.path.join(card_out_dir, attachment.filename)
@@ -3451,7 +3567,14 @@ async def _handle_image_impl(
 
             # 統一先用中文產出，再針對使用者語言做後置翻譯（確保報告格式穩定）。
             result = await market_report_vision.process_single_image(
-                img_path, api_key, out_dir=card_out_dir, stream_mode=True, lang="zh"
+                img_path,
+                api_key,
+                out_dir=card_out_dir,
+                stream_mode=True,
+                lang="zh",
+                vision_provider_override=vision_provider_override,
+                google_model_override=google_model_override,
+                openai_model_override=openai_model_override,
             )
 
             # 傳送 AI 模型切換通知（如 Minimax → GPT-4o-mini 備援）
@@ -3729,9 +3852,56 @@ async def _before_nft_daily_sync_job():
     await client.wait_until_ready()
 
 
+async def _run_ranking_sync_script(trigger: str, bootstrap_only: bool = False, full_rebuild: bool = False) -> bool:
+    if not RANK_SYNC_ENABLE:
+        return True
+    if not os.path.exists(RANK_SYNC_SCRIPT_PATH):
+        print(f"⚠️ Ranking sync script not found: {RANK_SYNC_SCRIPT_PATH}")
+        return False
+
+    cmd = [sys.executable, RANK_SYNC_SCRIPT_PATH, "--trigger", trigger]
+    if bootstrap_only:
+        cmd.append("--bootstrap-only")
+    if full_rebuild:
+        cmd.append("--full-rebuild")
+
+    print(
+        "🕒 Ranking sync start "
+        f"trigger={trigger} bootstrap_only={1 if bootstrap_only else 0} full_rebuild={1 if full_rebuild else 0}"
+    )
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=BASE_DIR,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out_b, err_b = await proc.communicate()
+    out = (out_b or b"").decode("utf-8", errors="replace").strip()
+    err = (err_b or b"").decode("utf-8", errors="replace").strip()
+    if out:
+        print(out)
+    if err:
+        print(err, file=sys.stderr)
+    if proc.returncode != 0:
+        print(f"❌ Ranking sync failed trigger={trigger} rc={proc.returncode}")
+        return False
+    print(f"✅ Ranking sync done trigger={trigger}")
+    return True
+
+
+@tasks.loop(time=RANK_SYNC_RUN_TIME)
+async def ranking_daily_sync_job():
+    await _run_ranking_sync_script("daily", bootstrap_only=False, full_rebuild=True)
+
+
+@ranking_daily_sync_job.before_loop
+async def _before_ranking_daily_sync_job():
+    await client.wait_until_ready()
+
+
 @client.event
 async def on_ready():
-    global NFT_SYNC_STARTUP_DONE, NFT_SYNC_STARTUP_LOCK
+    global NFT_SYNC_STARTUP_DONE, NFT_SYNC_STARTUP_LOCK, RANK_SYNC_STARTUP_DONE, RANK_SYNC_STARTUP_LOCK
     # Attempt to sync global commands
     try:
         await tree.sync()
@@ -3755,6 +3925,22 @@ async def on_ready():
                 NFT_SYNC_STARTUP_DONE = True
         if not nft_daily_sync_job.is_running():
             nft_daily_sync_job.start()
+
+    if RANK_SYNC_ENABLE:
+        if RANK_SYNC_STARTUP_LOCK is None:
+            RANK_SYNC_STARTUP_LOCK = asyncio.Lock()
+        async with RANK_SYNC_STARTUP_LOCK:
+            if not RANK_SYNC_STARTUP_DONE:
+                bootstrap_ok = await _run_ranking_sync_script("startup", bootstrap_only=True, full_rebuild=False)
+                if RANK_SYNC_COMPARE_ON_STARTUP:
+                    compare_ok = await _run_ranking_sync_script("startup_compare", bootstrap_only=False, full_rebuild=False)
+                    print(
+                        "🧪 Ranking startup compare done "
+                        f"bootstrap_ok={1 if bootstrap_ok else 0} compare_ok={1 if compare_ok else 0}"
+                    )
+                RANK_SYNC_STARTUP_DONE = True
+        if not ranking_daily_sync_job.is_running():
+            ranking_daily_sync_job.start()
 
 class PCSelect(discord.ui.Select):
     def __init__(self, candidates):
@@ -4257,6 +4443,38 @@ async def manual_analyze(interaction: discord.Interaction, image: discord.Attach
             os.remove(img_path)
 
 
+@tree.command(name="mega", description="使用 OpenAI GPT-5.4 直接分析卡片並生成報告")
+async def mega(interaction: discord.Interaction, image: discord.Attachment, lang: str = "zh"):
+    if not any(image.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]):
+        await interaction.response.send_message("❌ 請上傳有效的圖片", ephemeral=True)
+        return
+
+    openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not openai_key:
+        await interaction.response.send_message(
+            "❌ `/mega` 需要 `OPENAI_API_KEY`。請先在伺服器環境變數設定。",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message("🔍 收到圖片，正在建立 /mega 分析討論串...", ephemeral=False)
+    resp = await interaction.original_response()
+    thread_name = "卡片分析 (/mega)" if lang == "zh" else "Card Analysis (/mega)"
+    thread = await resp.create_thread(name=thread_name, auto_archive_duration=60)
+    await thread.add_user(interaction.user)
+
+    model_name = (os.getenv("MEGA_OPENAI_MODEL") or "gpt-5.4").strip()
+    await thread.send(f"🧠 `/mega` 固定模型：`{model_name}`")
+    await _handle_image_impl(
+        image,
+        resp,
+        lang=lang,
+        existing_thread=thread,
+        vision_provider_override="openai",
+        openai_model_override=model_name,
+    )
+
+
 @tree.command(name="cardset", description="輸入系列代號（如 op15），直接生成卡盒 Top10 報告與海報")
 @app_commands.describe(series_code="系列代號，例如 op15 / m4 / loch")
 async def cardset(interaction: discord.Interaction, series_code: str):
@@ -4506,6 +4724,58 @@ async def sync_status(interaction: discord.Interaction):
         f"New Rows: `{new_rows}` | Pages: `{pages}` | Holders: `{holder_count}`\n"
         f"Stop on First Duplicate: `{stop_on_dup}`\n"
         f"Commit: `{commit}`\n"
+        f"Status File: `{status_path}`\n"
+        f"Latest Snapshot: `{latest_path}`\n"
+    )
+    if message:
+        txt += f"\nMessage: `{message[:1200]}`"
+    await interaction.response.send_message(txt, ephemeral=True)
+
+
+@tree.command(name="ranking_sync_status", description="查看 rankings 同步狀態")
+async def ranking_sync_status(interaction: discord.Interaction):
+    status_path = _rank_sync_status_path()
+    latest_path = os.path.join(_rank_sync_data_dir(), "latest.json")
+    if not os.path.exists(status_path):
+        await interaction.response.send_message(
+            f"⚠️ 尚無 rankings 同步狀態檔：`{status_path}`\n請先等待啟動 bootstrap / compare 或整點同步執行。",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        with open(status_path, "r", encoding="utf-8") as f:
+            status = json.load(f)
+        if not isinstance(status, dict):
+            raise RuntimeError("status json invalid")
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ 讀取 rankings 同步狀態失敗：{e}",
+            ephemeral=True,
+        )
+        return
+
+    success = bool(status.get("success"))
+    trigger = str(status.get("trigger") or "unknown")
+    updated_at = str(status.get("updated_at") or "unknown")
+    message = str(status.get("message") or "").strip()
+    extra = status.get("extra") if isinstance(status.get("extra"), dict) else {}
+    wallet_count = extra.get("wallet_count", "n/a")
+    pages = extra.get("collectible_pages", "n/a")
+    changed_wallets = extra.get("changed_wallets", "n/a")
+    refreshed_wallets = extra.get("refreshed_wallets", "n/a")
+    full_rebuild = extra.get("full_rebuild", "n/a")
+    backup_status = extra.get("backup_status", "n/a")
+    commit = extra.get("commit", "n/a")
+    duration_sec = extra.get("duration_sec", "n/a")
+
+    txt = (
+        f"{'✅' if success else '❌'} Rankings 同步狀態：**{'成功' if success else '失敗'}**\n"
+        f"Trigger: `{trigger}`\n"
+        f"Updated At: `{updated_at}`\n"
+        f"Wallets: `{wallet_count}` | Pages: `{pages}`\n"
+        f"Changed: `{changed_wallets}` | Refreshed: `{refreshed_wallets}` | Full Rebuild: `{full_rebuild}`\n"
+        f"Backup: `{backup_status}` | Commit: `{commit}` | Duration: `{duration_sec}`\n"
         f"Status File: `{status_path}`\n"
         f"Latest Snapshot: `{latest_path}`\n"
     )

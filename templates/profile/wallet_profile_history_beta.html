@@ -201,6 +201,115 @@
       line-height: 1.2;
     }
 
+    .stat-label-row,
+    .activity-name-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .rank-chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 52px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 10px;
+      line-height: 1.1;
+      letter-spacing: 0.02em;
+      color: #223347;
+      border: 1px solid rgba(138, 152, 171, 0.24);
+      background: rgba(255, 255, 255, 0.55);
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .rank-gold {
+      color: #3f2a00;
+      border-color: rgba(168, 123, 35, 0.36);
+      background:
+        linear-gradient(160deg, rgba(255, 249, 220, 0.96), rgba(249, 206, 116, 0.95) 42%, rgba(188, 128, 24, 0.96));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.82), 0 2px 8px rgba(165, 123, 48, 0.28);
+    }
+
+    .rank-silver {
+      color: #2a3342;
+      border-color: rgba(122, 136, 153, 0.34);
+      background:
+        linear-gradient(160deg, rgba(248, 250, 255, 0.96), rgba(199, 210, 225, 0.95) 44%, rgba(122, 137, 157, 0.96));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.82), 0 2px 8px rgba(110, 126, 147, 0.22);
+    }
+
+    .rank-bronze {
+      color: #3f2619;
+      border-color: rgba(144, 95, 66, 0.34);
+      background:
+        linear-gradient(160deg, rgba(251, 233, 220, 0.96), rgba(205, 142, 96, 0.95) 44%, rgba(136, 87, 55, 0.96));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.76), 0 2px 8px rgba(126, 87, 63, 0.2);
+    }
+
+    .rank-none {
+      color: #7a899d;
+      border-color: rgba(129, 149, 176, 0.28);
+      background: rgba(255, 255, 255, 0.62);
+      box-shadow: none;
+    }
+
+    .rank-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .rank-summary-item {
+      min-height: 70px;
+      padding: 8px 9px;
+      border-radius: 14px;
+      border: 1px solid rgba(239, 245, 255, 0.94);
+      background: rgba(255, 255, 255, 0.46);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.66);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 5px;
+    }
+
+    .rank-summary-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .rank-summary-label {
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #7388a2;
+      font-weight: 800;
+      line-height: 1.2;
+    }
+
+    .rank-summary-value {
+      font-size: 30px;
+      line-height: 1;
+      letter-spacing: -0.03em;
+      font-weight: 900;
+      color: #273b5a;
+    }
+
+    .rank-summary-value.usdt::before {
+      content: "$";
+      font-size: 0.5em;
+      margin-right: 4px;
+      vertical-align: 0.22em;
+      color: var(--gold);
+      font-weight: 800;
+    }
+
     .stat-note {
       font-size: 9px;
       letter-spacing: 0.04em;
@@ -665,7 +774,10 @@
         <div class="stat-value usdt metal-red">{{ metric_total_spent_value }}</div>
       </div>
       <div class="glass-card stat-card">
-        <div class="stat-label">{{ metric_assets_value_label }}</div>
+        <div class="stat-label-row">
+          <div class="stat-label">{{ metric_assets_value_label }}</div>
+          <div class="rank-chip rank-{{ metric_assets_value_rank_tier }}">{{ metric_assets_value_rank }}</div>
+        </div>
         <div class="stat-value usdt metal-gold">{{ metric_assets_value_value }}</div>
       </div>
       <div class="glass-card stat-card">
@@ -682,7 +794,10 @@
         <div class="stat-value usdt metal-green">{{ metric_total_earned_value }}</div>
       </div>
       <div class="glass-card stat-card">
-        <div class="stat-label">{{ metric_net_label }}</div>
+        <div class="stat-label-row">
+          <div class="stat-label">{{ metric_net_label }}</div>
+          <div class="rank-chip rank-{{ metric_net_rank_tier }}">{{ metric_net_rank }}</div>
+        </div>
         <div class="stat-note">({{ metric_net_note }})</div>
         <div class="stat-value net-gold metal-gold">{{ metric_net_value }}</div>
       </div>
@@ -723,9 +838,21 @@
 
       <div class="glass-card panel panel-right">
         <div class="panel-title">{{ section_activity }}</div>
-        <div class="total-box">
-          <div class="total-label">{{ activity_total_label }}</div>
-          <div class="total-value">{{ activity_total_value }}</div>
+        <div class="rank-summary-grid">
+          <div class="rank-summary-item">
+            <div class="rank-summary-head">
+              <div class="rank-summary-label">{{ metric_trade_volume_label }}</div>
+              <div class="rank-chip rank-{{ metric_trade_volume_rank_tier }}">{{ metric_trade_volume_rank }}</div>
+            </div>
+            <div class="rank-summary-value usdt metal-gold">{{ metric_trade_volume_value }}</div>
+          </div>
+          <div class="rank-summary-item">
+            <div class="rank-summary-head">
+              <div class="rank-summary-label">{{ metric_sbt_label }}</div>
+              <div class="rank-chip rank-{{ metric_sbt_rank_tier }}">{{ metric_sbt_rank }}</div>
+            </div>
+            <div class="rank-summary-value metal-gold">{{ metric_sbt_value }}</div>
+          </div>
         </div>
 
         <div class="activity-list">
@@ -736,7 +863,10 @@
           </div>
           {% endfor %}
           <div class="activity-item activity-item-days">
-            <div class="activity-name">{{ active_days_label }}</div>
+            <div class="activity-name-row">
+              <div class="activity-name">{{ active_days_label }}</div>
+              <div class="rank-chip rank-{{ active_days_rank_tier }}">{{ active_days_rank }}</div>
+            </div>
             <div class="activity-count activity-count-gold">{{ active_days_value }}</div>
           </div>
         </div>
