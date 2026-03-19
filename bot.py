@@ -82,6 +82,27 @@ def _env_true(name: str, default: bool = False) -> bool:
     return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _parse_int_set(raw: str | None) -> set[int]:
+    if not raw:
+        return set()
+    out: set[int] = set()
+    for token in re.split(r"[\s,]+", str(raw).strip()):
+        if not token:
+            continue
+        if token.isdigit():
+            out.add(int(token))
+    return out
+
+
+def _coerce_thread_auto_archive_minutes(raw: str | int | None, default: int = 1440) -> int:
+    allowed = (60, 1440, 4320, 10080)
+    try:
+        value = int(str(raw).strip()) if raw is not None else default
+    except Exception:
+        value = default
+    return min(allowed, key=lambda x: abs(x - value))
+
+
 NFT_SYNC_ENABLE = _env_true("NFT_SYNC_ENABLE", True)
 NFT_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "sync_nft13_incremental.py")
 NFT_SYNC_STARTUP_DONE = False
@@ -90,6 +111,14 @@ NFT_SYNC_TZ = str(os.getenv("NFT_SYNC_TZ", "Asia/Taipei")).strip() or "Asia/Taip
 NFT_SYNC_COMPARE_ON_STARTUP = _env_true("NFT_SYNC_COMPARE_ON_STARTUP", True)
 NFT_SYNC_HOUR = max(0, min(23, int(os.getenv("NFT_SYNC_HOUR", "12"))))
 NFT_SYNC_MINUTE = max(0, min(59, int(os.getenv("NFT_SYNC_MINUTE", "0"))))
+AUTO_IMAGE_THREAD_MONITOR_ENABLED = _env_true("AUTO_IMAGE_THREAD_MONITOR_ENABLED", False)
+AUTO_IMAGE_THREAD_CHANNEL_IDS = _parse_int_set(os.getenv("AUTO_IMAGE_THREAD_CHANNEL_IDS", ""))
+AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN = _coerce_thread_auto_archive_minutes(
+    os.getenv("AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN", "1440"),
+    default=1440,
+)
+AUTO_IMAGE_THREAD_NAME_PREFIX = str(os.getenv("AUTO_IMAGE_THREAD_NAME_PREFIX", "圖片討論")).strip() or "圖片討論"
+AUTO_IMAGE_THREAD_POST_NOTE = _env_true("AUTO_IMAGE_THREAD_POST_NOTE", False)
 
 
 def _safe_tzinfo(name: str):
@@ -3130,6 +3159,31 @@ async def choose_language_for_message(message: discord.Message) -> str:
     return lang
 
 
+def _build_auto_image_thread_name(attachment: discord.Attachment) -> str:
+    base_name = os.path.splitext(str(getattr(attachment, "filename", "") or ""))[0].strip()
+    safe_base = re.sub(r"\s+", "-", base_name)
+    safe_base = re.sub(r"[^\w\u4e00-\u9fff-]+", "", safe_base)
+    safe_base = safe_base.strip("-_") or "image"
+    suffix = str(getattr(attachment, "id", ""))[-4:] or "img"
+    thread_name = f"{AUTO_IMAGE_THREAD_NAME_PREFIX}-{safe_base}-{suffix}"
+    return thread_name[:100]
+
+
+async def choose_language_for_thread(thread: discord.Thread, author_id: int, timeout_seconds: int = 15) -> str:
+    prompt = "🌐 請在此討論串選擇語言（15 秒內未選擇將預設 🇹🇼 繁體中文）"
+    view = LanguageSelectView(author_id, timeout_seconds=timeout_seconds)
+    choose_msg = await thread.send(prompt, view=view)
+    lang, selected = await view.wait_for_choice()
+    if not selected:
+        lang = "zh"
+        view._disable_all()
+        try:
+            await choose_msg.edit(content="⏱️ 15 秒未選擇，已使用預設語言：🇹🇼 **繁體中文**。", view=view)
+        except Exception:
+            pass
+    return lang
+
+
 def _get_translation_provider_order():
     preferred = (os.getenv("TRANSLATION_PROVIDER") or os.getenv("VISION_PROVIDER") or "google").strip().lower()
     providers = ["google", "openai"]
@@ -3325,7 +3379,12 @@ class VersionSelectView(discord.ui.View):
             return None
 
 
-async def _handle_image_impl(attachment, message, lang="zh"):
+async def _handle_image_impl(
+    attachment,
+    message,
+    lang="zh",
+    existing_thread: discord.Thread | None = None,
+):
     """
     ** 並發核心函數（stream 模式）**
 
@@ -3335,25 +3394,37 @@ async def _handle_image_impl(attachment, message, lang="zh"):
     3. AI 分析 + 爬蟲 → 立即傳送文字報告
     4. （非同步）生成海報 → 生成完成後補傳
     """
-    # 根據語言設定討論串名稱
-    thread_name = _t(lang, "卡片分析報表", "Card Analysis Report", "카드 분석 리포트", "卡片分析报表")
-    
-    # 1. 建立討論串並加入使用者
-    # 先發送一個初始訊息作為討論串的起點
-    init_msg = await message.reply(
-        _t(
-            lang,
-            f"🃏 收到圖片，分析語言：{LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '繁體中文')}**...",
-            f"🃏 Image received. Analysis language: {LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, 'English')}**...",
-            f"🃏 이미지를 받았습니다. 분석 언어: {LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '한국어')}**...",
-            f"🃏 收到图片，分析语言：{LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '简体中文')}**..."
+    thread = existing_thread
+    if thread is None:
+        # 根據語言設定討論串名稱
+        thread_name = _t(lang, "卡片分析報表", "Card Analysis Report", "카드 분석 리포트", "卡片分析报表")
+
+        # 1. 建立討論串並加入使用者
+        # 先發送一個初始訊息作為討論串的起點
+        init_msg = await message.reply(
+            _t(
+                lang,
+                f"🃏 收到圖片，分析語言：{LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '繁體中文')}**...",
+                f"🃏 Image received. Analysis language: {LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, 'English')}**...",
+                f"🃏 이미지를 받았습니다. 분석 언어: {LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '한국어')}**...",
+                f"🃏 收到图片，分析语言：{LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '简体中文')}**..."
+            )
         )
-    )
-    
-    thread = await init_msg.create_thread(name=thread_name, auto_archive_duration=60)
-    
-    # 主動把使用者加入討論串，確保他會收到通知並看到視窗
-    await thread.add_user(message.author)
+
+        thread = await init_msg.create_thread(name=thread_name, auto_archive_duration=60)
+
+        # 主動把使用者加入討論串，確保他會收到通知並看到視窗
+        await thread.add_user(message.author)
+    else:
+        await thread.send(
+            _t(
+                lang,
+                f"🃏 收到圖片，分析語言：{LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '繁體中文')}**...",
+                f"🃏 Image received. Analysis language: {LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, 'English')}**...",
+                f"🃏 이미지를 받았습니다. 분석 언어: {LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '한국어')}**...",
+                f"🃏 收到图片，分析语言：{LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '简体中文')}**..."
+            )
+        )
 
     # 立即傳送第一則訊息，提供即時回饋
     analyzing_msg = _t(
@@ -3566,6 +3637,50 @@ async def _handle_image_impl(attachment, message, lang="zh"):
     finally:
         shutil.rmtree(card_out_dir, ignore_errors=True)
         print(f"✅ [並發] 完成並清理: {attachment.filename}")
+
+
+async def handle_images_from_monitored_channel(message: discord.Message, attachments: list[discord.Attachment]):
+    for idx, attachment in enumerate(attachments):
+        thread: discord.Thread | None = None
+        try:
+            thread_name = _build_auto_image_thread_name(attachment)
+            seed_message: discord.Message = message
+            if idx == 0:
+                thread = await message.create_thread(
+                    name=thread_name,
+                    auto_archive_duration=AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN,
+                )
+            else:
+                starter = await message.reply(f"🧵 正在為 `{attachment.filename}` 建立討論串...")
+                seed_message = starter
+                thread = await starter.create_thread(
+                    name=thread_name,
+                    auto_archive_duration=AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN,
+                )
+                if not AUTO_IMAGE_THREAD_POST_NOTE:
+                    try:
+                        await seed_message.delete()
+                    except Exception:
+                        pass
+
+            await thread.add_user(message.author)
+            if idx == 0 and AUTO_IMAGE_THREAD_POST_NOTE:
+                try:
+                    await message.reply(f"🧵 已建立討論串：{thread.mention}")
+                except Exception:
+                    pass
+
+            lang = await choose_language_for_thread(thread, message.author.id, timeout_seconds=15)
+            await _handle_image_impl(attachment, message, lang=lang, existing_thread=thread)
+        except Exception as e:
+            print(f"❌ 自動監控流程失敗 (message={message.id}, attachment={getattr(attachment, 'filename', 'unknown')}): {e}", file=sys.stderr)
+            if thread is not None:
+                try:
+                    await thread.send(
+                        "❌ 自動建立討論串分析失敗，請稍後重試或使用 @bot 重新觸發。"
+                    )
+                except Exception:
+                    pass
 
 
 async def handle_image(attachment, message, lang="zh"):
@@ -4412,29 +4527,40 @@ async def on_message(message):
         return
 
     bot_mentioned = client.user in message.mentions
+    content_lower = message.content.lower().strip()
+
+    if bot_mentioned and "!sync" in content_lower:
+        try:
+            # 1. 先同步到當前伺服器 (Guild Sync - 幾乎即時生效)
+            print(f"⚙️ 正在同步指令到伺服器: {message.guild.id}")
+            tree.copy_global_to(guild=message.guild)
+            await tree.sync(guild=message.guild)
+
+            # 2. 同步到全域 (Global Sync - 需 1 小時)
+            await tree.sync()
+
+            await message.reply("✅ **指令同步成功！**\n1. 伺服器專屬指令已更新 (應可立即使用)。\n2. 全域更新已送出 (可能需 1 小時)。\n\n*注意：若仍未看到指令，請重啟 Discord APP。*")
+            return
+        except Exception as e:
+            await message.reply(f"❌ 同步失敗: {e}")
+            return
+
+    auto_monitor_handled = False
+    if (
+        AUTO_IMAGE_THREAD_MONITOR_ENABLED
+        and AUTO_IMAGE_THREAD_CHANNEL_IDS
+        and not isinstance(message.channel, discord.Thread)
+        and message.channel.id in AUTO_IMAGE_THREAD_CHANNEL_IDS
+        and message.attachments
+    ):
+        valid_attachments = [a for a in message.attachments if _is_image_attachment(a)]
+        if valid_attachments:
+            auto_monitor_handled = True
+            asyncio.create_task(handle_images_from_monitored_channel(message, valid_attachments))
 
     if bot_mentioned:
-        content_lower = message.content.lower().strip()
-        
-        # --- 強制同步指令 (文字備援方案) ---
-        if "!sync" in content_lower:
-            try:
-                # 1. 先同步到當前伺服器 (Guild Sync - 幾乎即時生效)
-                print(f"⚙️ 正在同步指令到伺服器: {message.guild.id}")
-                tree.copy_global_to(guild=message.guild)
-                await tree.sync(guild=message.guild)
-                
-                # 2. 同步到全域 (Global Sync - 需 1 小時)
-                await tree.sync()
-                
-                await message.reply("✅ **指令同步成功！**\n1. 伺服器專屬指令已更新 (應可立即使用)。\n2. 全域更新已送出 (可能需 1 小時)。\n\n*注意：若仍未看到指令，請重啟 Discord APP。*")
-                return
-            except Exception as e:
-                await message.reply(f"❌ 同步失敗: {e}")
-                return
-
         # 原本的圖片處理邏輯
-        if message.attachments:
+        if message.attachments and not auto_monitor_handled:
             content_lower = message.content.lower()
             valid_attachments = [
                 a for a in message.attachments
