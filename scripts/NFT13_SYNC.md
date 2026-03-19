@@ -33,6 +33,8 @@ This project includes:
 - `BOOTSTRAP_FROM_GIT=1` (recommended on server)
 - `SYNC_TEST_MODE=1` to disable git push side effects
 - `SYNC_WEBHOOK_URL=<discord-webhook-url>`
+- `NFT_SYNC_COMPARE_ON_STARTUP=1` (bot startup does one incremental compare after bootstrap)
+- `NFT_SYNC_TZ=Asia/Taipei` (falls back to UTC+8 if container has no tzdata)
 
 ## Manual commands
 

@@ -19,7 +19,7 @@ import mimetypes
 import hashlib
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timezone, timedelta
 from decimal import Decimal, InvalidOperation
 import requests
 import market_report_vision
@@ -87,12 +87,20 @@ NFT_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "sync_nft13_incremental
 NFT_SYNC_STARTUP_DONE = False
 NFT_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
 NFT_SYNC_TZ = str(os.getenv("NFT_SYNC_TZ", "Asia/Taipei")).strip() or "Asia/Taipei"
+NFT_SYNC_COMPARE_ON_STARTUP = _env_true("NFT_SYNC_COMPARE_ON_STARTUP", True)
 NFT_SYNC_HOUR = max(0, min(23, int(os.getenv("NFT_SYNC_HOUR", "12"))))
 NFT_SYNC_MINUTE = max(0, min(59, int(os.getenv("NFT_SYNC_MINUTE", "0"))))
-try:
-    NFT_SYNC_RUN_TIME = dt_time(hour=NFT_SYNC_HOUR, minute=NFT_SYNC_MINUTE, tzinfo=ZoneInfo(NFT_SYNC_TZ))
-except Exception:
-    NFT_SYNC_RUN_TIME = dt_time(hour=12, minute=0, tzinfo=ZoneInfo("Asia/Taipei"))
+
+
+def _safe_tzinfo(name: str):
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        # Fallback when tzdata package / system zoneinfo is unavailable in container.
+        return timezone(timedelta(hours=8))
+
+
+NFT_SYNC_RUN_TIME = dt_time(hour=NFT_SYNC_HOUR, minute=NFT_SYNC_MINUTE, tzinfo=_safe_tzinfo(NFT_SYNC_TZ))
 
 
 def _nft_sync_data_dir() -> str:
@@ -3622,7 +3630,13 @@ async def on_ready():
             NFT_SYNC_STARTUP_LOCK = asyncio.Lock()
         async with NFT_SYNC_STARTUP_LOCK:
             if not NFT_SYNC_STARTUP_DONE:
-                await _run_nft_sync_script("startup", bootstrap_only=True)
+                bootstrap_ok = await _run_nft_sync_script("startup", bootstrap_only=True)
+                if NFT_SYNC_COMPARE_ON_STARTUP:
+                    compare_ok = await _run_nft_sync_script("startup_compare", bootstrap_only=False)
+                    print(
+                        "🧪 NFT startup compare done "
+                        f"bootstrap_ok={1 if bootstrap_ok else 0} compare_ok={1 if compare_ok else 0}"
+                    )
                 NFT_SYNC_STARTUP_DONE = True
         if not nft_daily_sync_job.is_running():
             nft_daily_sync_job.start()

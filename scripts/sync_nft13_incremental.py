@@ -8,10 +8,14 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore[assignment]
 
 import requests
 from dotenv import load_dotenv
@@ -26,8 +30,25 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _safe_tzinfo(name: str):
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    # Fallback when container does not ship tzdata.
+    return timezone(timedelta(hours=8))
+
+
+TPE_TZ = _safe_tzinfo("Asia/Taipei")
+
+
 def _now_tpe() -> datetime:
-    return datetime.now(ZoneInfo("Asia/Taipei"))
+    return datetime.now(TPE_TZ)
+
+
+def _now_tpe_str() -> str:
+    return _now_tpe().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -459,7 +480,7 @@ def main() -> int:
         bootstrap_commit = "skip"
         if initialized and cfg.backup_git_enabled:
             commit_message = (
-                f"bootstrap nft_{cfg.token_id} {datetime.now(ZoneInfo('Asia/Taipei')).strftime('%Y-%m-%d %H:%M:%S')}"
+                f"bootstrap nft_{cfg.token_id} {_now_tpe_str()}"
             )
             bootstrap_commit = git_push_snapshots(cfg, commit_message=commit_message)
         msg = (
@@ -489,7 +510,7 @@ def main() -> int:
     commit_hash = "git-disabled"
     if cfg.backup_git_enabled and (new_rows > 0 or initialized):
         commit_message = (
-            f"sync nft_{cfg.token_id} {datetime.now(ZoneInfo('Asia/Taipei')).strftime('%Y-%m-%d %H:%M:%S')} "
+            f"sync nft_{cfg.token_id} {_now_tpe_str()} "
             f"+{new_rows} trigger={args.trigger}"
         )
         commit_hash = git_push_snapshots(cfg, commit_message=commit_message)
