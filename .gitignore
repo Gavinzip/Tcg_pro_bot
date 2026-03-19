@@ -12,3 +12,6 @@ _archive/
 debug_wallet_profile_latest/
 logs/
 templates/profile/cache_cards/
+data/
+.sync_data/
+tmp_backup_repo/

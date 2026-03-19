@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import discord
 from discord import app_commands
+from discord.ext import tasks
 import os
 import shutil
 import tempfile
@@ -18,13 +19,14 @@ import mimetypes
 import hashlib
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from decimal import Decimal, InvalidOperation
 import requests
 import market_report_vision
 import image_generator
 from dotenv import load_dotenv
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from zoneinfo import ZoneInfo
 
 # ============================================================
 # ⚠️ JINA AI RATE LIMITER 說明（重要！請勿刪除此說明）
@@ -71,6 +73,37 @@ REPORT_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_REPORTS)
 POSTER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_POSTERS)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _env_true(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
+NFT_SYNC_ENABLE = _env_true("NFT_SYNC_ENABLE", True)
+NFT_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "sync_nft13_incremental.py")
+NFT_SYNC_STARTUP_DONE = False
+NFT_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
+NFT_SYNC_TZ = str(os.getenv("NFT_SYNC_TZ", "Asia/Taipei")).strip() or "Asia/Taipei"
+NFT_SYNC_HOUR = max(0, min(23, int(os.getenv("NFT_SYNC_HOUR", "12"))))
+NFT_SYNC_MINUTE = max(0, min(59, int(os.getenv("NFT_SYNC_MINUTE", "0"))))
+try:
+    NFT_SYNC_RUN_TIME = dt_time(hour=NFT_SYNC_HOUR, minute=NFT_SYNC_MINUTE, tzinfo=ZoneInfo(NFT_SYNC_TZ))
+except Exception:
+    NFT_SYNC_RUN_TIME = dt_time(hour=12, minute=0, tzinfo=ZoneInfo("Asia/Taipei"))
+
+
+def _nft_sync_data_dir() -> str:
+    app_env = str(os.getenv("APP_ENV", "local")).strip().lower() or "local"
+    default_dir = "/data/renaiss_sync" if app_env == "server" else "./data/renaiss_sync"
+    return str(os.getenv("SYNC_DATA_DIR", default_dir)).strip() or default_dir
+
+
+def _nft_sync_status_path() -> str:
+    token_id = str(os.getenv("NFT_TOKEN_ID", "13")).strip() or "13"
+    return os.path.join(_nft_sync_data_dir(), "state", f"nft_{token_id}_status.json")
 # /profile uses an isolated template bundle to avoid impacting normal card posters.
 PROFILE_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile＿beta.html")
 PROFILE_HISTORY_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_history_beta.html")
@@ -3531,8 +3564,51 @@ async def handle_image(attachment, message, lang="zh"):
     await _handle_image_impl(attachment, message, lang=lang)
 
 
+async def _run_nft_sync_script(trigger: str, bootstrap_only: bool = False) -> bool:
+    if not NFT_SYNC_ENABLE:
+        return True
+    if not os.path.exists(NFT_SYNC_SCRIPT_PATH):
+        print(f"⚠️ NFT sync script not found: {NFT_SYNC_SCRIPT_PATH}")
+        return False
+
+    cmd = [sys.executable, NFT_SYNC_SCRIPT_PATH, "--trigger", trigger]
+    if bootstrap_only:
+        cmd.append("--bootstrap-only")
+
+    print(f"🕒 NFT sync start trigger={trigger} bootstrap_only={1 if bootstrap_only else 0}")
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=BASE_DIR,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out_b, err_b = await proc.communicate()
+    out = (out_b or b"").decode("utf-8", errors="replace").strip()
+    err = (err_b or b"").decode("utf-8", errors="replace").strip()
+    if out:
+        print(out)
+    if err:
+        print(err, file=sys.stderr)
+    if proc.returncode != 0:
+        print(f"❌ NFT sync failed trigger={trigger} rc={proc.returncode}")
+        return False
+    print(f"✅ NFT sync done trigger={trigger}")
+    return True
+
+
+@tasks.loop(time=NFT_SYNC_RUN_TIME)
+async def nft_daily_sync_job():
+    await _run_nft_sync_script("daily", bootstrap_only=False)
+
+
+@nft_daily_sync_job.before_loop
+async def _before_nft_daily_sync_job():
+    await client.wait_until_ready()
+
+
 @client.event
 async def on_ready():
+    global NFT_SYNC_STARTUP_DONE, NFT_SYNC_STARTUP_LOCK
     # Attempt to sync global commands
     try:
         await tree.sync()
@@ -3540,6 +3616,16 @@ async def on_ready():
         print(f"✅ 全域 Slash Commands 同步嘗試完成 (全球更新可能需 1 小時)")
     except Exception as e:
         print(f"⚠️ 全域同步失敗: {e}")
+
+    if NFT_SYNC_ENABLE:
+        if NFT_SYNC_STARTUP_LOCK is None:
+            NFT_SYNC_STARTUP_LOCK = asyncio.Lock()
+        async with NFT_SYNC_STARTUP_LOCK:
+            if not NFT_SYNC_STARTUP_DONE:
+                await _run_nft_sync_script("startup", bootstrap_only=True)
+                NFT_SYNC_STARTUP_DONE = True
+        if not nft_daily_sync_job.is_running():
+            nft_daily_sync_job.start()
 
 class PCSelect(discord.ui.Select):
     def __init__(self, candidates):
@@ -4244,6 +4330,60 @@ async def profile(interaction: discord.Interaction, address: str):
         print(f"❌ /profile 失敗: {e}", file=sys.stderr)
         print(traceback.format_exc(), file=sys.stderr)
         await thread.send(f"❌ 生成失敗：{e}")
+
+
+@tree.command(name="sync_status", description="查看 NFT holders 同步狀態")
+async def sync_status(interaction: discord.Interaction):
+    status_path = _nft_sync_status_path()
+    latest_path = os.path.join(
+        _nft_sync_data_dir(),
+        "snapshots",
+        f"nft_{str(os.getenv('NFT_TOKEN_ID', '13')).strip() or '13'}_holders.latest.json",
+    )
+    if not os.path.exists(status_path):
+        await interaction.response.send_message(
+            f"⚠️ 尚無同步狀態檔：`{status_path}`\n請先等待啟動 bootstrap 或每日同步執行。",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        with open(status_path, "r", encoding="utf-8") as f:
+            status = json.load(f)
+        if not isinstance(status, dict):
+            raise RuntimeError("status json invalid")
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ 讀取同步狀態失敗：{e}",
+            ephemeral=True,
+        )
+        return
+
+    success = bool(status.get("success"))
+    trigger = str(status.get("trigger") or "unknown")
+    updated_at = str(status.get("updated_at") or "unknown")
+    message = str(status.get("message") or "").strip()
+    extra = status.get("extra") if isinstance(status.get("extra"), dict) else {}
+    new_rows = extra.get("new_rows", "n/a")
+    pages = extra.get("pages_fetched", "n/a")
+    holder_count = extra.get("holder_count", "n/a")
+    stop_on_dup = extra.get("stop_on_duplicate", "n/a")
+    commit = extra.get("commit", "n/a")
+
+    txt = (
+        f"{'✅' if success else '❌'} 同步狀態：**{'成功' if success else '失敗'}**\n"
+        f"Trigger: `{trigger}`\n"
+        f"Updated At: `{updated_at}`\n"
+        f"New Rows: `{new_rows}` | Pages: `{pages}` | Holders: `{holder_count}`\n"
+        f"Stop on First Duplicate: `{stop_on_dup}`\n"
+        f"Commit: `{commit}`\n"
+        f"Status File: `{status_path}`\n"
+        f"Latest Snapshot: `{latest_path}`\n"
+    )
+    if message:
+        txt += f"\nMessage: `{message[:1200]}`"
+    await interaction.response.send_message(txt, ephemeral=True)
+
 
 @tree.command(name="clear_stale_commands", description="[Owner] 清除所有全域斜線指令並重置 (建議改用 !sync)")
 async def clear_stale(interaction: discord.Interaction):

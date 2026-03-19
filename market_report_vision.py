@@ -1345,6 +1345,25 @@ def _extract_number_denominator(number_text):
     return m.group(0) if m else ""
 
 
+def _strip_card_type_suffix(name):
+    """移除卡面類型後綴，如 -Holo, -Reverse Holo, -Full Art, -1st Edition, -SP, -Premium, -Mega, -EX, -V, -VMAX, -VSTAR, -G X, -Premium Collection 等"""
+    suffixes = [
+        r'[- ]holo', r'[- ]reverse\s*holo', r'[- ]full\s*art', r'[- ]1st\s*edition',
+        r'[- ]premium', r'[- ]sp', r'[- ]mega', r'[- ]ex(?:\s*f?oil)?', r'[- ]v(?:\s*max|\s*star)?',
+        r'[- ]gx(?:\s*ult?ra)?', r'[- ]gx\s*ult?r?a', r'[- ]ultra', r'[- ]rainbow',
+        r'[- ]secret\s*rare', r'[- ]shiny\s*holo', r'[- ]shiny', r'[- ]trainer\s*gallery',
+        r'[- ]amazing', r'[- ]prime', r'[- ]legend', r'[- ]special', r'[- ]promo',
+        r'[- ]alternate\s*art', r'[- ]alternate', r'[- ]illustration\s*rare',
+        r'[- ]hyper\s*rare', r'[- ]super\s*rare', r'[- ]ace\s*rare', r'[- ]double\s*rare',
+        r'[- ]perfect', r'[- ]gem\s*mint', r'[- ]psa\s*\d+', r'[- ]bgs\s*\d+',
+        r'[- ]cgc\s*\d+', r'[- ]sgc\s*\d+', r'[- ]jewel', r'[- ]case',
+    ]
+    result = name
+    for suffix in suffixes:
+        result = re.sub(rf'\s*{suffix}\s*$', '', result, flags=re.IGNORECASE).strip()
+    return result
+
+
 def _title_number_match(title_text, number_clean, number_padded):
     """
     Match card number by numerator-first logic.
@@ -1621,6 +1640,43 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
                     _debug_log(f"  🔷 [PKM] 只符合編號 '{number_clean}'/'{number_padded_pc}': {u}")
                 else:
                     _debug_log(f"  ❌ [PKM] URL 不符合: {u}")
+
+        # 🔄 後綴備援搜尋：當 matching_both 為空且名稱含有後綴時，移除後綴重試
+        if not matching_both and not is_one_piece:
+            stripped_name = _strip_card_type_suffix(name_query)
+            if stripped_name != name_query:
+                _debug_log(f"  🔄 [PKM] 首次匹配失敗，嘗試備援搜尋：'{name_query}' -> '{stripped_name}'")
+                for query_idx, query in enumerate(queries_to_try):
+                    fallback_query = query.replace(name_query.replace(' ', '+'), stripped_name.replace(' ', '+'))
+                    if fallback_query != query:
+                        _debug_log(f"  🔄 [PKM] 備援查詢: {fallback_query}")
+                        fallback_url = f"https://www.pricecharting.com/search-products?q={fallback_query}&type=prices"
+                        fallback_md = fetch_jina_markdown(fallback_url)
+                        if fallback_md and ("Search Results" in fallback_md or "Your search" in fallback_md):
+                            fallback_urls = re.findall(r'(https://www\.pricecharting\.com/game/[^/]+/[^" )\]]+)', fallback_md)
+                            fallback_urls = list(dict.fromkeys(fallback_urls))
+                            fallback_matching_both = []
+                            fallback_matching_name = []
+                            fallback_matching_number = []
+                            stripped_name_slug = re.sub(r'[^a-zA-Z0-9]', '-', stripped_name.lower()).strip('-')
+                            for fu in fallback_urls:
+                                fu_end = fu.split('/')[-1].lower()
+                                fhas_name = stripped_name_slug in fu_end
+                                fhas_num = _num_match(fu_end)
+                                if fhas_name and fhas_num:
+                                    fallback_matching_both.append(fu)
+                                    _debug_log(f"  ✅ [PKM-FB] 名稱+編號: {fu}")
+                                elif fhas_name:
+                                    fallback_matching_name.append(fu)
+                                elif fhas_num:
+                                    fallback_matching_number.append(fu)
+                            if fallback_matching_both:
+                                _debug_log(f"  ✅ [PKM] 備援成功！找到 {len(fallback_matching_both)} 個匹配")
+                                matching_both = fallback_matching_both
+                                matching_name = fallback_matching_name
+                                matching_number = fallback_matching_number
+                                name_slug = stripped_name_slug
+                                break
 
         # 合併：先確保至少匹配，再進入分數排序
         valid_urls = matching_both + matching_name + matching_number
