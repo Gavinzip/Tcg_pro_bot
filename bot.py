@@ -243,6 +243,7 @@ PROFILE_RESOLVE_SCAN_WORKERS = max(1, int(os.getenv("PROFILE_RESOLVE_SCAN_WORKER
 PROFILE_COLLECTION_FETCH_WORKERS = max(1, int(os.getenv("PROFILE_COLLECTION_FETCH_WORKERS", "8")))
 PROFILE_WITHDRAW_VALUE_WORKERS = max(1, int(os.getenv("PROFILE_WITHDRAW_VALUE_WORKERS", "10")))
 FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT = max(0, int(os.getenv("FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT", "24")))
+FLEX_PACK_ALLOW_PREVIEW_IMAGE_FALLBACK = _env_true("FLEX_PACK_ALLOW_PREVIEW_IMAGE_FALLBACK", False)
 PROFILE_SBT_BADGE_CACHE_TTL_SEC = max(0, int(os.getenv("PROFILE_SBT_BADGE_CACHE_TTL_SEC", "600")))
 PROFILE_ENABLE_RUNTIME_CACHE = str(os.getenv("PROFILE_ENABLE_RUNTIME_CACHE", "0")).strip().lower() in ("1", "true", "yes", "on")
 PROFILE_ENABLE_DISK_IMAGE_CACHE = str(os.getenv("PROFILE_ENABLE_DISK_IMAGE_CACHE", "0")).strip().lower() in (
@@ -394,6 +395,26 @@ def _short_hex(value: str | None) -> str:
     return f"{text[:8]}...{text[-6:]}"
 
 
+def _looks_like_preview_image_url(url: str | None) -> bool:
+    text = str(url or "").strip().lower()
+    if not text:
+        return True
+    return (
+        "graded-cards-renders" in text
+        or "nft_image" in text
+        or "/renders/" in text
+        or "preview" in text
+    )
+
+
+def _pick_non_preview_image(*urls: str) -> str:
+    for raw in urls:
+        u = str(raw or "").strip()
+        if u and not _looks_like_preview_image_url(u):
+            return u
+    return ""
+
+
 def _clamp_profile_card_count(value: int | None) -> int:
     if value in (1, 3, 4, 5, 7, 10):
         return int(value)
@@ -401,9 +422,9 @@ def _clamp_profile_card_count(value: int | None) -> int:
 
 
 def _clamp_flex_pack_card_count(value: int | None) -> int:
-    if value in (1, 3, 4, 7):
+    if value in (1, 3, 4, 7, 10):
         return int(value)
-    return 7
+    return 10
 
 
 def _normalize_profile_background_key(value: str | None) -> str:
@@ -1599,6 +1620,8 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
     legacy_missing_price_keys: list[str] = []
     release_seen_open_keys: set[str] = set()
     legacy_seen_open_keys: set[str] = set()
+    legacy_pull_by_checkout: dict[str, dict] = {}
+    buyback_by_checkout: defaultdict[str, list[dict]] = defaultdict(list)
     seen_withdraw_events: set[str] = set()
     withdraw_token_ids: set[str] = set()
     release_cards_by_token: dict[str, dict] = {}
@@ -1634,6 +1657,8 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
                     release_cards_by_token[token_hint] = {
                         "token_id": token_hint,
                         "name": str(row_item.get("collectibleName") or row_item.get("title") or "Unknown Collectible").strip(),
+                        "market_image": str(row_item.get("imageUrl") or "").strip(),
+                        "preview_image": str(row_item.get("collectibleImageUrl") or "").strip(),
                         "image": str(row_item.get("imageUrl") or row_item.get("collectibleImageUrl") or "").strip(),
                         "timestamp_raw": ts,
                         "pack_contract": release_contract,
@@ -1664,6 +1689,13 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
             if legacy_event_key not in legacy_seen_open_keys:
                 legacy_seen_open_keys.add(legacy_event_key)
                 contract_open_count[legacy_key] += 1
+            legacy_pull_by_checkout[legacy_event_key] = {
+                "legacy_key": legacy_key,
+                "pack_name": pack_label,
+                "checkout_id": checkout_id,
+                "timestamp_raw": _parse_int(row.get("timestamp")) or 0,
+                "event_key": legacy_event_key,
+            }
             contract_pack_counter[legacy_key][pack_label] += 1
             if legacy_key not in contract_pack_name:
                 contract_pack_name[legacy_key] = pack_label
@@ -1680,6 +1712,7 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
             else:
                 legacy_missing_price_keys.append(legacy_key)
         elif row_type in ("PerpetualBuybackActivity", "BuybackActivity"):
+            checkout_id = str(row.get("checkoutId") or "").strip()
             buyback_price = _wei_to_usdt(row.get("priceInUsdt"))
             if buyback_price <= 0:
                 buyback_price = _wei_to_usdt(row.get("amount"))
@@ -1687,6 +1720,24 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
                 buyback_earned_total += buyback_price
             fmv_hint = _card_price_to_usd(row.get("fmvPriceInUsd"))
             _remember_token_value(token_hint, fmv_hint if fmv_hint > 0 else buyback_price, ts)
+            if checkout_id:
+                item_obj = row.get("item") if isinstance(row.get("item"), dict) else {}
+                buyback_by_checkout[checkout_id].append(
+                    {
+                        "token_id": token_hint or str(item_obj.get("tokenId") or "").strip(),
+                        "name": str(
+                            item_obj.get("collectibleName")
+                            or item_obj.get("title")
+                            or item_obj.get("name")
+                            or "Unknown Collectible"
+                        ).strip(),
+                        "market_image": str(item_obj.get("imageUrl") or "").strip(),
+                        "preview_image": str(item_obj.get("collectibleImageUrl") or "").strip(),
+                        "image": str(item_obj.get("imageUrl") or item_obj.get("collectibleImageUrl") or "").strip(),
+                        "value": fmv_hint if fmv_hint > 0 else buyback_price,
+                        "timestamp_raw": ts,
+                    }
+                )
         elif row_type in ("BuyActivity", "SellActivity"):
             amount = _wei_to_usdt(row.get("amount"))
             if amount <= 0:
@@ -1882,12 +1933,48 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         history_range = dt_min if dt_min == dt_max else f"{dt_min} ~ {dt_max}"
         active_days_count = max(1, int((ts_max - ts_min) // 86400) + 1)
 
+    legacy_release_cards: list[dict] = []
+    for pull in legacy_pull_by_checkout.values():
+        if not isinstance(pull, dict):
+            continue
+        checkout_id = str(pull.get("checkout_id") or "").strip()
+        legacy_key = str(pull.get("legacy_key") or "").strip().lower()
+        if not legacy_key:
+            continue
+        candidates = buyback_by_checkout.get(checkout_id) or []
+        best = None
+        if candidates:
+            best = max(candidates, key=lambda x: int(_parse_int(x.get("timestamp_raw")) or 0))
+        token_id = str((best or {}).get("token_id") or "").strip()
+        if not token_id:
+            token_id = f"{legacy_key}:{checkout_id or str(pull.get('event_key') or '')}"
+        value = _to_decimal((best or {}).get("value"))
+        ts_raw = int(_parse_int(pull.get("timestamp_raw")) or 0)
+        if value > 0:
+            prev = token_latest_values.get(token_id)
+            if prev is None or ts_raw >= prev[0]:
+                token_latest_values[token_id] = (ts_raw, value)
+        legacy_release_cards.append(
+            {
+                "token_id": token_id,
+                "name": str((best or {}).get("name") or pull.get("pack_name") or "Unknown Collectible"),
+                "market_image": str((best or {}).get("market_image") or "").strip(),
+                "preview_image": str((best or {}).get("preview_image") or "").strip(),
+                "image": str((best or {}).get("image") or "").strip(),
+                "timestamp_raw": ts_raw,
+                "pack_contract": legacy_key,
+                "checkout_id": checkout_id,
+            }
+        )
+
+    release_cards_source = [v for v in release_cards_by_token.values() if isinstance(v, dict)] + legacy_release_cards
     release_cards = sorted(
-        (v for v in release_cards_by_token.values() if isinstance(v, dict)),
+        release_cards_source,
         key=lambda x: _parse_int(x.get("timestamp_raw")),
         reverse=True,
     )
     pack_release_counts: defaultdict[str, int] = defaultdict(int)
+    pack_latest_ts: defaultdict[str, int] = defaultdict(int)
     for card in release_cards:
         ts_raw = _parse_int(card.get("timestamp_raw")) or 0
         card["timestamp"] = ts_raw
@@ -1895,6 +1982,8 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         contract = str(card.get("pack_contract") or "").strip().lower()
         if contract:
             pack_release_counts[contract] += 1
+            if ts_raw > int(pack_latest_ts.get(contract, 0)):
+                pack_latest_ts[contract] = ts_raw
             pack_name = (
                 contract_pack_name.get(contract)
                 or f"Contract {_short_hex(contract)}"
@@ -1913,9 +2002,24 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
                 "contract": contract,
                 "pack_name": pack_name,
                 "release_count": int(count),
+                "latest_ts": int(pack_latest_ts.get(contract, 0)),
             }
         )
-    pack_options.sort(key=lambda x: (int(x.get("release_count") or 0), str(x.get("pack_name") or "")), reverse=True)
+    pack_options.sort(
+        key=lambda x: (
+            int(x.get("latest_ts") or 0),
+            int(x.get("release_count") or 0),
+            str(x.get("pack_name") or ""),
+        ),
+        reverse=True,
+    )
+
+    pack_spent_map: dict[str, str] = {}
+    for key, value in contract_spent_total.items():
+        norm_key = str(key or "").strip().lower()
+        if not norm_key:
+            continue
+        pack_spent_map[norm_key] = _format_usdt_decimal(_to_decimal(value))
 
     token_value_hints = {k: v[1] for k, v in token_latest_values.items()}
 
@@ -1942,6 +2046,7 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         "activity_rows": activity_rows,
         "release_cards": release_cards,
         "pack_options": pack_options,
+        "pack_spent_map": pack_spent_map,
         "token_value_hints": token_value_hints,
     }
 
@@ -2167,10 +2272,10 @@ def _resolve_flex_pack_layout_count(requested: int, available: int) -> int:
         return 0
     if available >= req:
         return req
-    for candidate in (7, 4, 3, 1):
+    for candidate in (10, 7, 4, 3, 1):
         if candidate <= available and candidate <= req:
             return candidate
-    for candidate in (7, 4, 3, 1):
+    for candidate in (10, 7, 4, 3, 1):
         if candidate <= available:
             return candidate
     return 1
@@ -2301,9 +2406,12 @@ def _build_wallet_flex_pack_template_context(
         if value <= 0 and token_id and fetch_missing:
             value = _to_decimal(_fetch_card_fmv_by_token_id(token_id, allow_trade_fallback=allow_trade_fallback))
 
-        image = str(current_info.get("image") or card.get("image") or "").strip()
-        if not image and token_id and prepare_image:
-            image = _fetch_card_image_by_token_id(token_id)
+        # flex_pack poster uses historical transaction images only.
+        market_image = str(card.get("market_image") or "").strip()
+        activity_image = str(card.get("image") or "").strip()
+        preview_image = str(card.get("preview_image") or "").strip()
+        image = market_image or activity_image or preview_image
+
         prepared = _prepare_collectible_image_for_poster(image) if prepare_image else image
 
         return {
@@ -2319,51 +2427,28 @@ def _build_wallet_flex_pack_template_context(
     wallet_short = f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm
     subtitle = f"{pack_name} · {wallet_short}"
 
-    if mode_name == "picked":
-        selected_count = _resolve_flex_pack_layout_count(requested_count, len(pack_cards))
-        picked_rows = pack_cards[:selected_count]
-        resolved = [_resolve_card_candidate(card, allow_trade_fallback=True) for card in picked_rows]
-        items = [
-            {
-                "name": str(x.get("name") or "Unknown Collectible"),
-                "image": str(x.get("image") or _TRANSPARENT_CARD_IMAGE),
-                "value": _format_usdt_decimal(x.get("value")),
-            }
-            for x in resolved
-        ]
-        total_value = sum((_to_decimal(x.get("value")) for x in resolved), Decimal("0"))
-        template_context = {
-            "collection_name": f"{profile_name} · Pack Flex",
-            "sbt_total": len(pack_cards),
-            "extreme_mode": False,
-            "hide_footer": False,
-            "sbt_badges_display": [],
-            "items": items,
-            "assets_count": len(pack_cards),
-            "total_value": _format_usdt_decimal(total_value),
-            "total_value_label": f"Recent {selected_count} Pulls Value",
-            "items_count_label": "Pack Pull Count",
-            "assets_unit": "Cards",
-            "sbt_badges_label": "Pack",
-            "no_sbt_label": "No data",
-            "owned_prefix": ui_labels.get("owned_prefix", "owned "),
-            "brand_name": str((picker_data or {}).get("brand_name") or ui_labels.get("brand_name", "Renaiss")),
-            "brand_site": str((picker_data or {}).get("brand_site") or ui_labels.get("brand_site", "renaiss.xyz")),
-            "update_date": datetime.now().strftime("%Y-%m-%d"),
-            "enable_tilt": False,
-            "background_key": "classic",
-            "background_image": _profile_background_data_uri("classic"),
-            "meta_counter_label": "PULL",
-            "_meta_subtitle": subtitle,
-        }
-        return {
-            "template_context": template_context,
-            "mode": mode_name,
-            "pack_name": pack_name,
-            "requested_count": requested_count,
-            "selected_count": selected_count,
-            "pack_total_count": len(pack_cards),
-        }
+    def _parse_usdt_text(raw_value) -> Decimal:
+        text = str(raw_value or "").strip().replace(",", "")
+        try:
+            return _to_decimal(text)
+        except Exception:
+            return Decimal("0")
+
+    pack_spent_total = Decimal("0")
+    pack_spent_map = history_data.get("pack_spent_map") if isinstance(history_data, dict) else {}
+    if isinstance(pack_spent_map, dict):
+        mapped_spent = pack_spent_map.get(pack_contract)
+        if mapped_spent is not None:
+            pack_spent_total = _to_decimal(mapped_spent)
+
+    for row in (history_data.get("contract_rows") or []):
+        if not isinstance(row, dict):
+            continue
+        contract = str(row.get("contract") or "").strip().lower()
+        if contract != pack_contract:
+            continue
+        pack_spent_total = _parse_usdt_text(row.get("spent_total"))
+        break
 
     unique_cards: dict[str, dict] = {}
     for card in pack_cards:
@@ -2371,13 +2456,17 @@ def _build_wallet_flex_pack_template_context(
         if not token_id or token_id in unique_cards:
             continue
         unique_cards[token_id] = card
+
     resolved_all = [
         _resolve_card_candidate(card, allow_trade_fallback=False, fetch_missing=False, prepare_image=False)
         for card in unique_cards.values()
     ]
     unresolved = [x for x in resolved_all if _to_decimal(x.get("value")) <= 0 and str(x.get("token_id") or "").strip()]
-    if FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT > 0 and len(unresolved) > FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT:
-        unresolved = unresolved[:FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT]
+    # In picked mode, resolve all unresolved token values for accurate whole-pack PnL.
+    # In extreme mode, keep optional lookup cap for speed.
+    lookup_limit = FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT if mode_name == "extreme" else 0
+    if lookup_limit > 0 and len(unresolved) > lookup_limit:
+        unresolved = unresolved[:lookup_limit]
     if unresolved:
         workers = min(8, len(unresolved))
         if workers > 1:
@@ -2401,6 +2490,69 @@ def _build_wallet_flex_pack_template_context(
                 if v > 0:
                     row["value"] = v
 
+    value_map = {str(x.get("token_id") or ""): _to_decimal(x.get("value")) for x in resolved_all}
+    total_pack_card_value = sum((_to_decimal(x.get("value")) for x in resolved_all if _to_decimal(x.get("value")) > 0), Decimal("0"))
+    pack_pnl_total = total_pack_card_value - pack_spent_total
+    pnl_tone = "gain" if pack_pnl_total > 0 else "loss" if pack_pnl_total < 0 else "neutral"
+
+    if mode_name == "picked":
+        selected_count = _resolve_flex_pack_layout_count(requested_count, len(pack_cards))
+        picked_rows = pack_cards[:selected_count]
+        resolved = []
+        for card in picked_rows:
+            item = _resolve_card_candidate(card, allow_trade_fallback=True, fetch_missing=False, prepare_image=True)
+            token_id = str(item.get("token_id") or "")
+            mapped = _to_decimal(value_map.get(token_id))
+            if mapped > 0:
+                item["value"] = mapped
+            resolved.append(item)
+
+        items = [
+            {
+                "name": str(x.get("name") or "Unknown Collectible"),
+                "image": str(x.get("image") or _TRANSPARENT_CARD_IMAGE),
+                "value": _format_usdt_decimal(x.get("value")),
+            }
+            for x in resolved
+        ]
+        template_context = {
+            "collection_name": f"{pack_name} · PnL",
+            "sbt_total": len(pack_cards),
+            "extreme_mode": False,
+            "hide_footer": False,
+            "sbt_badges_display": [],
+            "items": items,
+            "assets_count": len(unique_cards),
+            "total_value": _format_usdt_decimal(pack_pnl_total, signed=True),
+            "total_value_label": "Pack PnL",
+            "items_count_label": "Cards Pulled",
+            "assets_unit": "Cards",
+            "sbt_badges_label": "Pack Name",
+            "no_sbt_label": "No data",
+            "owned_prefix": ui_labels.get("owned_prefix", "owned "),
+            "brand_name": str((picker_data or {}).get("brand_name") or ui_labels.get("brand_name", "Renaiss")),
+            "brand_site": str((picker_data or {}).get("brand_site") or ui_labels.get("brand_site", "renaiss.xyz")),
+            "update_date": datetime.now().strftime("%Y-%m-%d"),
+            "enable_tilt": False,
+            "background_key": "classic",
+            "background_image": _profile_background_data_uri("classic"),
+            "meta_counter_label": "PULL",
+            "pack_name_display": pack_name,
+            "pnl_tone": pnl_tone,
+            "_meta_subtitle": subtitle,
+        }
+        return {
+            "template_context": template_context,
+            "mode": mode_name,
+            "pack_name": pack_name,
+            "requested_count": requested_count,
+            "selected_count": selected_count,
+            "pack_total_count": len(unique_cards),
+            "pack_spent_total": pack_spent_total,
+            "pack_value_total": total_pack_card_value,
+            "pack_pnl_total": pack_pnl_total,
+        }
+
     resolved_positive = [x for x in resolved_all if _to_decimal(x.get("value")) > 0]
     if len(resolved_positive) < 2:
         raise RuntimeError("此卡包可定價的卡片不足 2 張，無法生成天堂地獄版本。")
@@ -2416,10 +2568,7 @@ def _build_wallet_flex_pack_template_context(
         lowest = sorted_cards[-2]
 
     def _prepare_final_extreme_image(row: dict) -> str:
-        token_id = str(row.get("token_id") or "").strip()
         image = str(row.get("image") or "").strip()
-        if not image and token_id:
-            image = _fetch_card_image_by_token_id(token_id)
         return _prepare_collectible_image_for_poster(image)
 
     highest["image"] = _prepare_final_extreme_image(highest)
@@ -2439,21 +2588,18 @@ def _build_wallet_flex_pack_template_context(
     ]
     pair_total = _to_decimal(highest.get("value")) + _to_decimal(lowest.get("value"))
     template_context = {
-        "collection_name": f"{profile_name} · Pack Flex",
+        "collection_name": f"{pack_name} · PnL",
         "sbt_total": len(pack_cards),
         "extreme_mode": True,
-        "hide_footer": True,
-        "sbt_badges_display": [
-            {"name": "Heaven", "label": "Heaven", "balance": 1, "image": ""},
-            {"name": "Hell", "label": "Hell", "balance": 1, "image": ""},
-        ],
+        "hide_footer": False,
+        "sbt_badges_display": [],
         "items": items,
-        "assets_count": len(pack_cards),
-        "total_value": _format_usdt_decimal(pair_total),
-        "total_value_label": "Heaven/Hell Pair Value",
-        "items_count_label": "Pack Pull Count",
+        "assets_count": len(unique_cards),
+        "total_value": _format_usdt_decimal(pack_pnl_total, signed=True),
+        "total_value_label": "Pack PnL",
+        "items_count_label": "Cards Pulled",
         "assets_unit": "Cards",
-        "sbt_badges_label": "Mode",
+        "sbt_badges_label": "Pack Name",
         "no_sbt_label": "No data",
         "owned_prefix": ui_labels.get("owned_prefix", "owned "),
         "brand_name": str((picker_data or {}).get("brand_name") or ui_labels.get("brand_name", "Renaiss")),
@@ -2463,6 +2609,8 @@ def _build_wallet_flex_pack_template_context(
         "background_key": "classic",
         "background_image": _profile_background_data_uri("classic"),
         "meta_counter_label": "PULL",
+        "pack_name_display": pack_name,
+        "pnl_tone": pnl_tone,
         "_meta_subtitle": subtitle,
     }
     return {
@@ -2471,7 +2619,10 @@ def _build_wallet_flex_pack_template_context(
         "pack_name": pack_name,
         "requested_count": requested_count,
         "selected_count": 2,
-        "pack_total_count": len(pack_cards),
+        "pack_total_count": len(unique_cards),
+        "pack_spent_total": pack_spent_total,
+        "pack_value_total": total_pack_card_value,
+        "pack_pnl_total": pack_pnl_total,
     }
 
 
@@ -4870,6 +5021,7 @@ class FlexPackTemplateSelect(discord.ui.Select):
             discord.SelectOption(label="3", value="3", default=(default_count == 3)),
             discord.SelectOption(label="4", value="4", default=(default_count == 4)),
             discord.SelectOption(label="7", value="7", default=(default_count == 7)),
+            discord.SelectOption(label="10", value="10", default=(default_count == 10)),
         ]
         super().__init__(
             placeholder=_t(lang, "3) 選擇排版數量", "3) Choose Layout Count", "3) 레이아웃 수 선택", "3) 选择排版数量"),
@@ -4894,7 +5046,7 @@ class FlexPackConfigView(discord.ui.View):
         self.username = str((picker_data or {}).get("username") or "Unknown")
 
         self.selected_mode = "picked"
-        self.selected_template = 7
+        self.selected_template = 10
         self.pack_options = list((picker_data or {}).get("pack_options") or [])
         self.pack_label_map = {
             str(x.get("value") or "").strip().lower(): str(x.get("full_label") or x.get("label") or "")
@@ -4911,9 +5063,12 @@ class FlexPackConfigView(discord.ui.View):
         self.add_item(FlexPackModeSelect(self.selected_mode, self.selected_lang))
         self.add_item(FlexPackPackSelect(self.pack_options, self.selected_pack_contract, self.selected_lang))
         layout_select = FlexPackTemplateSelect(self.selected_template, self.selected_lang)
-        layout_select.disabled = (self.selected_mode == "extreme")
+        # Keep layout selector visible/clickable in all modes to avoid UI controls disappearing after mode switch.
+        # In extreme mode the selected layout value is ignored by generator logic.
+        layout_select.disabled = False
         self.add_item(layout_select)
         self.generate.label = _t(self.selected_lang, "生成海報", "Generate Poster", "포스터 생성", "生成海报")[:80]
+        self.add_item(self.generate)
 
     def bind_message(self, message: discord.Message):
         self.bound_message = message
@@ -4939,7 +5094,7 @@ class FlexPackConfigView(discord.ui.View):
             f"{_t(self.selected_lang, '模式', 'Mode', '모드', '模式')}: **{mode_label}**\n"
             f"{_t(self.selected_lang, '排版數量', 'Layout Count', '레이아웃 수', '排版数量')}: **{layout_value}**\n"
             f"{_t(self.selected_lang, '該包卡片數', 'Cards in Pack', '해당 팩 카드 수', '该包卡片数')}: **{self._pack_count()}**\n\n"
-            f"{_t(self.selected_lang, '模式1提供 1/3/4/7，卡片不足會自動 fallback。', 'Mode 1 supports 1/3/4/7 and auto-fallback on insufficient cards.', '모드1은 1/3/4/7 지원, 카드 부족 시 자동 fallback.', '模式1提供 1/3/4/7，卡片不足自动 fallback。')}"
+            f"{_t(self.selected_lang, '剛抽卡排版提供 1/3/4/7/10，卡片不足會自動 fallback。', 'Recent Pull Layout supports 1/3/4/7/10 and auto-fallback on insufficient cards.', '최근 뽑기 레이아웃은 1/3/4/7/10 지원, 카드 부족 시 자동 fallback.', '刚抽卡排版提供 1/3/4/7/10，卡片不足自动 fallback。')}"
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -4999,6 +5154,9 @@ class FlexPackConfigView(discord.ui.View):
             selected = int(_parse_int(payload.get("selected_count")) or 0)
             pack_total = int(_parse_int(payload.get("pack_total_count")) or 0)
             pack_name = str(payload.get("pack_name") or _short_hex(self.selected_pack_contract))
+            pack_pnl = _to_decimal(payload.get("pack_pnl_total"))
+            pack_spent = _to_decimal(payload.get("pack_spent_total"))
+            pack_value = _to_decimal(payload.get("pack_value_total"))
             mode_label = (
                 _t(self.selected_lang, "天堂與地獄", "Heaven and Hell", "천국과 지옥", "天堂与地狱")
                 if self.selected_mode == "extreme"
@@ -5018,7 +5176,10 @@ class FlexPackConfigView(discord.ui.View):
                 f"✅ **{self.username}** · {_t(self.selected_lang, '卡包海報已生成', 'Pack poster generated', '팩 포스터 생성 완료', '卡包海报已生成')}\n"
                 f"{_t(self.selected_lang, '卡包', 'Pack', '팩', '卡包')}: **{pack_name}**\n"
                 f"{_t(self.selected_lang, '模式', 'Mode', '모드', '模式')}: **{mode_label}**\n"
-                f"{_t(self.selected_lang, '該包卡片數', 'Cards in Pack', '해당 팩 카드 수', '该包卡片数')}: **{pack_total}**"
+                f"{_t(self.selected_lang, '該包卡片數', 'Cards in Pack', '해당 팩 카드 수', '该包卡片数')}: **{pack_total}**\n"
+                f"PnL: **{_format_usdt_currency(pack_pnl, signed=True)}** | "
+                f"Spent: **{_format_usdt_currency(pack_spent)}** | "
+                f"Value: **{_format_usdt_currency(pack_value)}**"
                 f"{fallback_note}"
             )
             await interaction.followup.send(summary, file=discord.File(poster_path))
