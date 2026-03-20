@@ -324,7 +324,8 @@ def _trpc_user_badges(username: str) -> list[dict[str, Any]]:
                 return []
             root = data[0]
             if root.get("error"):
-                return []
+                err = root.get("error", {}).get("json", {}).get("message") or "unknown error"
+                raise RuntimeError(f"sbt.getUserBadges error: {err}")
             badges = (((root.get("result") or {}).get("data") or {}).get("json") or {}).get("badges") or []
             return badges if isinstance(badges, list) else []
         except Exception as e:  # noqa: BLE001
@@ -1217,6 +1218,13 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                 full_reason = "checkpoint-upgrade-participation-days"
                 break
     records = list(current_wallets.values())
+    # Preserve previous username when current collectible snapshot does not provide one.
+    for rec in records:
+        if rec.username:
+            continue
+        prev = prev_wallets.get(rec.address)
+        if prev is not None and prev.username:
+            rec.username = prev.username
     workers = max(1, min(cfg.workers, len(records))) if records else 1
 
     latest_activity_map: dict[str, str] = {}
@@ -1518,7 +1526,12 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                     sbt_owned_total, sbt_badge_count = future.result()
                 except Exception as e:  # noqa: BLE001
                     print(f"[WARN] sbt failed for {rec.address} ({rec.username}): {e}")
-                    sbt_owned_total, sbt_badge_count = 0, 0
+                    prev = prev_wallets.get(rec.address)
+                    if prev is not None:
+                        sbt_owned_total = prev.sbt_owned_total
+                        sbt_badge_count = prev.sbt_owned_badge_count
+                    else:
+                        sbt_owned_total, sbt_badge_count = 0, 0
                 sbt_completed += 1
                 _maybe_print_progress("sbt", sbt_completed, sbt_phase_total, cfg.progress_every)
                 rec.sbt_owned_total = sbt_owned_total
