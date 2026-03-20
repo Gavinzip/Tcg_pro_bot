@@ -48,6 +48,7 @@
             --frame-side-gap: 0%;
             --card-corner-radius: 22px;
             --card-fine-scale: 1;
+            --pack-card-display-scale: 0.90;
             --card-fine-shift-x: 0px;
             --card-fine-shift-y: 0px;
             --header-panel-opacity: 1;
@@ -352,6 +353,8 @@
             height: 100%;
             object-fit: contain;
             display: block;
+            transform: scale(var(--pack-card-display-scale));
+            transform-origin: center;
         }
 
         .extreme-price {
@@ -545,7 +548,7 @@
             height: 100%;
             object-fit: contain;
             object-position: var(--card-pos-x) var(--card-pos-y);
-            transform: translate(var(--card-fine-shift-x), var(--card-fine-shift-y)) scale(var(--card-fine-scale));
+            transform: translate(var(--card-fine-shift-x), var(--card-fine-shift-y)) scale(calc(var(--card-fine-scale) * var(--pack-card-display-scale)));
             transform-origin: center;
             clip-path: none;
             filter: saturate(1.03) contrast(1.02);

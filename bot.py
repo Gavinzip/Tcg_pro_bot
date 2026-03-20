@@ -433,6 +433,17 @@ def _pick_non_preview_image(*urls: str) -> str:
     return ""
 
 
+def _looks_like_pack_image_url(url: str | None) -> bool:
+    text = str(url or "").strip().lower()
+    if not text:
+        return False
+    if "/packs/" in text:
+        return True
+    if "pack%20rotate" in text or "pack_rotate" in text:
+        return True
+    return False
+
+
 def _clamp_profile_card_count(value: int | None) -> int:
     if value in (1, 3, 4, 5, 7, 10):
         return int(value)
@@ -2613,6 +2624,10 @@ def _build_wallet_flex_pack_template_context(
         activity_image = str(card.get("image") or "").strip()
         preview_image = str(card.get("preview_image") or "").strip()
         image = market_image or activity_image
+        if image and _looks_like_pack_image_url(image) and token_id:
+            token_image = _fetch_card_image_by_token_id(token_id)
+            if token_image:
+                image = token_image
         if not image and FLEX_PACK_ALLOW_PREVIEW_IMAGE_FALLBACK:
             image = preview_image
         if not image and token_id:
@@ -2783,8 +2798,12 @@ def _build_wallet_flex_pack_template_context(
 
     def _prepare_final_extreme_image(row: dict) -> str:
         image = str(row.get("image") or "").strip()
+        token_id = str(row.get("token_id") or "").strip()
+        if image and _looks_like_pack_image_url(image) and token_id:
+            token_image = _fetch_card_image_by_token_id(token_id)
+            if token_image:
+                image = token_image
         if not image:
-            token_id = str(row.get("token_id") or "").strip()
             if token_id:
                 image = _fetch_card_image_by_token_id(token_id)
         return _prepare_collectible_image_for_poster(image)
