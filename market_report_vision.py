@@ -279,23 +279,12 @@ def _extract_series_code(card_info):
     return ""
 
 
-def _looks_like_series_box(card_info):
+def _is_box_or_pack(card_info):
+    """判斷是否為卡盒/補充包（需進入卡盒分析流程）。只要 item_type 不是 card 就返回 True。"""
     item_type = str(card_info.get("item_type", "") or card_info.get("product_type", "")).strip().lower()
-    if item_type in {"series_box", "booster_box", "box", "pack_box"}:
-        return True
+    return item_type in {"booster_pack", "box", "series_box", "booster_box", "pack_box"}
 
-    blob = " ".join(
-        str(card_info.get(k, "") or "")
-        for k in ("name", "jp_name", "c_name", "features", "release_info")
-    ).lower()
-    box_keywords = [
-        "卡盒", "卡包盒", "盒裝", "盒", "booster box", "box",
-        "拡張パック", "ハイクラスパック", "ブースターボックス",
-        "collection box", "premium collection", "スターター",
-    ]
-    if any(k in blob for k in box_keywords):
-        return True
-    return False
+
 
 
 def _sanitize_price_to_int(price_text):
@@ -2137,8 +2126,8 @@ async def analyze_image_with_google(image_path, api_key, lang="zh", model_overri
   "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)",
-  "item_type": "卡片型態 (選填，填 card 或 series_box。若圖片是卡盒/補充包盒，請填 series_box)",
-  "series_code": "系列序號 (選填，若為 series_box 必填；用於 yuyu-tei search_word，例如 m4 / op15 / loch)"
+  "item_type": "商品型態 (必填，只能填 card / booster_pack / box 三選一：card=單張卡片、booster_pack=單包補充包、box=整盒卡盒。圖片是什麼就填什麼，只有 booster_pack 和 box 才會進入卡盒分析流程)",
+  "series_code": "系列序號 (必填，若為 booster_pack 或 box 必填；用於 yuyu-tei search_word，例如 sv8a / op15 / loch 等)"
 }"""
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
@@ -2246,8 +2235,8 @@ async def analyze_image_with_openai(image_path, api_key, lang="zh", model_overri
   "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)",
-  "item_type": "卡片型態 (選填，填 card 或 series_box。若圖片是卡盒/補充包盒，請填 series_box)",
-  "series_code": "系列序號 (選填，若為 series_box 必填；用於 yuyu-tei search_word，例如 m4 / op15 / loch)"
+  "item_type": "商品型態 (必填，只能填 card / booster_pack / box 三選一：card=單張卡片、booster_pack=單包補充包、box=整盒卡盒。圖片是什麼就填什麼，只有 booster_pack 和 box 才會進入卡盒分析流程)",
+  "series_code": "系列序號 (必填，若為 booster_pack 或 box 必填；用於 yuyu-tei search_word，例如 sv8a / op15 / loch 等)"
 }"""
 
     model = (
@@ -2335,8 +2324,8 @@ async def analyze_image_with_minimax(image_path, api_key, lang="zh"):
   "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)",
-  "item_type": "卡片型態 (選填，填 card 或 series_box。若圖片是卡盒/補充包盒，請填 series_box)",
-  "series_code": "系列序號 (選填，若為 series_box 必填；用於 yuyu-tei search_word，例如 m4 / op15 / loch)"
+  "item_type": "商品型態 (必填，只能填 card / booster_pack / box 三選一：card=單張卡片、booster_pack=單包補充包、box=整盒卡盒。圖片是什麼就填什麼，只有 booster_pack 和 box 才會進入卡盒分析流程)",
+  "series_code": "系列序號 (必填，若為 booster_pack 或 box 必填；用於 yuyu-tei search_word，例如 sv8a / op15 / loch 等)"
 }"""
 
     payload = {
@@ -2563,9 +2552,9 @@ async def process_single_image(
     _debug_save("step1_meta.json", json.dumps(card_info, ensure_ascii=False, indent=2))
 
     # ── Series Box flow: 抓卡盒內卡片列表（先直連 HTML，失敗才走 Jina） ──
-    is_series_box = _looks_like_series_box(card_info)
+    is_box_or_pack = _is_box_or_pack(card_info)
     series_code = _extract_series_code(card_info)
-    if is_series_box and series_code:
+    if is_box_or_pack and series_code:
         _debug_log(f"📦 偵測到系列卡盒，啟動盒裝流程: series_code={series_code}")
         loop = asyncio.get_running_loop()
         series_result = await loop.run_in_executor(
@@ -2630,7 +2619,7 @@ async def process_single_image(
         if REPORT_ONLY:
             return (box_report, [poster_path, ""] if poster_path else [])
         return box_report
-    elif is_series_box and not series_code:
+    elif is_box_or_pack and not series_code:
         _debug_log("⚠️ 偵測到卡盒，但找不到 series_code/set_code，改走單卡流程")
 
     # ── features-based override ──────────────────────────────────────────────
@@ -3037,7 +3026,7 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
     if not card_info:
         return None, "卡片影像辨識失敗"
 
-    if _looks_like_series_box(card_info):
+    if _is_box_or_pack(card_info):
         series_code = _extract_series_code(card_info)
         if series_code:
             loop = asyncio.get_running_loop()
