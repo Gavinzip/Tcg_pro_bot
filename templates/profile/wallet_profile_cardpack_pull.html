@@ -368,6 +368,9 @@
             position: relative;
             display: inline-block;
         }
+        .extreme-price.price-up {
+            margin-top: -1.31rem;
+        }
 
         .extreme-heaven .extreme-price {
             color: transparent;
@@ -482,6 +485,9 @@
             font-weight: 900;
             transform: translateY(15px);
             position: relative;
+        }
+        .price-tag.price-up {
+            transform: translateY(-7px);
         }
         .price-tag::before { content: none; }
 
@@ -976,7 +982,7 @@
                     <div class="extreme-card-box">
                         <img src="{{ heaven_item.image }}" alt="{{ heaven_item.name }}" class="extreme-card-art" />
                     </div>
-                    <div class="extreme-price">${{ heaven_item.value }}</div>
+                    <div class="extreme-price{% if heaven_item.price_up %} price-up{% endif %}">${{ heaven_item.value }}</div>
                     {% endif %}
                 </div>
                 <div class="extreme-slot extreme-hell">
@@ -985,7 +991,7 @@
                     <div class="extreme-card-box">
                         <img src="{{ hell_item.image }}" alt="{{ hell_item.name }}" class="extreme-card-art" />
                     </div>
-                    <div class="extreme-price">${{ hell_item.value }}</div>
+                    <div class="extreme-price{% if hell_item.price_up %} price-up{% endif %}">${{ hell_item.value }}</div>
                     {% endif %}
                 </div>
             </div>
@@ -998,7 +1004,7 @@
                     </div>
                     <div class="w-full text-center space-y-2">
                         <div class="flex justify-center">
-                            <div class="price-tag"><span class="price-currency">$</span><span class="price-value">{{ item.value }}</span><span class="price-unit">USD</span></div>
+                            <div class="price-tag{% if item.price_up %} price-up{% endif %}"><span class="price-currency">$</span><span class="price-value">{{ item.value }}</span><span class="price-unit">USD</span></div>
                         </div>
                     </div>
                 </div>

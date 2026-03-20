@@ -2624,14 +2624,19 @@ def _build_wallet_flex_pack_template_context(
         activity_image = str(card.get("image") or "").strip()
         preview_image = str(card.get("preview_image") or "").strip()
         image = market_image or activity_image
+        used_token_image_fallback = False
         if image and _looks_like_pack_image_url(image) and token_id:
             token_image = _fetch_card_image_by_token_id(token_id)
             if token_image:
                 image = token_image
+                used_token_image_fallback = True
         if not image and FLEX_PACK_ALLOW_PREVIEW_IMAGE_FALLBACK:
             image = preview_image
         if not image and token_id:
-            image = _fetch_card_image_by_token_id(token_id)
+            token_image = _fetch_card_image_by_token_id(token_id)
+            if token_image:
+                image = token_image
+                used_token_image_fallback = True
 
         prepared = _prepare_collectible_image_for_poster(image) if prepare_image else image
 
@@ -2640,6 +2645,7 @@ def _build_wallet_flex_pack_template_context(
             "name": str(card.get("name") or current_info.get("name") or "Unknown Collectible"),
             "value": value,
             "image": prepared,
+            "used_token_image_fallback": used_token_image_fallback,
         }
 
     ui_labels = _profile_ui_labels(lang)
@@ -2741,6 +2747,7 @@ def _build_wallet_flex_pack_template_context(
                 "name": str(x.get("name") or "Unknown Collectible"),
                 "image": str(x.get("image") or _TRANSPARENT_CARD_IMAGE),
                 "value": _format_usdt_decimal(x.get("value")),
+                "price_up": bool(x.get("used_token_image_fallback")),
             }
             for x in resolved
         ]
@@ -2816,11 +2823,13 @@ def _build_wallet_flex_pack_template_context(
             "name": f"Heaven / {str(highest.get('name') or 'Unknown Collectible')}",
             "image": str(highest.get("image") or _TRANSPARENT_CARD_IMAGE),
             "value": _format_usdt_decimal(highest.get("value")),
+            "price_up": bool(highest.get("used_token_image_fallback")),
         },
         {
             "name": f"Hell / {str(lowest.get('name') or 'Unknown Collectible')}",
             "image": str(lowest.get("image") or _TRANSPARENT_CARD_IMAGE),
             "value": _format_usdt_decimal(lowest.get("value")),
+            "price_up": bool(lowest.get("used_token_image_fallback")),
         },
     ]
     pair_total = _to_decimal(highest.get("value")) + _to_decimal(lowest.get("value"))
