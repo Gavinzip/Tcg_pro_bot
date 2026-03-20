@@ -1702,6 +1702,7 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
                 "legacy_key": legacy_key,
                 "pack_name": pack_label,
                 "checkout_id": checkout_id,
+                "token_id": token_hint,
                 "timestamp_raw": _parse_int(row.get("timestamp")) or 0,
                 "event_key": legacy_event_key,
             }
@@ -1954,7 +1955,7 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         best = None
         if candidates:
             best = max(candidates, key=lambda x: int(_parse_int(x.get("timestamp_raw")) or 0))
-        token_id = str((best or {}).get("token_id") or "").strip()
+        token_id = str((best or {}).get("token_id") or pull.get("token_id") or "").strip()
         if not token_id:
             token_id = f"{legacy_key}:{checkout_id or str(pull.get('event_key') or '')}"
         value = _to_decimal((best or {}).get("value"))
@@ -3114,9 +3115,7 @@ def _build_wallet_profile_context(
     profile_name = str(username or short_wallet or "Unknown User")
     sbt_badges = _fetch_user_sbt_badges(username)
     sbt_total = sum((b.get("balance") or 0) for b in sbt_badges)
-    sbt_rank_value = _parse_int((ranking_row or {}).get("sbt_owned_total"))
-    if sbt_rank_value is None:
-        sbt_rank_value = int(sbt_total)
+    sbt_live_total = int(sbt_total)
     volume_rank_chip = _rank_chip_payload((ranking_row or {}).get("volume_rank"))
     holdings_rank_chip = _rank_chip_payload((ranking_row or {}).get("holdings_rank"))
     pnl_rank_chip = _rank_chip_payload((ranking_row or {}).get("pnl_rank"))
@@ -3251,7 +3250,8 @@ def _build_wallet_profile_context(
         "metric_assets_value_rank": holdings_rank_chip["text"],
         "metric_assets_value_rank_tier": holdings_rank_chip["tier"],
         "metric_sbt_label": "SBT",
-        "metric_sbt_value": _format_number(sbt_rank_value),
+        # SBT quantity must always reflect live badges; ranking snapshot is rank-only.
+        "metric_sbt_value": _format_number(sbt_live_total),
         "metric_sbt_rank": sbt_rank_chip["text"],
         "metric_sbt_rank_tier": sbt_rank_chip["tier"],
         "metric_buyback_label": history_labels.get("kpi_buyback", "Buyback Total"),
