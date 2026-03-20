@@ -1225,6 +1225,16 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         prev = prev_wallets.get(rec.address)
         if prev is not None and prev.username:
             rec.username = prev.username
+
+    username_changed_addrs: set[str] = set()
+    for rec in records:
+        curr_username = str(rec.username or "").strip().lower()
+        if not curr_username:
+            continue
+        prev = prev_wallets.get(rec.address)
+        prev_username = str((prev.username if prev is not None else "") or "").strip().lower()
+        if curr_username != prev_username:
+            username_changed_addrs.add(rec.address)
     workers = max(1, min(cfg.workers, len(records))) if records else 1
 
     latest_activity_map: dict[str, str] = {}
@@ -1299,6 +1309,11 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         refresh_addrs = set(current_addrs)
     else:
         refresh_addrs = {a for a in current_addrs if (a not in prev_wallets) or (a in changed_by_activity)}
+    sbt_refresh_addrs = set(refresh_addrs)
+    if not full_rebuild:
+        # SBT depends on username; refresh when username is newly resolved/changed
+        # even if activity did not change.
+        sbt_refresh_addrs |= username_changed_addrs
 
     checkpoint_next: dict[str, dict[str, Any]] = {}
     prev_day_keys_map: dict[str, set[str]] = {}
@@ -1515,11 +1530,18 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             _apply_metrics_fallback(rec, prev_wallets.get(addr))
         _flush_progress_checkpoint(force=True)
 
-        sbt_phase_total = len(refresh_records)
+    else:
+        metric_failed_initial = 0
+        metric_failed_resolved = 0
+        metric_failed_unresolved = 0
+
+    sbt_records = [r for r in records if r.address in sbt_refresh_addrs]
+    if sbt_records:
+        sbt_phase_total = len(sbt_records)
         sbt_completed = 0
         _print_progress("sbt", 0, sbt_phase_total)
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, refresh_cnt))) as pool:
-            future_map = {pool.submit(compute_sbt_for_wallet, rec.username): rec for rec in refresh_records}
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(sbt_records)))) as pool:
+            future_map = {pool.submit(compute_sbt_for_wallet, rec.username): rec for rec in sbt_records}
             for future in as_completed(future_map):
                 rec = future_map[future]
                 try:
@@ -1536,10 +1558,6 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                 _maybe_print_progress("sbt", sbt_completed, sbt_phase_total, cfg.progress_every)
                 rec.sbt_owned_total = sbt_owned_total
                 rec.sbt_owned_badge_count = sbt_badge_count
-    else:
-        metric_failed_initial = 0
-        metric_failed_resolved = 0
-        metric_failed_unresolved = 0
 
     for rec in records:
         rec.total_pnl_usdt = rec.cash_net_usdt + rec.holdings_value_usdt

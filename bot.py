@@ -207,6 +207,15 @@ def _load_rankings_wallet_map() -> dict[str, dict]:
     return wallet_map
 
 
+def _username_from_rankings_wallet(wallet_address: str) -> str | None:
+    wallet_norm = _normalize_wallet_address(wallet_address or "") or str(wallet_address or "").strip().lower()
+    if not wallet_norm:
+        return None
+    row = _load_rankings_wallet_map().get(wallet_norm) or {}
+    username = str(row.get("username") or "").strip()
+    return username or None
+
+
 def _rank_chip_payload(rank_value: object) -> dict[str, str]:
     rank_int = _parse_int(rank_value)
     if rank_int is None or rank_int <= 0:
@@ -2289,6 +2298,8 @@ def _build_wallet_flex_pack_picker_data(wallet_address: str, profile_lang: str =
         user_id, username = _resolve_user_from_wallet(wallet_address)
     except Exception:
         user_id, username = None, None
+    if not username:
+        username = _username_from_rankings_wallet(wallet_norm)
 
     history_data = _build_wallet_activity_history(wallet_address, profile_lang=lang)
     release_cards = [x for x in (history_data.get("release_cards") or []) if isinstance(x, dict)]
@@ -2705,8 +2716,8 @@ def _resolve_user_from_wallet(wallet_address: str) -> tuple[str | None, str | No
             owner = item.get("owner") or {}
             user_id = owner.get("id")
             username = owner.get("username")
-            if user_id:
-                return str(user_id), (str(username) if username is not None else None)
+            if user_id or username:
+                return (str(user_id) if user_id is not None else None), (str(username) if username is not None else None)
         return None, None
 
     first_payload = {
@@ -2719,7 +2730,7 @@ def _resolve_user_from_wallet(wallet_address: str) -> tuple[str | None, str | No
     first_result = _trpc_collectible_list(first_payload)
     first_collection = first_result.get("collection") or []
     found_user_id, found_username = _find_owner_in_collection(first_collection if isinstance(first_collection, list) else [])
-    if found_user_id:
+    if found_user_id or found_username:
         return found_user_id, found_username
 
     first_pagination = first_result.get("pagination") or {}
@@ -2759,7 +2770,7 @@ def _resolve_user_from_wallet(wallet_address: str) -> tuple[str | None, str | No
                 if not isinstance(collection, list):
                     continue
                 found_user_id, found_username = _find_owner_in_collection(collection)
-                if found_user_id:
+                if found_user_id or found_username:
                     return found_user_id, found_username
     return None, None
 
@@ -2874,14 +2885,34 @@ def _build_wallet_profile_picker_data(wallet_address: str) -> dict:
         user_id, username = _resolve_user_from_wallet(wallet_address)
     except Exception:
         user_id, username = None, None
+    if not username:
+        username = _username_from_rankings_wallet(wallet_norm)
     if not user_id:
+        sbt_badges = _fetch_user_sbt_badges(username)
+        owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
+        sbt_options = []
+        for b in owned_badges[:25]:
+            name = str(b.get("name") or "").strip()
+            if not name:
+                continue
+            sbt_id = str(b.get("sbt_id") or "").strip()
+            balance = _parse_int(b.get("balance")) or 0
+            value = f"id:{sbt_id}" if sbt_id else f"name:{name.lower()}"
+            sbt_options.append(
+                {
+                    "value": value[:100],
+                    "label": name[:100],
+                    "full_label": name[:160],
+                    "description": f"Balance {balance}"[:100],
+                }
+            )
         return {
-            "username": wallet_short,
+            "username": str(username or wallet_short),
             "user_id": None,
             "collection_count": 0,
             "card_options": [],
-            "owned_sbt_count": 0,
-            "sbt_options": [],
+            "owned_sbt_count": len(owned_badges),
+            "sbt_options": sbt_options,
         }
 
     try:
@@ -3005,6 +3036,8 @@ def _build_wallet_profile_context(
     except Exception:
         user_id, username = None, None
     wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
+    if not username:
+        username = _username_from_rankings_wallet(wallet_norm)
     short_wallet = f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm
     ranking_row = _load_rankings_wallet_map().get(wallet_norm, {}) if wallet_norm else {}
     if user_id:
