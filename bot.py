@@ -169,6 +169,11 @@ _RANKING_LATEST_CACHE: dict[str, object] = {
     "mtime": -1.0,
     "wallet_map": {},
 }
+_PACK_PRICE_MAP_CACHE: dict[str, object] = {
+    "path": "",
+    "mtime": -1.0,
+    "data": {},
+}
 
 
 def _load_rankings_wallet_map() -> dict[str, dict]:
@@ -281,6 +286,10 @@ _CARD_COLLECTIBLE_CACHE: dict[str, dict] = {}
 _PROFILE_SBT_BADGE_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _PREPARED_CARD_IMAGE_CACHE: dict[str, str] = {}
 PROFILE_PREPARED_CARD_CACHE_DIR = os.path.join(BASE_DIR, "templates", "profile", "cache_cards")
+PACK_PRICE_MAP_PATH = (
+    str(os.getenv("PACK_PRICE_MAP_PATH", os.path.join(BASE_DIR, "data", "pack_price_map.json"))).strip()
+    or os.path.join(BASE_DIR, "data", "pack_price_map.json")
+)
 _HTTP_SESSION_LOCAL = threading.local()
 _PROFILE_BACKGROUND_FILES = {
     "classic": None,
@@ -366,7 +375,7 @@ def _to_decimal(value) -> Decimal:
         return Decimal(value)
     if isinstance(value, float):
         return Decimal(str(value))
-    text = str(value).strip()
+    text = str(value).strip().replace(",", "")
     if not text:
         return Decimal("0")
     try:
@@ -1599,6 +1608,149 @@ def _pack_label_from_pull_item(item: dict | None) -> str:
     return "Unknown Pack"
 
 
+def _normalize_pack_label_key(name: str | None) -> str:
+    return re.sub(r"\s+", " ", str(name or "").strip().lower())
+
+
+def _default_pack_price_map() -> dict:
+    return {
+        "version": 1,
+        "updated_at": "",
+        "by_contract": {},
+        "by_pack_name": {},
+    }
+
+
+def _load_pack_price_map() -> dict:
+    path = PACK_PRICE_MAP_PATH
+    default_data = _default_pack_price_map()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return default_data
+
+    if (
+        _PACK_PRICE_MAP_CACHE.get("path") == path
+        and _PACK_PRICE_MAP_CACHE.get("mtime") == mtime
+        and isinstance(_PACK_PRICE_MAP_CACHE.get("data"), dict)
+    ):
+        data_cached = _PACK_PRICE_MAP_CACHE.get("data") or {}
+        if isinstance(data_cached.get("by_contract"), dict) and isinstance(data_cached.get("by_pack_name"), dict):
+            return data_cached  # type: ignore[return-value]
+        return default_data
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return default_data
+    if not isinstance(data, dict):
+        return default_data
+    if not isinstance(data.get("by_contract"), dict):
+        data["by_contract"] = {}
+    if not isinstance(data.get("by_pack_name"), dict):
+        data["by_pack_name"] = {}
+    _PACK_PRICE_MAP_CACHE["path"] = path
+    _PACK_PRICE_MAP_CACHE["mtime"] = mtime
+    _PACK_PRICE_MAP_CACHE["data"] = data
+    return data
+
+
+def _save_pack_price_map(pack_map: dict) -> None:
+    if not isinstance(pack_map, dict):
+        return
+    by_contract = pack_map.get("by_contract") if isinstance(pack_map.get("by_contract"), dict) else {}
+    by_pack_name = pack_map.get("by_pack_name") if isinstance(pack_map.get("by_pack_name"), dict) else {}
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "by_contract": by_contract,
+        "by_pack_name": by_pack_name,
+    }
+    path = PACK_PRICE_MAP_PATH
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
+        _PACK_PRICE_MAP_CACHE["path"] = path
+        _PACK_PRICE_MAP_CACHE["mtime"] = os.path.getmtime(path)
+        _PACK_PRICE_MAP_CACHE["data"] = payload
+    except Exception:
+        return
+
+
+def _pack_price_entry_to_decimal(entry) -> Decimal:
+    if isinstance(entry, dict):
+        return _to_decimal(entry.get("unit_price"))
+    return _to_decimal(entry)
+
+
+def _lookup_pack_unit_price(pack_map: dict, contract_key: str | None = None, pack_name: str | None = None) -> Decimal:
+    if not isinstance(pack_map, dict):
+        return Decimal("0")
+    by_contract = pack_map.get("by_contract") if isinstance(pack_map.get("by_contract"), dict) else {}
+    by_pack_name = pack_map.get("by_pack_name") if isinstance(pack_map.get("by_pack_name"), dict) else {}
+
+    key = str(contract_key or "").strip().lower()
+    if key:
+        v = _pack_price_entry_to_decimal(by_contract.get(key))
+        if v > 0:
+            return v
+
+    name_key = _normalize_pack_label_key(pack_name)
+    if name_key:
+        v = _pack_price_entry_to_decimal(by_pack_name.get(name_key))
+        if v > 0:
+            return v
+    return Decimal("0")
+
+
+def _record_pack_unit_price(pack_map: dict, contract_key: str | None, pack_name: str | None, unit_price: Decimal) -> bool:
+    if not isinstance(pack_map, dict):
+        return False
+    price = _to_decimal(unit_price)
+    if price <= 0:
+        return False
+    if not isinstance(pack_map.get("by_contract"), dict):
+        pack_map["by_contract"] = {}
+    if not isinstance(pack_map.get("by_pack_name"), dict):
+        pack_map["by_pack_name"] = {}
+    by_contract = pack_map["by_contract"]
+    by_pack_name = pack_map["by_pack_name"]
+    now_iso = datetime.now(timezone.utc).isoformat()
+    changed = False
+    price_text = _format_usdt_decimal(price)
+
+    key = str(contract_key or "").strip().lower()
+    label = str(pack_name or "").strip()
+    if key:
+        prev = by_contract.get(key) if isinstance(by_contract.get(key), dict) else {}
+        next_row = {
+            "unit_price": price_text,
+            "pack_name": label or str(prev.get("pack_name") or ""),
+            "updated_at": now_iso,
+        }
+        if prev != next_row:
+            by_contract[key] = next_row
+            changed = True
+
+    name_key = _normalize_pack_label_key(label)
+    if name_key:
+        prev = by_pack_name.get(name_key) if isinstance(by_pack_name.get(name_key), dict) else {}
+        next_row = {
+            "unit_price": price_text,
+            "pack_name": label,
+            "contract_key": key,
+            "updated_at": now_iso,
+        }
+        if prev != next_row:
+            by_pack_name[name_key] = next_row
+            changed = True
+    return changed
+
+
 def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en") -> dict:
     lang = _profile_lang_from_locale(profile_lang)
     labels = _profile_history_labels(lang)
@@ -1635,6 +1787,8 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
     withdraw_token_ids: set[str] = set()
     release_cards_by_token: dict[str, dict] = {}
     token_latest_values: dict[str, tuple[int, Decimal]] = {}
+    pack_price_map = _load_pack_price_map()
+    pack_price_map_dirty = False
 
     def _remember_token_value(token_id: str, value: Decimal, ts_value: int):
         tid = str(token_id or "").strip()
@@ -1819,6 +1973,14 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
             direct_hit = price > 0
         if not direct_hit:
             inferred = _pick_contract_unit_price(contract_pull_price_counter.get(contract) or Counter())
+            if inferred <= 0:
+                row_item = row.get("item") if isinstance(row.get("item"), dict) else {}
+                mapped_pack_name = contract_pack_name.get(contract) or _pack_label_from_pull_item(row_item)
+                inferred = _lookup_pack_unit_price(
+                    pack_price_map,
+                    contract_key=contract,
+                    pack_name=mapped_pack_name,
+                )
             if inferred > 0:
                 price = inferred
                 inferred_price_count += 1
@@ -1838,6 +2000,12 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
     # Legacy pull rows can miss priceInUsdt; infer by same pack key's observed unit price.
     for legacy_key in legacy_missing_price_keys:
         inferred = _pick_contract_unit_price(contract_pull_price_counter.get(legacy_key) or Counter())
+        if inferred <= 0:
+            inferred = _lookup_pack_unit_price(
+                pack_price_map,
+                contract_key=legacy_key,
+                pack_name=contract_pack_name.get(legacy_key),
+            )
         if inferred > 0:
             inferred_price_count += 1
             inferred_spent_total += inferred
@@ -1856,12 +2024,24 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
     all_contracts = sorted(set(contract_open_count.keys()) | set(contract_pull_price_counter.keys()))
     for contract in all_contracts:
         price_counter = contract_pull_price_counter.get(contract) or Counter()
-        unit_price = _pick_contract_unit_price(price_counter)
+        direct_unit_price = _pick_contract_unit_price(price_counter)
         pack_counter = contract_pack_counter.get(contract) or Counter()
         if pack_counter:
             pack_name = pack_counter.most_common(1)[0][0]
         else:
             pack_name = contract_pack_name.get(contract) or f"Contract {_short_hex(contract)}"
+        unit_price = direct_unit_price if direct_unit_price > 0 else _lookup_pack_unit_price(
+            pack_price_map,
+            contract_key=contract,
+            pack_name=pack_name,
+        )
+        if direct_unit_price > 0:
+            pack_price_map_dirty = _record_pack_unit_price(
+                pack_price_map,
+                contract_key=contract,
+                pack_name=pack_name,
+                unit_price=direct_unit_price,
+            ) or pack_price_map_dirty
         is_legacy_pack = contract.startswith("legacy")
         contract_full = "-" if is_legacy_pack else contract
         contract_short = "-" if is_legacy_pack else _short_hex(contract)
@@ -1881,6 +2061,8 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
     contract_rows.sort(key=lambda x: (x["spent_total_raw"], x["open_count"]), reverse=True)
     for row in contract_rows:
         row.pop("spent_total_raw", None)
+    if pack_price_map_dirty:
+        _save_pack_price_map(pack_price_map)
 
     opened_pack_ids = set(release_seen_open_keys) | set(legacy_seen_open_keys)
 
