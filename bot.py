@@ -242,6 +242,8 @@ PROFILE_HTTP_POOL_MAXSIZE = max(8, int(os.getenv("PROFILE_HTTP_POOL_MAXSIZE", "4
 PROFILE_RESOLVE_SCAN_WORKERS = max(1, int(os.getenv("PROFILE_RESOLVE_SCAN_WORKERS", "8")))
 PROFILE_COLLECTION_FETCH_WORKERS = max(1, int(os.getenv("PROFILE_COLLECTION_FETCH_WORKERS", "8")))
 PROFILE_WITHDRAW_VALUE_WORKERS = max(1, int(os.getenv("PROFILE_WITHDRAW_VALUE_WORKERS", "10")))
+FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT = max(0, int(os.getenv("FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT", "24")))
+PROFILE_SBT_BADGE_CACHE_TTL_SEC = max(0, int(os.getenv("PROFILE_SBT_BADGE_CACHE_TTL_SEC", "600")))
 PROFILE_ENABLE_RUNTIME_CACHE = str(os.getenv("PROFILE_ENABLE_RUNTIME_CACHE", "0")).strip().lower() in ("1", "true", "yes", "on")
 PROFILE_ENABLE_DISK_IMAGE_CACHE = str(os.getenv("PROFILE_ENABLE_DISK_IMAGE_CACHE", "0")).strip().lower() in (
     "1",
@@ -266,6 +268,7 @@ _PROFILE_RELEASE_CARD_TYPES = {
 _CARD_FMV_CACHE: dict[str, Decimal] = {}
 _CARD_IMAGE_CACHE: dict[str, str] = {}
 _CARD_COLLECTIBLE_CACHE: dict[str, dict] = {}
+_PROFILE_SBT_BADGE_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _PREPARED_CARD_IMAGE_CACHE: dict[str, str] = {}
 PROFILE_PREPARED_CARD_CACHE_DIR = os.path.join(BASE_DIR, "templates", "profile", "cache_cards")
 _HTTP_SESSION_LOCAL = threading.local()
@@ -2284,19 +2287,24 @@ def _build_wallet_flex_pack_template_context(
                 "value": _to_decimal(_parse_int((item or {}).get("fmvPriceInUSD"))) / Decimal("100"),
             }
 
-    def _resolve_card_candidate(card: dict, allow_trade_fallback: bool = True) -> dict:
+    def _resolve_card_candidate(
+        card: dict,
+        allow_trade_fallback: bool = True,
+        fetch_missing: bool = True,
+        prepare_image: bool = True,
+    ) -> dict:
         token_id = str(card.get("token_id") or "").strip()
         current_info = current_cards_by_token.get(token_id) or {}
         value = _to_decimal(token_value_hints.get(token_id))
         if value <= 0:
             value = _to_decimal(current_info.get("value"))
-        if value <= 0 and token_id:
+        if value <= 0 and token_id and fetch_missing:
             value = _to_decimal(_fetch_card_fmv_by_token_id(token_id, allow_trade_fallback=allow_trade_fallback))
 
         image = str(current_info.get("image") or card.get("image") or "").strip()
-        if not image and token_id:
+        if not image and token_id and prepare_image:
             image = _fetch_card_image_by_token_id(token_id)
-        prepared = _prepare_collectible_image_for_poster(image)
+        prepared = _prepare_collectible_image_for_poster(image) if prepare_image else image
 
         return {
             "token_id": token_id,
@@ -2363,7 +2371,36 @@ def _build_wallet_flex_pack_template_context(
         if not token_id or token_id in unique_cards:
             continue
         unique_cards[token_id] = card
-    resolved_all = [_resolve_card_candidate(card, allow_trade_fallback=False) for card in unique_cards.values()]
+    resolved_all = [
+        _resolve_card_candidate(card, allow_trade_fallback=False, fetch_missing=False, prepare_image=False)
+        for card in unique_cards.values()
+    ]
+    unresolved = [x for x in resolved_all if _to_decimal(x.get("value")) <= 0 and str(x.get("token_id") or "").strip()]
+    if FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT > 0 and len(unresolved) > FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT:
+        unresolved = unresolved[:FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT]
+    if unresolved:
+        workers = min(8, len(unresolved))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                future_map = {
+                    pool.submit(_fetch_card_fmv_by_token_id, str(row.get("token_id") or ""), False): row
+                    for row in unresolved
+                }
+                for future in as_completed(future_map):
+                    row = future_map[future]
+                    try:
+                        v = _to_decimal(future.result())
+                    except Exception:
+                        v = Decimal("0")
+                    if v > 0:
+                        row["value"] = v
+        else:
+            for row in unresolved:
+                tid = str(row.get("token_id") or "")
+                v = _to_decimal(_fetch_card_fmv_by_token_id(tid, allow_trade_fallback=False))
+                if v > 0:
+                    row["value"] = v
+
     resolved_positive = [x for x in resolved_all if _to_decimal(x.get("value")) > 0]
     if len(resolved_positive) < 2:
         raise RuntimeError("此卡包可定價的卡片不足 2 張，無法生成天堂地獄版本。")
@@ -2377,6 +2414,16 @@ def _build_wallet_flex_pack_template_context(
     lowest = sorted_cards[-1]
     if str(highest.get("token_id")) == str(lowest.get("token_id")) and len(sorted_cards) > 1:
         lowest = sorted_cards[-2]
+
+    def _prepare_final_extreme_image(row: dict) -> str:
+        token_id = str(row.get("token_id") or "").strip()
+        image = str(row.get("image") or "").strip()
+        if not image and token_id:
+            image = _fetch_card_image_by_token_id(token_id)
+        return _prepare_collectible_image_for_poster(image)
+
+    highest["image"] = _prepare_final_extreme_image(highest)
+    lowest["image"] = _prepare_final_extreme_image(lowest)
 
     items = [
         {
@@ -2432,41 +2479,66 @@ def _fetch_user_sbt_badges(username: str | None) -> list[dict]:
     uname = str(username or "").strip()
     if not uname:
         return []
+    cache_key = uname.lower()
+    now_ts = time.time()
+    cached = _PROFILE_SBT_BADGE_CACHE.get(cache_key)
+    if cached and PROFILE_SBT_BADGE_CACHE_TTL_SEC > 0 and (now_ts - cached[0]) <= PROFILE_SBT_BADGE_CACHE_TTL_SEC:
+        return [dict(x) for x in cached[1]]
     input_payload = {"0": {"json": {"username": uname}}}
     params = {
         "batch": "1",
         "input": json.dumps(input_payload, separators=(",", ":"), ensure_ascii=False),
     }
-    try:
-        resp = _http_get(RENAISS_SBT_BADGES_URL, params=params, timeout=25)
-        resp.raise_for_status()
-        data = resp.json()
-        if not isinstance(data, list) or not data:
-            return []
-        row = data[0]
-        if row.get("error"):
-            return []
-        badges = (((row.get("result") or {}).get("data") or {}).get("json") or {}).get("badges") or []
-        out = []
-        for b in badges:
-            obj = b or {}
-            name = str(obj.get("badgeName") or "").strip()
-            if not name:
+    last_err = None
+    for attempt in range(1, PROFILE_API_MAX_RETRIES + 1):
+        try:
+            resp = _http_get(RENAISS_SBT_BADGES_URL, params=params, timeout=25)
+            status = int(resp.status_code or 0)
+            if status == 429 or status >= 500:
+                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, list) or not data:
+                raise RuntimeError("sbt.getUserBadges 回傳格式異常")
+            row = data[0]
+            if row.get("error"):
+                err = row.get("error", {}).get("json", {}).get("message") or "unknown error"
+                raise RuntimeError(f"sbt.getUserBadges error: {err}")
+            badges = (((row.get("result") or {}).get("data") or {}).get("json") or {}).get("badges") or []
+            out = []
+            for b in badges:
+                obj = b or {}
+                name = str(obj.get("badgeName") or "").strip()
+                if not name:
+                    continue
+                bal = _parse_int(obj.get("balance")) or 0
+                image_url = str(obj.get("badgeImageUrl") or "").strip()
+                out.append(
+                    {
+                        "name": name,
+                        "balance": bal,
+                        "is_owned": bool(obj.get("isOwned")),
+                        "sbt_id": obj.get("sbtId"),
+                        "image_url": image_url,
+                    }
+                )
+            _PROFILE_SBT_BADGE_CACHE[cache_key] = (time.time(), [dict(x) for x in out])
+            return out
+        except Exception as e:
+            last_err = e
+            status = None
+            if isinstance(e, requests.RequestException) and getattr(e, "response", None) is not None:
+                status = int(e.response.status_code or 0)
+            retryable = status in (408, 409, 425, 429) or (status is not None and status >= 500) or status is None
+            if retryable and attempt < PROFILE_API_MAX_RETRIES:
+                wait_sec = PROFILE_API_RETRY_BACKOFF_SEC * (2 ** (attempt - 1))
+                time.sleep(wait_sec)
                 continue
-            bal = _parse_int(obj.get("balance")) or 0
-            image_url = str(obj.get("badgeImageUrl") or "").strip()
-            out.append(
-                {
-                    "name": name,
-                    "balance": bal,
-                    "is_owned": bool(obj.get("isOwned")),
-                    "sbt_id": obj.get("sbtId"),
-                    "image_url": image_url,
-                }
-            )
-        return out
-    except Exception:
-        return []
+            break
+    if cached:
+        print(f"⚠️ sbt.getUserBadges failed for {uname}, fallback stale cache: {last_err}", file=sys.stderr)
+        return [dict(x) for x in cached[1]]
+    return []
 
 
 def _resolve_user_from_wallet(wallet_address: str) -> tuple[str | None, str | None]:
