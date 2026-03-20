@@ -2629,6 +2629,14 @@ def _build_wallet_flex_pack_template_context(
 
     ui_labels = _profile_ui_labels(lang)
     pack_name = str(pack_cards[0].get("pack_name") or f"Contract {_short_hex(pack_contract)}")
+
+    def _pack_title_short(name: str) -> str:
+        text = str(name or "").strip()
+        if "|" in text:
+            text = text.split("|", 1)[0].strip()
+        return text or str(name or "").strip()
+
+    pack_title = _pack_title_short(pack_name)
     wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
     wallet_short = f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm
     subtitle = f"{pack_name} · {wallet_short}"
@@ -2722,7 +2730,7 @@ def _build_wallet_flex_pack_template_context(
             for x in resolved
         ]
         template_context = {
-            "collection_name": f"{pack_name} · PnL",
+            "collection_name": pack_title,
             "sbt_total": len(pack_cards),
             "extreme_mode": False,
             "hide_footer": False,
@@ -2743,7 +2751,7 @@ def _build_wallet_flex_pack_template_context(
             "background_key": "classic",
             "background_image": _profile_background_data_uri("classic"),
             "meta_counter_label": "PULL",
-            "pack_name_display": pack_name,
+            "pack_name_display": pack_title,
             "pnl_tone": pnl_tone,
             "_meta_subtitle": subtitle,
         }
@@ -2798,7 +2806,7 @@ def _build_wallet_flex_pack_template_context(
     ]
     pair_total = _to_decimal(highest.get("value")) + _to_decimal(lowest.get("value"))
     template_context = {
-        "collection_name": f"{pack_name} · PnL",
+        "collection_name": pack_title,
         "sbt_total": len(pack_cards),
         "extreme_mode": True,
         "hide_footer": False,
@@ -2819,7 +2827,7 @@ def _build_wallet_flex_pack_template_context(
         "background_key": "classic",
         "background_image": _profile_background_data_uri("classic"),
         "meta_counter_label": "PULL",
-        "pack_name_display": pack_name,
+        "pack_name_display": pack_title,
         "pnl_tone": pnl_tone,
         "_meta_subtitle": subtitle,
     }
