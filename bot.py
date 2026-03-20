@@ -431,7 +431,7 @@ def _clamp_profile_card_count(value: int | None) -> int:
 
 
 def _clamp_flex_pack_card_count(value: int | None) -> int:
-    if value in (1, 3, 4, 7, 10):
+    if value in (1, 2, 3, 4, 7, 10):
         return int(value)
     return 10
 
@@ -2282,10 +2282,10 @@ def _resolve_flex_pack_layout_count(requested: int, available: int) -> int:
         return 0
     if available >= req:
         return req
-    for candidate in (10, 7, 4, 3, 1):
+    for candidate in (10, 7, 4, 3, 2, 1):
         if candidate <= available and candidate <= req:
             return candidate
-    for candidate in (10, 7, 4, 3, 1):
+    for candidate in (10, 7, 4, 3, 2, 1):
         if candidate <= available:
             return candidate
     return 1
@@ -5057,6 +5057,7 @@ class FlexPackTemplateSelect(discord.ui.Select):
         default_count = _clamp_flex_pack_card_count(selected_count)
         options = [
             discord.SelectOption(label="1", value="1", default=(default_count == 1)),
+            discord.SelectOption(label="2", value="2", default=(default_count == 2)),
             discord.SelectOption(label="3", value="3", default=(default_count == 3)),
             discord.SelectOption(label="4", value="4", default=(default_count == 4)),
             discord.SelectOption(label="7", value="7", default=(default_count == 7)),
@@ -5133,7 +5134,7 @@ class FlexPackConfigView(discord.ui.View):
             f"{_t(self.selected_lang, '模式', 'Mode', '모드', '模式')}: **{mode_label}**\n"
             f"{_t(self.selected_lang, '排版數量', 'Layout Count', '레이아웃 수', '排版数量')}: **{layout_value}**\n"
             f"{_t(self.selected_lang, '該包卡片數', 'Cards in Pack', '해당 팩 카드 수', '该包卡片数')}: **{self._pack_count()}**\n\n"
-            f"{_t(self.selected_lang, '剛抽卡排版提供 1/3/4/7/10，卡片不足會自動 fallback。', 'Recent Pull Layout supports 1/3/4/7/10 and auto-fallback on insufficient cards.', '최근 뽑기 레이아웃은 1/3/4/7/10 지원, 카드 부족 시 자동 fallback.', '刚抽卡排版提供 1/3/4/7/10，卡片不足自动 fallback。')}"
+            f"{_t(self.selected_lang, '剛抽卡排版提供 1/2/3/4/7/10，卡片不足會自動 fallback。', 'Recent Pull Layout supports 1/2/3/4/7/10 and auto-fallback on insufficient cards.', '최근 뽑기 레이아웃은 1/2/3/4/7/10 지원, 카드 부족 시 자동 fallback.', '刚抽卡排版提供 1/2/3/4/7/10，卡片不足自动 fallback。')}"
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
