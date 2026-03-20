@@ -254,19 +254,31 @@
 
         /* Upright title in extreme mode */
         .extreme-duality .header-title {
-            color: #f8fafc;
-            background: none;
-            -webkit-text-fill-color: currentColor;
+            background: linear-gradient(
+                to left,
+                #1b56ff 0%,
+                #17b8ff 25%,
+                #18cc90 50%,
+                #f4bf18 74%,
+                #ff5a35 100%
+            );
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            color: transparent;
             text-transform: none;
             font-style: normal;
             letter-spacing: 0.01em;
             font-weight: 800;
-            text-shadow: 0 2px 16px rgba(6, 14, 30, 0.35);
-            white-space: nowrap;
-            font-size: 3.32rem !important;
-            line-height: 1.1 !important;
+            text-shadow:
+                0 1px 0 rgba(255, 255, 255, 0.28),
+                0 6px 14px rgba(8, 20, 38, 0.32);
+            white-space: normal;
+            font-size: 2.72rem !important;
+            line-height: 1.16 !important;
             overflow: visible !important;
             display: inline-block;
+            text-align: right;
         }
 
         .extreme-duality .header-right {
@@ -937,8 +949,7 @@
             <div class="header-right text-right">
                 <h1 class="header-title holo-title text-5xl font-black tracking-tight">
                     {% if _is_extreme %}
-                    <span class="extreme-title-heaven">Heaven</span>
-                    <span class="extreme-title-neutral">and Hell</span>
+                    {{ pack_name_display or collection_name }}
                     {% else %}
                     {{ collection_name }}
                     {% endif %}
