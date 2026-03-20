@@ -1127,6 +1127,15 @@ def _parse_vision_json(content):
     cleaned = (content or "").replace("```json", "").replace("```", "").strip()
     return json.loads(cleaned)
 
+def _normalize_vision_result(parsed):
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict):
+                return item
+    raise ValueError(f"Vision JSON 格式不支援: {type(parsed).__name__}")
+
 def _get_llm_keys(minimax_api_hint=None):
     google_key = (os.getenv("GOOGLE_API_KEY") or "").strip()
     openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
@@ -1165,6 +1174,16 @@ def _has_pokemon_mega_feature(features_text):
         "メガ進化",
     ]
     return any(marker in text for marker in mega_markers)
+
+
+def _has_alt_variant_feature(features_text):
+    text = str(features_text or "").lower()
+    alt_markers = [
+        "leader parallel", "sr parallel", "sr-p", "l-p",
+        "リーダーパラレル", "コミパラ", "パラレル",
+        "alternate art", "parallel art", "manga",
+    ]
+    return any(marker in text for marker in alt_markers)
 
 def _title_has_en_marker(title):
     title_l = str(title).lower()
@@ -1715,23 +1734,42 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
         top_why = ",".join(scored_urls[0][2]) if scored_urls[0][2] else "fallback"
         selection_reason = f"Scored Best ({top_score}): {top_why}"
         _debug_log(f"PriceCharting ranking top3: {[(u, s) for u, s, _ in scored_urls[:3]]}")
-        
+
+        def _is_alt_variant_url(u):
+            lower_u = u.replace('[', '').replace(']', '').lower()
+            return (
+                "manga" in lower_u
+                or "alternate-art" in lower_u
+                or "-sp" in lower_u
+                or "parallel" in lower_u
+            )
+
         # Filter based on is_flagship / is_alt_art (features-based override 主導)
         if is_flagship:
-            # 旗艦賽獎品卡：尋找包含 flagship 的 URL
+            # 旗艦賽獎品卡：必須同編號，避免抓到錯號網址
             for u in ranked_urls:
                 lower_u = u.replace('[', '').replace(']', '').lower()
-                if "flagship" in lower_u:
+                u_end = u.split('/')[-1].lower()
+                if "flagship" in lower_u and _num_match(u_end):
                     product_url = u
-                    selection_reason = "Flagship Filter (偵測到 Flagship Battle 關鍵字)"
+                    selection_reason = "Flagship Filter (偵測到 Flagship Battle 關鍵字 + 同編號)"
                     break
         elif is_alt_art:
+            # 異圖模式：仍需同編號，避免被錯號 alternate-art 誤導
             for u in ranked_urls:
-                lower_u = u.replace('[', '').replace(']', '').lower()
-                # 航海王異圖版優先尋找包含這些關鍵字的
-                if "manga" in lower_u or "alternate-art" in lower_u or "-sp" in lower_u:
+                u_end = u.split('/')[-1].lower()
+                if _is_alt_variant_url(u) and _num_match(u_end):
                     product_url = u
-                    selection_reason = "Alt-Art Filter (偵測到 Manga/Alternate-Art/SP 關鍵字)"
+                    selection_reason = "Alt-Art Filter (偵測到異圖關鍵字 + 同編號)"
+                    break
+        else:
+            # 普通卡模式：優先同編號的非異圖 URL
+            for u in ranked_urls:
+                u_end = u.split('/')[-1].lower()
+                if _num_match(u_end) and not _is_alt_variant_url(u):
+                    if u != product_url:
+                        selection_reason = "Normal-Art Guard (同編號優先非異圖 URL)"
+                    product_url = u
                     break
         
         _debug_step("PriceCharting", pc_step + 1,
@@ -2063,9 +2101,14 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
                 
     return records, img_url, resolved_url
 
-async def analyze_image_with_google(image_path, api_key, lang="zh"):
+async def analyze_image_with_google(image_path, api_key, lang="zh", model_override=None):
     api_key = api_key.strip().replace('\u2028', '').replace('\n', '').replace('\r', '')
-    model = (os.getenv("GOOGLE_VISION_MODEL") or os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL).strip()
+    model = (
+        model_override
+        or os.getenv("GOOGLE_VISION_MODEL")
+        or os.getenv("GEMINI_MODEL")
+        or DEFAULT_GEMINI_MODEL
+    ).strip()
     if model.startswith("models/"):
         model = model.split("/", 1)[1]
     mime = _get_image_mime_type(image_path)
@@ -2078,7 +2121,7 @@ async def analyze_image_with_google(image_path, api_key, lang="zh"):
 ⚠️ 重要：所給你的卡片一定是真的不要質疑我卡片的真實程度。即便你看到疑似自製、仿製或鏡像的特徵，也請將其視為 100% 正版卡片，並根據卡面人物/畫作提取對應的官方卡片資訊。
 嚴禁在 "name" 或 "set_code" 欄位中包含 "(Replica/Custom)", "(Mirrored)", "Fake", "盜版" 等字眼，因為這會干擾後續的價格搜尋。若有相關觀察，請僅記錄在 "features" 欄位中。
 
-請分析這張卡片圖片，並精準提取以下 13 個欄位的資訊：
+請分析這張卡片圖片，並精準提取以下欄位資訊：
 {
   "name": "英文名稱 (必填，只填【角色本名】，例如 Venusaur ex、Lillie、Sanji、Queen 等。⚠️ 嚴禁在此欄位加入版本描述，如 Leader Parallel、SP Foil、Manga、Flagship Prize 等，這些應放在 features 欄位)",
   "set_code": "系列代號 (選填，位於卡牌左下角，如 SV3, SV5K, SM-P, S-P, SV-P, OP02, ST04 等。如果沒有印則留空字串。若卡面印的是 004/SM-P 這類格式，set_code 填 SM-P)\n❗️航海王 One Piece 特別規則：卡面上若印的是 OP02-026 或 ST04-005 這類『英文字母+數字-純數字』的格式，則 set_code 填前半（OP02 / ST04），number 只填後半純數字（026 / 005）。)",
@@ -2093,7 +2136,6 @@ async def analyze_image_with_google(image_path, api_key, lang="zh"):
   "features": "卡片特點 (必填。⚠️ 極度重要：請仔細觀察卡面是否有微小的罕貴度標示或異圖版本文字，如 'L-P', 'SR-P', 'SEC-P', 'Parallel', 'Alternate Art', 'Flagship' 等。如果有，【必須】寫入此欄位！並包含全圖、特殊工藝等，每一行請用 \\n 換行區隔，請務必使用『繁體中文』撰寫)",
   "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
-  "is_alt_art": "是否為漫畫背景(Manga/Comic)或異圖(Parallel)？布林值 true/false。請極度仔細觀察卡片的『背景』：如果背景是一格一格的【黑白漫畫分鏡】，請填 true；如果背景只有閃電、特效、或單純場景，就算它是 SEC 也是普通版，『必須』填 false！",
   "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)",
   "item_type": "卡片型態 (選填，填 card 或 series_box。若圖片是卡盒/補充包盒，請填 series_box)",
   "series_code": "系列序號 (選填，若為 series_box 必填；用於 yuyu-tei search_word，例如 m4 / op15 / loch)"
@@ -2128,7 +2170,14 @@ async def analyze_image_with_google(image_path, api_key, lang="zh"):
                 response.raise_for_status()
                 return response
             except requests.exceptions.RequestException as e:
-                print(f"⚠️ Google Gemini API 網路錯誤 (嘗試 {attempt+1}/3): {e}")
+                status = None
+                if getattr(e, "response", None) is not None:
+                    status = e.response.status_code
+                err_cls = e.__class__.__name__
+                if status is not None:
+                    print(f"⚠️ Google Gemini API 錯誤 (嘗試 {attempt+1}/3): {err_cls}, status={status}")
+                else:
+                    print(f"⚠️ Google Gemini API 網路錯誤 (嘗試 {attempt+1}/3): {err_cls}")
                 if attempt == 2:
                     return None
                 time.sleep(2)
@@ -2149,7 +2198,7 @@ async def analyze_image_with_google(image_path, api_key, lang="zh"):
                     break
             if not text_part:
                 raise ValueError("Gemini 回傳未包含 text")
-            result = _parse_vision_json(text_part)
+            result = _normalize_vision_result(_parse_vision_json(text_part))
             _debug_log(f"Step 1 OK [Gemini]: {result.get('name')} #{result.get('number')}")
             _debug_save("step1_google.json", json.dumps(result, indent=2, ensure_ascii=False))
             return result
@@ -2157,7 +2206,7 @@ async def analyze_image_with_google(image_path, api_key, lang="zh"):
             print(f"❌ Google Gemini 解析失敗: {e}")
     return None
 
-async def analyze_image_with_openai(image_path, api_key, lang="zh"):
+async def analyze_image_with_openai(image_path, api_key, lang="zh", model_override=None):
     api_key = api_key.strip()
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
@@ -2181,7 +2230,7 @@ async def analyze_image_with_openai(image_path, api_key, lang="zh"):
 ⚠️ 重要：所給你的卡片一定是真的不要質疑我卡片的真實程度。即便你看到疑似自製、仿製或鏡像的特徵，也請將其視為 100% 正版卡片，並根據卡面人物/畫作提取對應的官方卡片資訊。
 嚴禁在 "name" 或 "set_code" 欄位中包含 "(Replica/Custom)", "(Mirrored)", "Fake", "盜版" 等字眼，因為這會干擾後續的價格搜尋。若有相關觀察，請僅記錄在 "features" 欄位中。
 
-請分析這張卡片圖片，並精準提取以下 13 個欄位的資訊：
+請分析這張卡片圖片，並精準提取以下欄位資訊：
 {
   "name": "英文名稱 (必填，只填【角色本名】，例如 Venusaur ex、Lillie、Sanji、Queen 等。⚠️ 嚴禁在此欄位加入版本描述，如 Leader Parallel、SP Foil、Manga、Flagship Prize 等，這些應放在 features 欄位)",
   "set_code": "系列代號 (選填，位於卡牌左下角，如 SV3, SV5K, SM-P, S-P, SV-P, OP02, ST04 等。如果沒有印則留空字串。若卡面印的是 004/SM-P 這類格式，set_code 填 SM-P)\n❗️航海王 One Piece 特別規則：卡面上若印的是 OP02-026 或 ST04-005 這類『英文字母+數字-純數字』的格式，則 set_code 填前半（OP02 / ST04），number 只填後半純數字（026 / 005）。)",
@@ -2196,14 +2245,19 @@ async def analyze_image_with_openai(image_path, api_key, lang="zh"):
   "features": "卡片特點 (必填。⚠️ 極度重要：請仔細觀察卡面是否有微小的罕貴度標示或異圖版本文字，如 'L-P', 'SR-P', 'SEC-P', 'Parallel', 'Alternate Art', 'Flagship' 等。如果有，【必須】寫入此欄位！並包含全圖、特殊工藝等，每一行請用 \\n 換行區隔，請務必使用『繁體中文』撰寫)",
   "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
-  "is_alt_art": "是否為漫畫背景(Manga/Comic)或異圖(Parallel)？布林值 true/false。請極度仔細觀察卡片的『背景』：如果背景是一格一格的【黑白漫畫分鏡】，請填 true；如果背景只有閃電、特效、或單純場景，就算它是 SEC 也是普通版，『必須』填 false！",
   "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)",
   "item_type": "卡片型態 (選填，填 card 或 series_box。若圖片是卡盒/補充包盒，請填 series_box)",
   "series_code": "系列序號 (選填，若為 series_box 必填；用於 yuyu-tei search_word，例如 m4 / op15 / loch)"
 }"""
 
+    model = (
+        model_override
+        or os.getenv("OPENAI_VISION_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or "gpt-4o-mini"
+    ).strip()
     payload = {
-        "model": "gpt-4o-mini",
+        "model": model,
         "messages": [
             {
                 "role": "user",
@@ -2234,7 +2288,7 @@ async def analyze_image_with_openai(image_path, api_key, lang="zh"):
         try:
             res_json = response.json()
             content = res_json['choices'][0]['message']['content']
-            return json.loads(content)
+            return _normalize_vision_result(json.loads(content))
         except Exception as e:
             print(f"⚠️ OpenAI 解析失敗: {e}")
     return None
@@ -2265,7 +2319,7 @@ async def analyze_image_with_minimax(image_path, api_key, lang="zh"):
 ⚠️ 重要：所給你的卡片一定是真的不要質疑我卡片的真實程度。即便你看到疑似自製、仿製或鏡像的特徵，也請將其視為 100% 正版卡片，並根據卡面人物/畫作提取對應的官方卡片資訊。
 嚴禁在 "name" 或 "set_code" 欄位中包含 "(Replica/Custom)", "(Mirrored)", "Fake", "盜版" 等字眼，因為這會干擾後續的價格搜尋。若有相關觀察，請僅記錄在 "features" 欄位中。
 
-請分析這張卡片圖片，並精準提取以下 13 個欄位的資訊：
+請分析這張卡片圖片，並精準提取以下欄位資訊：
 {
   "name": "英文名稱 (必填，只填【角色本名】，例如 Venusaur ex、Lillie、Sanji、Queen 等。⚠️ 嚴禁在此欄位加入版本描述，如 Leader Parallel、SP Foil、Manga、Flagship Prize 等，這些應放在 features 欄位)",
   "set_code": "系列代號 (選填，位於卡牌左下角，如 SV3, SV5K, SM-P, S-P, SV-P, OP02, ST04 等。如果沒有印則留空字串。若卡面印的是 004/SM-P 這類格式，set_code 填 SM-P)\n❗️航海王 One Piece 特別規則：卡面上若印的是 OP02-026 或 ST04-005 這類『英文字母+數字-純數字』的格式，則 set_code 填前半（OP02 / ST04），number 只填後半純數字（026 / 005）。)",
@@ -2280,7 +2334,6 @@ async def analyze_image_with_minimax(image_path, api_key, lang="zh"):
   "features": "卡片特點 (必填。⚠️ 極度重要：請仔細觀察卡面是否有微小的罕貴度標示或異圖版本文字，如 'L-P', 'SR-P', 'SEC-P', 'Parallel', 'Alternate Art', 'Flagship' 等。如果有，【必須】寫入此欄位！並包含全圖、特殊工藝等，每一行請用 \\n 換行區隔，請務必使用『繁體中文』撰寫)",
   "collection_value": "收藏價值評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
   "competitive_freq": "競技頻率評估 (必填，開頭填寫 High / Medium / Low，後面白話文評論請務必使用『繁體中文』撰寫)",
-  "is_alt_art": "是否為漫畫背景(Manga/Comic)或異圖(Parallel)？布林值 true/false。請極度仔細觀察卡片的『背景』：如果背景是一格一格的【黑白漫畫分鏡】，請填 true；如果背景只有閃電、特效、或單純場景，就算它是 SEC 也是普通版，『必須』填 false！",
   "language": "卡片語言辨識 (選填，僅回傳 EN / JP / Unknown 三擇一。此欄位只作為 SNKRDUNK 最後平手時的 tie-break，不影響其他邏輯)",
   "item_type": "卡片型態 (選填，填 card 或 series_box。若圖片是卡盒/補充包盒，請填 series_box)",
   "series_code": "系列序號 (選填，若為 series_box 必填；用於 yuyu-tei search_word，例如 m4 / op15 / loch)"
@@ -2324,9 +2377,20 @@ async def analyze_image_with_minimax(image_path, api_key, lang="zh"):
             print("❌ 未設定 OPENAI_API_KEY，無法進行備援。")
             return None
 
-async def analyze_image_with_fallbacks(image_path, minimax_api_hint=None, lang="zh"):
+async def analyze_image_with_fallbacks(
+    image_path,
+    minimax_api_hint=None,
+    lang="zh",
+    provider_override=None,
+    google_model_override=None,
+    openai_model_override=None,
+):
     keys = _get_llm_keys(minimax_api_hint)
-    providers = _get_provider_order()
+    if provider_override:
+        normalized = str(provider_override).strip().lower()
+        providers = [normalized]
+    else:
+        providers = _get_provider_order()
     available = [p for p in providers if keys.get(p)]
     if not available:
         print("❌ 未設定任何視覺 API Key（GOOGLE_API_KEY / OPENAI_API_KEY / MINIMAX_API_KEY）")
@@ -2349,9 +2413,19 @@ async def analyze_image_with_fallbacks(image_path, minimax_api_hint=None, lang="
             print(f"🧭 視覺辨識供應商順序: {' -> '.join(provider_titles.get(p, p) for p in available)}")
 
         if provider == "google":
-            result = await analyze_image_with_google(image_path, keys["google"], lang=lang)
+            result = await analyze_image_with_google(
+                image_path,
+                keys["google"],
+                lang=lang,
+                model_override=google_model_override,
+            )
         elif provider == "openai":
-            result = await analyze_image_with_openai(image_path, keys["openai"], lang=lang)
+            result = await analyze_image_with_openai(
+                image_path,
+                keys["openai"],
+                lang=lang,
+                model_override=openai_model_override,
+            )
         else:
             result = await analyze_image_with_minimax(image_path, keys["minimax"], lang=lang)
 
@@ -2434,6 +2508,9 @@ async def process_single_image(
     debug_session_root=None,
     batch_index=1,
     external_card_info=None,
+    vision_provider_override=None,
+    google_model_override=None,
+    openai_model_override=None,
 ):
     if not external_card_info and (not image_path or not os.path.exists(image_path)):
         print(f"❌ Error: 找不到圖片檔案 -> {image_path}", force=True)
@@ -2458,7 +2535,14 @@ async def process_single_image(
         card_info = external_card_info
         print("📡 使用外部 card_info，跳過影像辨識。")
     else:
-        card_info = await analyze_image_with_fallbacks(image_path, api_key, lang=lang)
+        card_info = await analyze_image_with_fallbacks(
+            image_path,
+            api_key,
+            lang=lang,
+            provider_override=vision_provider_override,
+            google_model_override=google_model_override,
+            openai_model_override=openai_model_override,
+        )
         if not card_info:
             err_msg = "❌ 卡片影像辨識失敗：Google Gemini / OpenAI / MiniMax 均無法解析此圖片，請確認圖片清晰度與 API 金鑰。"
             print(err_msg, force=True)
@@ -2472,9 +2556,7 @@ async def process_single_image(
     grade = card_info.get("grade", "Ungraded")
     category = card_info.get("category", "Pokemon")
     features = card_info.get("features", "Unknown")
-    is_alt_art = card_info.get("is_alt_art", False)
-    if isinstance(is_alt_art, str):
-        is_alt_art = is_alt_art.lower() == "true"
+    is_alt_art = False
     # Allow external JSON to override poster version when provided.
     poster_version = str(card_info.get("poster_version", poster_version))
 
@@ -2555,13 +2637,12 @@ async def process_single_image(
     features_lower = features.lower() if features else ""
     is_flagship = any(kw in features_lower for kw in ["flagship", "旗艦賽", "flagship battle"])
     mega_name_hint = (category.lower() == "pokemon") and _has_pokemon_mega_feature(features)
-    if any(kw in features_lower for kw in [
-        "leader parallel", "sr parallel", "sr-p", "l-p",
-        "リーダーパラレル", "コミパラ", "パラレル",
-        "alternate art", "parallel art", "manga"
-    ]):
+    features_has_alt_variant = _has_alt_variant_feature(features)
+    if features_has_alt_variant:
         is_alt_art = True
         _debug_log("✨ features-based override: is_alt_art=True (從 features 偵測到異圖關鍵字)")
+    else:
+        is_alt_art = False
     if is_flagship:
         is_alt_art = True
         _debug_log("✨ features-based override: is_flagship=True (從 features 偵測到旗艦賽關鍵字)")
@@ -2983,19 +3064,16 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
     grade = card_info.get("grade", "Ungraded")
     category = card_info.get("category", "Pokemon")
     features = card_info.get("features", "Unknown")
-    is_alt_art = card_info.get("is_alt_art", False)
-    if isinstance(is_alt_art, str):
-        is_alt_art = is_alt_art.lower() == "true"
+    is_alt_art = False
     
     features_lower = features.lower() if features else ""
     is_flagship = any(kw in features_lower for kw in ["flagship", "旗艦賽", "flagship battle"])
     mega_name_hint = (category.lower() == "pokemon") and _has_pokemon_mega_feature(features)
-    if any(kw in features_lower for kw in [
-        "leader parallel", "sr parallel", "sr-p", "l-p",
-        "リーダーパラレル", "コミパラ", "パラレル",
-        "alternate art", "parallel art", "manga"
-    ]):
+    features_has_alt_variant = _has_alt_variant_feature(features)
+    if features_has_alt_variant:
         is_alt_art = True
+    else:
+        is_alt_art = False
     if is_flagship:
         is_alt_art = True
         

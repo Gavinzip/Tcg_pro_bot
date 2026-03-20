@@ -13,6 +13,7 @@ import traceback
 import sys
 import json
 import re
+import inspect
 import html as html_lib
 import time
 import mimetypes
@@ -221,6 +222,7 @@ def _rank_chip_payload(rank_value: object) -> dict[str, str]:
 PROFILE_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile＿beta.html")
 PROFILE_HISTORY_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_history_beta.html")
 PROFILE_EXTREMES_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_extremes_beta.html")
+PROFILE_CARDPACK_PULL_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_cardpack_pull.html")
 PROFILE_LOGO_PATH = os.path.join(BASE_DIR, "templates", "profile", "logo.png")
 PROFILE_BACKGROUND_DIR = os.path.join(BASE_DIR, "templates", "backgorund")
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
@@ -393,6 +395,12 @@ def _clamp_profile_card_count(value: int | None) -> int:
     if value in (1, 3, 4, 5, 7, 10):
         return int(value)
     return 10
+
+
+def _clamp_flex_pack_card_count(value: int | None) -> int:
+    if value in (1, 3, 4, 7):
+        return int(value)
+    return 7
 
 
 def _normalize_profile_background_key(value: str | None) -> str:
@@ -1618,11 +1626,15 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
                 current_release = release_cards_by_token.get(token_hint) or {}
                 current_ts = _parse_int(current_release.get("timestamp_raw"))
                 if not current_release or ts >= current_ts:
+                    release_contract = str(row.get("contractAddress") or "").strip().lower()
+                    release_checkout_id = str(row.get("checkoutId") or "").strip()
                     release_cards_by_token[token_hint] = {
                         "token_id": token_hint,
                         "name": str(row_item.get("collectibleName") or row_item.get("title") or "Unknown Collectible").strip(),
                         "image": str(row_item.get("imageUrl") or row_item.get("collectibleImageUrl") or "").strip(),
                         "timestamp_raw": ts,
+                        "pack_contract": release_contract,
+                        "checkout_id": release_checkout_id,
                     }
 
         if row_type == "PerpetualPullActivity":
@@ -1872,8 +1884,36 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         key=lambda x: _parse_int(x.get("timestamp_raw")),
         reverse=True,
     )
+    pack_release_counts: defaultdict[str, int] = defaultdict(int)
     for card in release_cards:
+        ts_raw = _parse_int(card.get("timestamp_raw")) or 0
+        card["timestamp"] = ts_raw
         card.pop("timestamp_raw", None)
+        contract = str(card.get("pack_contract") or "").strip().lower()
+        if contract:
+            pack_release_counts[contract] += 1
+            pack_name = (
+                contract_pack_name.get(contract)
+                or f"Contract {_short_hex(contract)}"
+            )
+            card["pack_name"] = pack_name
+        else:
+            card["pack_name"] = "Unknown Pack"
+
+    pack_options = []
+    for contract, count in pack_release_counts.items():
+        if not contract or count <= 0:
+            continue
+        pack_name = contract_pack_name.get(contract) or f"Contract {_short_hex(contract)}"
+        pack_options.append(
+            {
+                "contract": contract,
+                "pack_name": pack_name,
+                "release_count": int(count),
+            }
+        )
+    pack_options.sort(key=lambda x: (int(x.get("release_count") or 0), str(x.get("pack_name") or "")), reverse=True)
+
     token_value_hints = {k: v[1] for k, v in token_latest_values.items()}
 
     return {
@@ -1898,6 +1938,7 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         "contract_rows": contract_rows,
         "activity_rows": activity_rows,
         "release_cards": release_cards,
+        "pack_options": pack_options,
         "token_value_hints": token_value_hints,
     }
 
@@ -2114,6 +2155,276 @@ def _build_wallet_extremes_template_context(
         "background_image": _profile_background_data_uri("classic"),
         "_meta_wallet_short": short_wallet,
         "_meta_subtitle": labels.get("subtitle", "Highest / Lowest value among historical pulls"),
+    }
+
+
+def _resolve_flex_pack_layout_count(requested: int, available: int) -> int:
+    req = _clamp_flex_pack_card_count(requested)
+    if available <= 0:
+        return 0
+    if available >= req:
+        return req
+    for candidate in (7, 4, 3, 1):
+        if candidate <= available and candidate <= req:
+            return candidate
+    for candidate in (7, 4, 3, 1):
+        if candidate <= available:
+            return candidate
+    return 1
+
+
+def _build_wallet_flex_pack_picker_data(wallet_address: str, profile_lang: str = "en") -> dict:
+    lang = _profile_lang_from_locale(profile_lang)
+    wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
+    wallet_short = f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm
+    try:
+        user_id, username = _resolve_user_from_wallet(wallet_address)
+    except Exception:
+        user_id, username = None, None
+
+    history_data = _build_wallet_activity_history(wallet_address, profile_lang=lang)
+    release_cards = [x for x in (history_data.get("release_cards") or []) if isinstance(x, dict)]
+    pack_options = [x for x in (history_data.get("pack_options") or []) if isinstance(x, dict)]
+
+    pack_cards_map: defaultdict[str, list[dict]] = defaultdict(list)
+    for card in release_cards:
+        contract = str(card.get("pack_contract") or "").strip().lower()
+        if not contract:
+            continue
+        pack_cards_map[contract].append(card)
+    for contract in list(pack_cards_map.keys()):
+        pack_cards_map[contract].sort(key=lambda x: int(_parse_int(x.get("timestamp")) or 0), reverse=True)
+
+    if not pack_options:
+        for contract, rows in pack_cards_map.items():
+            if not rows:
+                continue
+            pack_options.append(
+                {
+                    "contract": contract,
+                    "pack_name": str(rows[0].get("pack_name") or f"Contract {_short_hex(contract)}"),
+                    "release_count": len(rows),
+                }
+            )
+        pack_options.sort(key=lambda x: (int(x.get("release_count") or 0), str(x.get("pack_name") or "")), reverse=True)
+
+    pack_options_ui = []
+    for row in pack_options[:25]:
+        contract = str(row.get("contract") or "").strip().lower()
+        if not contract:
+            continue
+        pack_name = str(row.get("pack_name") or f"Contract {_short_hex(contract)}").strip()
+        release_count = int(_parse_int(row.get("release_count")) or len(pack_cards_map.get(contract) or []))
+        label = f"{pack_name} · {release_count}"
+        pack_options_ui.append(
+            {
+                "value": contract,
+                "label": label[:100],
+                "full_label": label[:220],
+                "description": _short_hex(contract)[:100],
+            }
+        )
+
+    ui_labels = _profile_ui_labels(lang)
+    return {
+        "wallet": wallet_norm,
+        "wallet_short": wallet_short,
+        "username": str(username or wallet_short or "Unknown User"),
+        "user_id": user_id,
+        "history_data": history_data,
+        "pack_cards_map": dict(pack_cards_map),
+        "pack_options": pack_options_ui,
+        "brand_name": ui_labels.get("brand_name", "Renaiss"),
+        "brand_site": ui_labels.get("brand_site", "renaiss.xyz"),
+    }
+
+
+def _build_wallet_flex_pack_template_context(
+    wallet_address: str,
+    picker_data: dict,
+    *,
+    selected_pack_contract: str,
+    mode: str,
+    card_count: int,
+    profile_lang: str = "en",
+) -> dict:
+    lang = _profile_lang_from_locale(profile_lang)
+    pack_contract = str(selected_pack_contract or "").strip().lower()
+    mode_name = "extreme" if str(mode or "").strip().lower() == "extreme" else "picked"
+    requested_count = _clamp_flex_pack_card_count(card_count)
+
+    history_data = (picker_data or {}).get("history_data") if isinstance(picker_data, dict) else {}
+    if not isinstance(history_data, dict):
+        history_data = {}
+    pack_cards_map = (picker_data or {}).get("pack_cards_map") if isinstance(picker_data, dict) else {}
+    if not isinstance(pack_cards_map, dict):
+        pack_cards_map = {}
+    pack_cards = [x for x in (pack_cards_map.get(pack_contract) or []) if isinstance(x, dict)]
+    if not pack_cards:
+        raise RuntimeError("此卡包目前沒有可用的抽卡紀錄。")
+
+    profile_name = str((picker_data or {}).get("username") or "Unknown User")
+    token_value_hints = (history_data or {}).get("token_value_hints") or {}
+
+    current_cards_by_token: dict[str, dict] = {}
+    user_id = str((picker_data or {}).get("user_id") or "").strip()
+    if user_id:
+        try:
+            collection = _fetch_user_collection(user_id)
+        except Exception:
+            collection = []
+        for item in collection:
+            token_id = str((item or {}).get("tokenId") or "").strip()
+            if not token_id:
+                continue
+            current_cards_by_token[token_id] = {
+                "token_id": token_id,
+                "name": str((item or {}).get("name") or "Unknown Collectible"),
+                "image": str((item or {}).get("frontImageUrl") or ""),
+                "value": _to_decimal(_parse_int((item or {}).get("fmvPriceInUSD"))) / Decimal("100"),
+            }
+
+    def _resolve_card_candidate(card: dict, allow_trade_fallback: bool = True) -> dict:
+        token_id = str(card.get("token_id") or "").strip()
+        current_info = current_cards_by_token.get(token_id) or {}
+        value = _to_decimal(token_value_hints.get(token_id))
+        if value <= 0:
+            value = _to_decimal(current_info.get("value"))
+        if value <= 0 and token_id:
+            value = _to_decimal(_fetch_card_fmv_by_token_id(token_id, allow_trade_fallback=allow_trade_fallback))
+
+        image = str(current_info.get("image") or card.get("image") or "").strip()
+        if not image and token_id:
+            image = _fetch_card_image_by_token_id(token_id)
+        prepared = _prepare_collectible_image_for_poster(image)
+
+        return {
+            "token_id": token_id,
+            "name": str(card.get("name") or current_info.get("name") or "Unknown Collectible"),
+            "value": value,
+            "image": prepared,
+        }
+
+    ui_labels = _profile_ui_labels(lang)
+    pack_name = str(pack_cards[0].get("pack_name") or f"Contract {_short_hex(pack_contract)}")
+    wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
+    wallet_short = f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm
+    subtitle = f"{pack_name} · {wallet_short}"
+
+    if mode_name == "picked":
+        selected_count = _resolve_flex_pack_layout_count(requested_count, len(pack_cards))
+        picked_rows = pack_cards[:selected_count]
+        resolved = [_resolve_card_candidate(card, allow_trade_fallback=True) for card in picked_rows]
+        items = [
+            {
+                "name": str(x.get("name") or "Unknown Collectible"),
+                "image": str(x.get("image") or _TRANSPARENT_CARD_IMAGE),
+                "value": _format_usdt_decimal(x.get("value")),
+            }
+            for x in resolved
+        ]
+        total_value = sum((_to_decimal(x.get("value")) for x in resolved), Decimal("0"))
+        template_context = {
+            "collection_name": f"{profile_name} · Pack Flex",
+            "sbt_total": len(pack_cards),
+            "extreme_mode": False,
+            "hide_footer": False,
+            "sbt_badges_display": [],
+            "items": items,
+            "assets_count": len(pack_cards),
+            "total_value": _format_usdt_decimal(total_value),
+            "total_value_label": f"Recent {selected_count} Pulls Value",
+            "items_count_label": "Pack Pull Count",
+            "assets_unit": "Cards",
+            "sbt_badges_label": "Pack",
+            "no_sbt_label": "No data",
+            "owned_prefix": ui_labels.get("owned_prefix", "owned "),
+            "brand_name": str((picker_data or {}).get("brand_name") or ui_labels.get("brand_name", "Renaiss")),
+            "brand_site": str((picker_data or {}).get("brand_site") or ui_labels.get("brand_site", "renaiss.xyz")),
+            "update_date": datetime.now().strftime("%Y-%m-%d"),
+            "enable_tilt": False,
+            "background_key": "classic",
+            "background_image": _profile_background_data_uri("classic"),
+            "meta_counter_label": "PULL",
+            "_meta_subtitle": subtitle,
+        }
+        return {
+            "template_context": template_context,
+            "mode": mode_name,
+            "pack_name": pack_name,
+            "requested_count": requested_count,
+            "selected_count": selected_count,
+            "pack_total_count": len(pack_cards),
+        }
+
+    unique_cards: dict[str, dict] = {}
+    for card in pack_cards:
+        token_id = str(card.get("token_id") or "").strip()
+        if not token_id or token_id in unique_cards:
+            continue
+        unique_cards[token_id] = card
+    resolved_all = [_resolve_card_candidate(card, allow_trade_fallback=False) for card in unique_cards.values()]
+    resolved_positive = [x for x in resolved_all if _to_decimal(x.get("value")) > 0]
+    if len(resolved_positive) < 2:
+        raise RuntimeError("此卡包可定價的卡片不足 2 張，無法生成天堂地獄版本。")
+
+    sorted_cards = sorted(
+        resolved_positive,
+        key=lambda x: (_to_decimal(x.get("value")), str(x.get("token_id") or "")),
+        reverse=True,
+    )
+    highest = sorted_cards[0]
+    lowest = sorted_cards[-1]
+    if str(highest.get("token_id")) == str(lowest.get("token_id")) and len(sorted_cards) > 1:
+        lowest = sorted_cards[-2]
+
+    items = [
+        {
+            "name": f"Heaven / {str(highest.get('name') or 'Unknown Collectible')}",
+            "image": str(highest.get("image") or _TRANSPARENT_CARD_IMAGE),
+            "value": _format_usdt_decimal(highest.get("value")),
+        },
+        {
+            "name": f"Hell / {str(lowest.get('name') or 'Unknown Collectible')}",
+            "image": str(lowest.get("image") or _TRANSPARENT_CARD_IMAGE),
+            "value": _format_usdt_decimal(lowest.get("value")),
+        },
+    ]
+    pair_total = _to_decimal(highest.get("value")) + _to_decimal(lowest.get("value"))
+    template_context = {
+        "collection_name": f"{profile_name} · Pack Flex",
+        "sbt_total": len(pack_cards),
+        "extreme_mode": True,
+        "hide_footer": True,
+        "sbt_badges_display": [
+            {"name": "Heaven", "label": "Heaven", "balance": 1, "image": ""},
+            {"name": "Hell", "label": "Hell", "balance": 1, "image": ""},
+        ],
+        "items": items,
+        "assets_count": len(pack_cards),
+        "total_value": _format_usdt_decimal(pair_total),
+        "total_value_label": "Heaven/Hell Pair Value",
+        "items_count_label": "Pack Pull Count",
+        "assets_unit": "Cards",
+        "sbt_badges_label": "Mode",
+        "no_sbt_label": "No data",
+        "owned_prefix": ui_labels.get("owned_prefix", "owned "),
+        "brand_name": str((picker_data or {}).get("brand_name") or ui_labels.get("brand_name", "Renaiss")),
+        "brand_site": str((picker_data or {}).get("brand_site") or ui_labels.get("brand_site", "renaiss.xyz")),
+        "update_date": datetime.now().strftime("%Y-%m-%d"),
+        "enable_tilt": False,
+        "background_key": "classic",
+        "background_image": _profile_background_data_uri("classic"),
+        "meta_counter_label": "PULL",
+        "_meta_subtitle": subtitle,
+    }
+    return {
+        "template_context": template_context,
+        "mode": mode_name,
+        "pack_name": pack_name,
+        "requested_count": requested_count,
+        "selected_count": 2,
+        "pack_total_count": len(pack_cards),
     }
 
 
@@ -2867,6 +3178,36 @@ async def _render_wallet_profile_extreme_poster(template_payload: dict, out_dir:
     return out_path
 
 
+async def _render_wallet_profile_cardpack_pull_poster(
+    template_payload: dict,
+    out_dir: str,
+    safe_name: str = "wallet_pack_flex",
+) -> str:
+    if isinstance(template_payload, dict):
+        template_context = template_payload.get("template_context") or {}
+        replacements = template_payload.get("replacements") or {}
+    else:
+        template_context = {}
+        replacements = {}
+
+    html_doc = _render_wallet_template_html(
+        PROFILE_CARDPACK_PULL_TEMPLATE_PATH,
+        template_context=template_context,
+        replacements=replacements,
+    )
+    os.makedirs(out_dir, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_]+", "_", safe_name).strip("_") or "wallet_pack_flex"
+    out_path = os.path.join(out_dir, f"{safe}_cardpack_pull.png")
+    await image_generator._render_single_html_poster(
+        html_doc,
+        out_path,
+        width=1200,
+        height=900,
+        device_scale_factor=2,
+    )
+    return out_path
+
+
 def _render_wallet_template_html(template_path: str, template_context: dict | None = None, replacements: dict | None = None) -> str:
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"找不到 profile template: {template_path}")
@@ -3256,6 +3597,23 @@ async def choose_language_for_message(message: discord.Message) -> str:
     return lang
 
 
+async def _process_single_image_compat(**kwargs):
+    """
+    Call market_report_vision.process_single_image with runtime-compatible kwargs.
+    Older deployments may not support newer args like vision_provider_override.
+    """
+    try:
+        sig = inspect.signature(market_report_vision.process_single_image)
+        supported = set(sig.parameters.keys())
+        filtered = {k: v for k, v in kwargs.items() if k in supported}
+        dropped = [k for k in kwargs.keys() if k not in supported]
+        if dropped:
+            print(f"⚠️ process_single_image 不支援參數，已略過: {dropped}")
+    except Exception:
+        filtered = dict(kwargs)
+    return await market_report_vision.process_single_image(**filtered)
+
+
 def _build_auto_image_thread_name(attachment: discord.Attachment) -> str:
     base_name = os.path.splitext(str(getattr(attachment, "filename", "") or ""))[0].strip()
     safe_base = re.sub(r"\s+", "-", base_name)
@@ -3484,6 +3842,7 @@ async def _handle_image_impl(
     vision_provider_override: str | None = None,
     google_model_override: str | None = None,
     openai_model_override: str | None = None,
+    echo_original_image: bool = False,
 ):
     """
     ** 並發核心函數（stream 模式）**
@@ -3536,21 +3895,22 @@ async def _handle_image_impl(
     )
     await thread.send(analyzing_msg)
 
-    # 回貼原始圖片到討論串，避免使用者只看到文字流程
-    try:
-        original_file = await attachment.to_file(use_cached=True)
-        await thread.send(
-            _t(
-                lang,
-                "🖼️ 你上傳的原始圖片：",
-                "🖼️ Your uploaded image:",
-                "🖼️ 업로드한 원본 이미지:",
-                "🖼️ 你上传的原始图片："
-            ),
-            file=original_file
-        )
-    except Exception as e:
-        print(f"⚠️ 無法回貼原始圖片到討論串: {e}")
+    # 僅在特定模式（如 /mega）回貼原始圖片
+    if echo_original_image:
+        try:
+            original_file = await attachment.to_file(use_cached=True)
+            await thread.send(
+                _t(
+                    lang,
+                    "🖼️ 你上傳的原始圖片：",
+                    "🖼️ Your uploaded image:",
+                    "🖼️ 업로드한 원본 이미지:",
+                    "🖼️ 你上传的原始图片："
+                ),
+                file=original_file
+            )
+        except Exception as e:
+            print(f"⚠️ 無法回貼原始圖片到討論串: {e}")
 
     # 3. 建立暫存資料夾（海報存這裡）
     card_out_dir = tempfile.mkdtemp(prefix=f"tcg_bot_{message.id}_")
@@ -3566,9 +3926,9 @@ async def _handle_image_impl(
             api_key = os.getenv("MINIMAX_API_KEY")
 
             # 統一先用中文產出，再針對使用者語言做後置翻譯（確保報告格式穩定）。
-            result = await market_report_vision.process_single_image(
-                img_path,
-                api_key,
+            result = await _process_single_image_compat(
+                image_path=img_path,
+                api_key=api_key,
                 out_dir=card_out_dir,
                 stream_mode=True,
                 lang="zh",
@@ -4364,6 +4724,301 @@ class ProfileConfigView(discord.ui.View):
     async def generate(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._run_generate(interaction, use_default=False)
 
+
+class FlexPackModeSelect(discord.ui.Select):
+    def __init__(self, selected_mode: str, lang: str):
+        mode = "extreme" if selected_mode == "extreme" else "picked"
+        options = [
+            discord.SelectOption(
+                label=_t(lang, "剛抽卡排版", "Recent Pull Layout", "최근 뽑기 레이아웃", "刚抽卡排版"),
+                value="picked",
+                default=(mode == "picked"),
+            ),
+            discord.SelectOption(
+                label=_t(lang, "天堂與地獄", "Heaven and Hell", "천국과 지옥", "天堂与地狱"),
+                value="extreme",
+                default=(mode == "extreme"),
+            ),
+        ]
+        super().__init__(
+            placeholder=_t(lang, "1) 選擇模式", "1) Choose Mode", "1) 모드 선택", "1) 选择模式"),
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_mode = str(self.values[0] or "picked")
+        await self.view.refresh(interaction)
+
+
+class FlexPackPackSelect(discord.ui.Select):
+    def __init__(self, options_data: list[dict], selected_value: str | None, lang: str):
+        options = []
+        selected_norm = str(selected_value or "").strip().lower()
+        for item in options_data[:25]:
+            val = str(item.get("value") or "").strip().lower()
+            label = str(item.get("label") or "Pack")[:100]
+            desc = str(item.get("description") or "")[:100] or None
+            if not val:
+                continue
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=val,
+                    description=desc,
+                    default=(val == selected_norm),
+                )
+            )
+        if not options:
+            options = [discord.SelectOption(label="No Pack Option", value="__none__", default=True)]
+        super().__init__(
+            placeholder=_t(lang, "2) 選擇卡包", "2) Choose Pack", "2) 팩 선택", "2) 选择卡包"),
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+        if options and options[0].value == "__none__":
+            self.disabled = True
+
+    async def callback(self, interaction: discord.Interaction):
+        value = str(self.values[0] or "").strip().lower()
+        if value != "__none__":
+            self.view.selected_pack_contract = value
+        await self.view.refresh(interaction)
+
+
+class FlexPackTemplateSelect(discord.ui.Select):
+    def __init__(self, selected_count: int, lang: str):
+        default_count = _clamp_flex_pack_card_count(selected_count)
+        options = [
+            discord.SelectOption(label="1", value="1", default=(default_count == 1)),
+            discord.SelectOption(label="3", value="3", default=(default_count == 3)),
+            discord.SelectOption(label="4", value="4", default=(default_count == 4)),
+            discord.SelectOption(label="7", value="7", default=(default_count == 7)),
+        ]
+        super().__init__(
+            placeholder=_t(lang, "3) 選擇排版數量", "3) Choose Layout Count", "3) 레이아웃 수 선택", "3) 选择排版数量"),
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_template = _clamp_flex_pack_card_count(_parse_int(self.values[0]))
+        await self.view.refresh(interaction)
+
+
+class FlexPackConfigView(discord.ui.View):
+    def __init__(self, author_id: int, wallet: str, picker_data: dict, selected_lang: str):
+        super().__init__(timeout=240)
+        self.author_id = author_id
+        self.wallet = wallet
+        self.picker_data = picker_data or {}
+        self.selected_lang = _profile_lang_from_locale(selected_lang)
+        self.username = str((picker_data or {}).get("username") or "Unknown")
+
+        self.selected_mode = "picked"
+        self.selected_template = 7
+        self.pack_options = list((picker_data or {}).get("pack_options") or [])
+        self.pack_label_map = {
+            str(x.get("value") or "").strip().lower(): str(x.get("full_label") or x.get("label") or "")
+            for x in self.pack_options
+        }
+        first_pack = str((self.pack_options[0] or {}).get("value") or "").strip().lower() if self.pack_options else ""
+        self.selected_pack_contract = first_pack
+        self.bound_message: discord.Message | None = None
+
+        self._rebuild_components()
+
+    def _rebuild_components(self):
+        self.clear_items()
+        self.add_item(FlexPackModeSelect(self.selected_mode, self.selected_lang))
+        self.add_item(FlexPackPackSelect(self.pack_options, self.selected_pack_contract, self.selected_lang))
+        layout_select = FlexPackTemplateSelect(self.selected_template, self.selected_lang)
+        layout_select.disabled = (self.selected_mode == "extreme")
+        self.add_item(layout_select)
+        self.generate.label = _t(self.selected_lang, "生成海報", "Generate Poster", "포스터 생성", "生成海报")[:80]
+
+    def bind_message(self, message: discord.Message):
+        self.bound_message = message
+
+    def _pack_count(self) -> int:
+        pack_map = (self.picker_data or {}).get("pack_cards_map") if isinstance(self.picker_data, dict) else {}
+        if not isinstance(pack_map, dict):
+            return 0
+        return len(pack_map.get(self.selected_pack_contract) or [])
+
+    def render_message(self) -> str:
+        pack_label = self.pack_label_map.get(self.selected_pack_contract) or _short_hex(self.selected_pack_contract)
+        mode_label = (
+            _t(self.selected_lang, "天堂與地獄", "Heaven and Hell", "천국과 지옥", "天堂与地狱")
+            if self.selected_mode == "extreme"
+            else _t(self.selected_lang, "剛抽卡排版", "Recent Pull Layout", "최근 뽑기 레이아웃", "刚抽卡排版")
+        )
+        layout_value = "-" if self.selected_mode == "extreme" else str(self.selected_template)
+        return (
+            f"🎛️ **{self.username}** · {_t(self.selected_lang, '卡包海報設定', 'Pack Poster Setup', '팩 포스터 설정', '卡包海报设置')}\n"
+            f"{_t(self.selected_lang, '錢包', 'Wallet', '지갑', '钱包')}: `{self.wallet}`\n"
+            f"{_t(self.selected_lang, '卡包', 'Pack', '팩', '卡包')}: **{pack_label}**\n"
+            f"{_t(self.selected_lang, '模式', 'Mode', '모드', '模式')}: **{mode_label}**\n"
+            f"{_t(self.selected_lang, '排版數量', 'Layout Count', '레이아웃 수', '排版数量')}: **{layout_value}**\n"
+            f"{_t(self.selected_lang, '該包卡片數', 'Cards in Pack', '해당 팩 카드 수', '该包卡片数')}: **{self._pack_count()}**\n\n"
+            f"{_t(self.selected_lang, '模式1提供 1/3/4/7，卡片不足會自動 fallback。', 'Mode 1 supports 1/3/4/7 and auto-fallback on insufficient cards.', '모드1은 1/3/4/7 지원, 카드 부족 시 자동 fallback.', '模式1提供 1/3/4/7，卡片不足自动 fallback。')}"
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                _t(self.selected_lang, "只有建立者可以操作此面板。", "Only the creator can use this panel.", "생성자만 이 패널을 사용할 수 있습니다.", "只有创建者可以操作此面板。"),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def refresh(self, interaction: discord.Interaction):
+        self._rebuild_components()
+        await interaction.response.edit_message(content=self.render_message(), view=self)
+
+    def _disable_all(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def on_timeout(self):
+        self._disable_all()
+        if self.bound_message:
+            try:
+                await self.bound_message.edit(
+                    content=_t(self.selected_lang, "⏰ 設定面板已逾時，請重新輸入 `/flex_pack`。", "⏰ Setup panel timed out. Run `/flex_pack` again.", "⏰ 설정 시간이 만료되었습니다. `/flex_pack`을 다시 실행하세요.", "⏰ 设置面板已超时，请重新输入 `/flex_pack`。"),
+                    view=self,
+                )
+            except Exception:
+                pass
+
+    async def _run_generate(self, interaction: discord.Interaction):
+        self._disable_all()
+        await interaction.response.edit_message(
+            content=_t(self.selected_lang, "⏳ 生成中...", "⏳ Generating...", "⏳ 생성 중...", "⏳ 生成中..."),
+            view=self,
+        )
+
+        out_dir = tempfile.mkdtemp(prefix=f"tcg_flex_pack_{interaction.id}_")
+        loop = asyncio.get_running_loop()
+        try:
+            payload = await loop.run_in_executor(
+                None,
+                lambda: _build_wallet_flex_pack_template_context(
+                    self.wallet,
+                    self.picker_data,
+                    selected_pack_contract=self.selected_pack_contract,
+                    mode=self.selected_mode,
+                    card_count=self.selected_template,
+                    profile_lang=self.selected_lang,
+                ),
+            )
+            safe_name = f"{self.username}_{self.wallet[-6:]}_flex_pack"
+            async with POSTER_SEMAPHORE:
+                poster_path = await _render_wallet_profile_cardpack_pull_poster(payload, out_dir, safe_name=safe_name)
+
+            requested = int(_parse_int(payload.get("requested_count")) or 0)
+            selected = int(_parse_int(payload.get("selected_count")) or 0)
+            pack_total = int(_parse_int(payload.get("pack_total_count")) or 0)
+            pack_name = str(payload.get("pack_name") or _short_hex(self.selected_pack_contract))
+            mode_label = (
+                _t(self.selected_lang, "天堂與地獄", "Heaven and Hell", "천국과 지옥", "天堂与地狱")
+                if self.selected_mode == "extreme"
+                else _t(self.selected_lang, "剛抽卡排版", "Recent Pull Layout", "최근 뽑기 레이아웃", "刚抽卡排版")
+            )
+            fallback_note = ""
+            if self.selected_mode == "picked" and selected < requested:
+                fallback_note = _t(
+                    self.selected_lang,
+                    f"\n⚠️ 排版 fallback：要求 {requested}，實際使用 {selected}",
+                    f"\n⚠️ Layout fallback: requested {requested}, used {selected}",
+                    f"\n⚠️ 레이아웃 fallback: 요청 {requested}, 실제 {selected}",
+                    f"\n⚠️ 排版 fallback：要求 {requested}，实际使用 {selected}",
+                )
+
+            summary = (
+                f"✅ **{self.username}** · {_t(self.selected_lang, '卡包海報已生成', 'Pack poster generated', '팩 포스터 생성 완료', '卡包海报已生成')}\n"
+                f"{_t(self.selected_lang, '卡包', 'Pack', '팩', '卡包')}: **{pack_name}**\n"
+                f"{_t(self.selected_lang, '模式', 'Mode', '모드', '模式')}: **{mode_label}**\n"
+                f"{_t(self.selected_lang, '該包卡片數', 'Cards in Pack', '해당 팩 카드 수', '该包卡片数')}: **{pack_total}**"
+                f"{fallback_note}"
+            )
+            await interaction.followup.send(summary, file=discord.File(poster_path))
+        except Exception as e:
+            print(f"❌ FlexPackConfigView 生成失敗: {e}", file=sys.stderr)
+            print(traceback.format_exc(), file=sys.stderr)
+            await interaction.followup.send(f"❌ {_t(self.selected_lang, '生成失敗', 'Generation failed', '생성 실패', '生成失败')}: {e}")
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
+            self.stop()
+
+    @discord.ui.button(label="生成海報", style=discord.ButtonStyle.primary, row=3)
+    async def generate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._run_generate(interaction)
+
+
+@tree.command(name="flex_pack", description="指定卡包生成 Flex 海報（剛抽排版 / 天堂地獄）")
+@app_commands.describe(address="錢包地址（0x 開頭）")
+async def flex_pack(interaction: discord.Interaction, address: str):
+    wallet = _normalize_wallet_address(address)
+    if not wallet:
+        await interaction.response.send_message(
+            "❌ 錢包地址格式錯誤，請輸入 `0x` 開頭且長度 42 的地址。",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await interaction.response.send_message("🎛️ 正在建立卡包 Flex 海報設定討論串...", ephemeral=False)
+        resp = await interaction.original_response()
+    except discord.NotFound:
+        channel = interaction.channel
+        if channel is None:
+            print("❌ /flex_pack 互動已失效且找不到可用頻道。", file=sys.stderr)
+            return
+        resp = await channel.send("🎛️ 正在建立卡包 Flex 海報設定討論串...")
+
+    thread = await resp.create_thread(name="卡包 Flex 海報設定", auto_archive_duration=60)
+    await thread.add_user(interaction.user)
+
+    default_lang = "zh"
+    lang_view = LanguageSelectView(interaction.user.id, timeout_seconds=20)
+    lang_msg = await thread.send(_profile_wizard_texts(default_lang)["lang_prompt"], view=lang_view)
+    picked_lang, selected = await lang_view.wait_for_choice()
+    profile_lang = picked_lang if selected and picked_lang else "zh"
+    if not selected:
+        lang_view._disable_all()
+        try:
+            await lang_msg.edit(content=_profile_wizard_texts(profile_lang)["lang_timeout"], view=lang_view)
+        except Exception:
+            pass
+
+    loop = asyncio.get_running_loop()
+    try:
+        picker_data = await loop.run_in_executor(
+            None,
+            _build_wallet_flex_pack_picker_data,
+            wallet,
+            profile_lang,
+        )
+        if not (picker_data.get("pack_options") or []):
+            await thread.send("⚠️ 這個地址目前找不到可用的卡包抽卡紀錄。")
+            return
+        view = FlexPackConfigView(interaction.user.id, wallet, picker_data, profile_lang)
+        msg = await thread.send(view.render_message(), view=view)
+        view.bind_message(msg)
+    except Exception as e:
+        print(f"❌ /flex_pack 失敗: {e}", file=sys.stderr)
+        print(traceback.format_exc(), file=sys.stderr)
+        await thread.send(f"❌ 生成失敗：{e}")
+
+
 @tree.command(name="manual_analyze", description="手動選擇版本生成報告與海報")
 async def manual_analyze(interaction: discord.Interaction, image: discord.Attachment, lang: str = "zh"):
     if not any(image.filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
@@ -4472,6 +5127,7 @@ async def mega(interaction: discord.Interaction, image: discord.Attachment, lang
         existing_thread=thread,
         vision_provider_override="openai",
         openai_model_override=model_name,
+        echo_original_image=True,
     )
 
 
@@ -4557,7 +5213,7 @@ async def cardset(interaction: discord.Interaction, series_code: str):
         poster_data = None
         async with REPORT_SEMAPHORE:
             market_report_vision.REPORT_ONLY = True
-            result = await market_report_vision.process_single_image(
+            result = await _process_single_image_compat(
                 image_path=None,
                 api_key=(os.getenv("MINIMAX_API_KEY") or "").strip(),
                 out_dir=card_out_dir,
