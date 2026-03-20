@@ -1857,6 +1857,9 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
                 "pack_name": pack_label,
                 "checkout_id": checkout_id,
                 "token_id": token_hint,
+                "market_image": str(row_item.get("imageUrl") or "").strip(),
+                "preview_image": str(row_item.get("collectibleImageUrl") or "").strip(),
+                "image": str(row_item.get("imageUrl") or row_item.get("collectibleImageUrl") or "").strip(),
                 "timestamp_raw": _parse_int(row.get("timestamp")) or 0,
                 "event_key": legacy_event_key,
             }
@@ -2146,13 +2149,18 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
             prev = token_latest_values.get(token_id)
             if prev is None or ts_raw >= prev[0]:
                 token_latest_values[token_id] = (ts_raw, value)
+        pull_market_image = str(pull.get("market_image") or "").strip()
+        pull_preview_image = str(pull.get("preview_image") or "").strip()
+        market_image = str((best or {}).get("market_image") or pull_market_image).strip()
+        preview_image = str((best or {}).get("preview_image") or pull_preview_image).strip()
+        image = str((best or {}).get("image") or market_image or preview_image).strip()
         legacy_release_cards.append(
             {
                 "token_id": token_id,
                 "name": str((best or {}).get("name") or pull.get("pack_name") or "Unknown Collectible"),
-                "market_image": str((best or {}).get("market_image") or "").strip(),
-                "preview_image": str((best or {}).get("preview_image") or "").strip(),
-                "image": str((best or {}).get("image") or "").strip(),
+                "market_image": market_image,
+                "preview_image": preview_image,
+                "image": image,
                 "timestamp_raw": ts_raw,
                 "pack_contract": legacy_key,
                 "checkout_id": checkout_id,
@@ -2607,6 +2615,8 @@ def _build_wallet_flex_pack_template_context(
         image = market_image or activity_image
         if not image and FLEX_PACK_ALLOW_PREVIEW_IMAGE_FALLBACK:
             image = preview_image
+        if not image and token_id:
+            image = _fetch_card_image_by_token_id(token_id)
 
         prepared = _prepare_collectible_image_for_poster(image) if prepare_image else image
 
@@ -2765,6 +2775,10 @@ def _build_wallet_flex_pack_template_context(
 
     def _prepare_final_extreme_image(row: dict) -> str:
         image = str(row.get("image") or "").strip()
+        if not image:
+            token_id = str(row.get("token_id") or "").strip()
+            if token_id:
+                image = _fetch_card_image_by_token_id(token_id)
         return _prepare_collectible_image_for_poster(image)
 
     highest["image"] = _prepare_final_extreme_image(highest)
