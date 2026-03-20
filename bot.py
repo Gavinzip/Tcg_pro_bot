@@ -2423,6 +2423,8 @@ def _build_wallet_flex_pack_template_context(
         activity_image = str(card.get("image") or "").strip()
         preview_image = str(card.get("preview_image") or "").strip()
         image = market_image or activity_image or preview_image
+        if not image and token_id:
+            image = _fetch_card_image_by_token_id(token_id)
 
         prepared = _prepare_collectible_image_for_poster(image) if prepare_image else image
 
@@ -2581,6 +2583,10 @@ def _build_wallet_flex_pack_template_context(
 
     def _prepare_final_extreme_image(row: dict) -> str:
         image = str(row.get("image") or "").strip()
+        if not image:
+            token_id = str(row.get("token_id") or "").strip()
+            if token_id:
+                image = _fetch_card_image_by_token_id(token_id)
         return _prepare_collectible_image_for_poster(image)
 
     highest["image"] = _prepare_final_extreme_image(highest)
