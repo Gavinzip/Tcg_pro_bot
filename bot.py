@@ -5537,8 +5537,17 @@ class FlexPackConfigView(discord.ui.View):
 
 
 @tree.command(name="flex_pack", description="指定卡包生成 Flex 海報（剛抽排版 / 天堂地獄）")
-@app_commands.describe(address="錢包地址（0x 開頭）")
-async def flex_pack(interaction: discord.Interaction, address: str):
+@app_commands.describe(address="錢包地址（可留空使用已儲存的預設地址）")
+async def flex_pack(interaction: discord.Interaction, address: str = None):
+    if not address:
+        address = _get_user_default_wallet(str(interaction.user.id))
+        if not address:
+            await interaction.response.send_message(
+                "❌ 請輸入錢包地址，或先使用 `/settings wallet:0x...` 設定預設地址。",
+                ephemeral=True,
+            )
+            return
+    
     wallet = _normalize_wallet_address(address)
     if not wallet:
         await interaction.response.send_message(
