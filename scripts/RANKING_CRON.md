@@ -1,4 +1,4 @@
-# Daily Ranking Update (Asia/Taipei 12:00)
+# Daily Ranking Update (Asia/Taipei 13:00)
 
 This project now provides `scripts/update_rankings.py`.
 It updates and persists:
@@ -21,11 +21,11 @@ cd /Users/gavin/renaiss_project/old/tcg_pro
 RANKING_DATA_DIR=/data/rankings ./.venv/bin/python scripts/update_rankings.py
 ```
 
-## Cron (every day at 12:00 Asia/Taipei)
+## Cron (every day at 13:00 Asia/Taipei)
 
 ```cron
 CRON_TZ=Asia/Taipei
-0 12 * * * cd /Users/gavin/renaiss_project/old/tcg_pro && RANKING_DATA_DIR=/data/rankings ./.venv/bin/python scripts/update_rankings.py >> logs/ranking_cron.log 2>&1
+0 13 * * * cd /Users/gavin/renaiss_project/old/tcg_pro && RANKING_DATA_DIR=/data/rankings ./.venv/bin/python scripts/update_rankings.py >> logs/ranking_cron.log 2>&1
 ```
 
 ## Notes
