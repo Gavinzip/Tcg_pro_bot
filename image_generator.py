@@ -114,7 +114,14 @@ class AsyncBrowserManager:
     @classmethod
     async def get_browser(cls):
         async with cls._lock:
-            if cls._browser is None:
+            needs_launch = cls._browser is None
+            if not needs_launch:
+                try:
+                    needs_launch = not bool(cls._browser.is_connected())
+                except Exception:
+                    needs_launch = True
+            if needs_launch:
+                await cls._teardown_locked()
                 cls._playwright = await async_playwright().start()
                 cls._browser = await cls._playwright.chromium.launch(headless=True)
             return cls._browser
@@ -122,12 +129,49 @@ class AsyncBrowserManager:
     @classmethod
     async def close(cls):
         async with cls._lock:
-            if cls._browser:
+            await cls._teardown_locked()
+
+    @classmethod
+    async def reset(cls):
+        async with cls._lock:
+            await cls._teardown_locked()
+
+    @classmethod
+    async def _teardown_locked(cls):
+        if cls._browser:
+            try:
                 await cls._browser.close()
-                cls._browser = None
-            if cls._playwright:
+            except Exception:
+                pass
+            cls._browser = None
+        if cls._playwright:
+            try:
                 await cls._playwright.stop()
-                cls._playwright = None
+            except Exception:
+                pass
+            cls._playwright = None
+
+
+def _is_browser_context_closed_error(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    return ("target page, context or browser has been closed" in msg) or ("browser has been closed" in msg)
+
+
+async def _new_browser_context(*, viewport: dict, device_scale_factor: int = 2):
+    last_err: Exception | None = None
+    for attempt in range(2):
+        browser = await AsyncBrowserManager.get_browser()
+        try:
+            return await browser.new_context(viewport=viewport, device_scale_factor=device_scale_factor)
+        except Exception as e:
+            last_err = e
+            if attempt == 0 and _is_browser_context_closed_error(e):
+                await AsyncBrowserManager.reset()
+                continue
+            raise
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError("failed to create browser context")
 
 def _candidate_image_urls(url):
     if not url:
@@ -837,8 +881,7 @@ def _build_box_prize_cards_html(prizes):
 
 async def _render_single_html_poster(html_content, out_path, width=1200, height=900, device_scale_factor=2):
     async with RENDER_SEMAPHORE:
-        browser = await AsyncBrowserManager.get_browser()
-        context = await browser.new_context(
+        context = await _new_browser_context(
             viewport={"width": width, "height": height},
             device_scale_factor=device_scale_factor,
         )
@@ -1265,11 +1308,8 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
     out_path_2 = os.path.join(out_dir, f"report_{safe_name}_data.png")
 
     async with RENDER_SEMAPHORE:
-        browser = await AsyncBrowserManager.get_browser()
-        
-        # We create a fresh context per request but reuse the browser instance
-        # This is very memory efficient and fast
-        context = await browser.new_context(
+        # We create a fresh context per request but reuse the browser instance.
+        context = await _new_browser_context(
             viewport={"width": 1280, "height": 1000},
             device_scale_factor=2,
         )

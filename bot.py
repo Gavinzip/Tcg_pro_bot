@@ -3860,8 +3860,7 @@ async def _render_wallet_profile_posters_bundle(
     )
 
     async with image_generator.RENDER_SEMAPHORE:
-        browser = await image_generator.AsyncBrowserManager.get_browser()
-        context = await browser.new_context(
+        context = await image_generator._new_browser_context(
             viewport={"width": 1200, "height": 900},
             device_scale_factor=2,
         )
