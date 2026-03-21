@@ -25,7 +25,9 @@ import requests
 from dotenv import load_dotenv
 
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
+RENAISS_COLLECTIBLE_BY_TOKEN_URL = "https://www.renaiss.xyz/api/trpc/collectible.getCollectibleByTokenId"
 RENAISS_ACTIVITY_LIST_URL = "https://www.renaiss.xyz/api/trpc/activity.getSubgraphUserActivities"
+RENAISS_TOKEN_ACTIVITY_URL = "https://www.renaiss.xyz/api/trpc/activity.getSubgraphTokenActivities"
 RENAISS_SBT_BADGES_URL = "https://www.renaiss.xyz/api/trpc/sbt.getUserBadges"
 
 WEI_DECIMAL = Decimal("1000000000000000000")
@@ -36,10 +38,14 @@ PROFILE_CARD_WITHDRAW_ADDRESS = str(
 API_MAX_RETRIES = max(1, int(os.getenv("PROFILE_API_MAX_RETRIES", "4")))
 API_RETRY_BACKOFF_SEC = max(0.2, float(os.getenv("PROFILE_API_RETRY_BACKOFF_SEC", "0.8")))
 HTTP_POOL_MAXSIZE = max(8, int(os.getenv("PROFILE_HTTP_POOL_MAXSIZE", "48")))
+TOKEN_ACTIVITY_PAGE_LIMIT = max(1, min(50, int(os.getenv("PROFILE_TOKEN_ACTIVITY_PAGE_LIMIT", "50"))))
+TOKEN_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_TOKEN_ACTIVITY_MAX_PAGES", "20")))
 DEFAULT_HOLDERS_FILE_SERVER = Path("/data/renaiss_sync/snapshots/nft_13_holders.latest.json")
 DEFAULT_HOLDERS_FILE_LOCAL = Path("/Users/gavin/renaiss_project/renaiss_sync_data/snapshots/nft_13_holders.latest.json")
 
 _HTTP_SESSION_LOCAL = threading.local()
+_WITHDRAW_VALUE_CACHE: dict[str, Decimal] = {}
+_WITHDRAW_VALUE_CACHE_LOCK = threading.Lock()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -340,6 +346,188 @@ def _trpc_user_badges(username: str) -> list[dict[str, Any]]:
                 continue
             break
     raise RuntimeError(f"sbt.getUserBadges request failed: {last_err}")
+
+
+def _trpc_collectible_by_token(token_id: str) -> dict[str, Any]:
+    token = str(token_id or "").strip()
+    if not token:
+        return {}
+    params = {
+        "batch": "1",
+        "input": json.dumps(
+            {"0": {"json": {"tokenId": token}, "meta": {"values": {"tokenId": ["bigint"]}}}},
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ),
+    }
+    last_err: Exception | None = None
+    for attempt in range(1, API_MAX_RETRIES + 1):
+        try:
+            resp = _http_get(RENAISS_COLLECTIBLE_BY_TOKEN_URL, params=params, timeout=30)
+            status = int(resp.status_code or 0)
+            if status == 429 or status >= 500:
+                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp.raise_for_status()
+
+            data = resp.json()
+            if not isinstance(data, list) or not data:
+                raise RuntimeError("collectible.getCollectibleByTokenId invalid response")
+            root = data[0]
+            if root.get("error"):
+                err_data = ((root.get("error") or {}).get("json") or {}).get("data") or {}
+                if int(err_data.get("httpStatus") or 0) == 404:
+                    return {}
+                err = ((root.get("error") or {}).get("json") or {}).get("message") or "unknown error"
+                raise RuntimeError(f"collectible.getCollectibleByTokenId error: {err}")
+
+            result = (((root.get("result") or {}).get("data") or {}).get("json") or {})
+            if not isinstance(result, dict):
+                raise RuntimeError("collectible.getCollectibleByTokenId missing result")
+            return result
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            status = None
+            if isinstance(e, requests.RequestException) and getattr(e, "response", None) is not None:
+                status = int(e.response.status_code or 0)
+            retryable = status in (408, 409, 425, 429) or (status is not None and status >= 500) or status is None
+            if retryable and attempt < API_MAX_RETRIES:
+                wait_sec = API_RETRY_BACKOFF_SEC * (2 ** (attempt - 1))
+                time.sleep(wait_sec)
+                continue
+            break
+    raise RuntimeError(f"collectible.getCollectibleByTokenId request failed: {last_err}")
+
+
+def _trpc_token_activities(token_id: str, cursor: str | None, limit: int = TOKEN_ACTIVITY_PAGE_LIMIT) -> dict[str, Any]:
+    token = str(token_id or "").strip()
+    if not token:
+        return {"activities": [], "nextCursor": None}
+    row: dict[str, Any] = {
+        "json": {
+            "tokenId": token,
+            "limit": int(max(1, min(50, limit))),
+            "cursor": cursor,
+        }
+    }
+    if cursor is None:
+        row["meta"] = {"values": {"cursor": ["undefined"]}}
+    params = {
+        "batch": "1",
+        "input": json.dumps({"0": row}, separators=(",", ":"), ensure_ascii=False),
+    }
+    last_err: Exception | None = None
+    for attempt in range(1, API_MAX_RETRIES + 1):
+        try:
+            resp = _http_get(RENAISS_TOKEN_ACTIVITY_URL, params=params, timeout=30)
+            status = int(resp.status_code or 0)
+            if status == 429 or status >= 500:
+                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp.raise_for_status()
+
+            data = resp.json()
+            if not isinstance(data, list) or not data:
+                raise RuntimeError("activity.getSubgraphTokenActivities invalid response")
+            root = data[0]
+            if root.get("error"):
+                err = ((root.get("error") or {}).get("json") or {}).get("message") or "unknown error"
+                raise RuntimeError(f"activity.getSubgraphTokenActivities error: {err}")
+            result = (((root.get("result") or {}).get("data") or {}).get("json") or {})
+            if not isinstance(result, dict):
+                raise RuntimeError("activity.getSubgraphTokenActivities missing result")
+            return result
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            status = None
+            if isinstance(e, requests.RequestException) and getattr(e, "response", None) is not None:
+                status = int(e.response.status_code or 0)
+            retryable = status in (408, 409, 425, 429) or (status is not None and status >= 500) or status is None
+            if retryable and attempt < API_MAX_RETRIES:
+                wait_sec = API_RETRY_BACKOFF_SEC * (2 ** (attempt - 1))
+                time.sleep(wait_sec)
+                continue
+            break
+    raise RuntimeError(f"activity.getSubgraphTokenActivities request failed: {last_err}")
+
+
+def _fetch_token_activities(token_id: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    tid = str(token_id or "").strip()
+    if not tid:
+        return rows
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    for _ in range(TOKEN_ACTIVITY_MAX_PAGES):
+        page = _trpc_token_activities(tid, cursor=cursor, limit=TOKEN_ACTIVITY_PAGE_LIMIT)
+        page_rows = page.get("activities") or []
+        if isinstance(page_rows, list):
+            rows.extend([x for x in page_rows if isinstance(x, dict)])
+        next_cursor = page.get("nextCursor")
+        if not next_cursor:
+            break
+        next_cursor = str(next_cursor)
+        if next_cursor in seen_cursors:
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return rows
+
+
+def _fetch_card_trade_fallback_by_token_id(token_id: str) -> Decimal:
+    tid = str(token_id or "").strip()
+    if not tid:
+        return Decimal("0")
+    try:
+        activities = _fetch_token_activities(tid)
+    except Exception:
+        return Decimal("0")
+
+    best_value = Decimal("0")
+    best_ts = -1
+    for row in activities:
+        row_type = str(row.get("__typename") or "").strip()
+        ts = _parse_int(row.get("timestamp")) or 0
+        value = Decimal("0")
+        if row_type in ("SellActivity", "BuyActivity"):
+            value = _wei_to_usdt(row.get("amount"))
+        elif row_type in ("PerpetualBuybackActivity", "BuybackActivity"):
+            value = _wei_to_usdt(row.get("priceInUsdt"))
+            if value <= 0:
+                value = _wei_to_usdt(row.get("amount"))
+        if value > 0 and ts >= best_ts:
+            best_ts = ts
+            best_value = value
+    return best_value if best_value > 0 else Decimal("0")
+
+
+def _fetch_card_withdraw_value_by_token_id(token_id: str) -> Decimal:
+    tid = str(token_id or "").strip()
+    if not tid:
+        return Decimal("0")
+    with _WITHDRAW_VALUE_CACHE_LOCK:
+        cached = _WITHDRAW_VALUE_CACHE.get(tid)
+    if cached is not None:
+        return cached
+
+    value = Decimal("0")
+    try:
+        collectible = _trpc_collectible_by_token(tid)
+        for candidate in (
+            _card_price_to_usd(collectible.get("fmvPriceInUSD")),
+            _card_price_to_usd(collectible.get("buybackBaseValueInUSD")),
+            _card_price_to_usd(collectible.get("askPriceInUSDT")),
+        ):
+            if candidate > 0:
+                value = candidate
+                break
+    except Exception:
+        value = Decimal("0")
+
+    if value <= 0:
+        value = _fetch_card_trade_fallback_by_token_id(tid)
+
+    with _WITHDRAW_VALUE_CACHE_LOCK:
+        _WITHDRAW_VALUE_CACHE[tid] = value
+    return value
 
 
 @dataclass
@@ -1033,10 +1221,18 @@ def compute_activity_metrics_for_wallet(
             inferred_spent_total += inferred
 
     card_withdraw_total = Decimal("0")
+    unresolved_withdraw_tokens: list[str] = []
     for token_id in withdraw_token_ids:
         hinted_value = _to_decimal((token_latest_values.get(token_id) or (0, Decimal("0")))[1])
         if hinted_value > 0:
             card_withdraw_total += hinted_value
+        else:
+            unresolved_withdraw_tokens.append(token_id)
+
+    for token_id in unresolved_withdraw_tokens:
+        fallback_value = _to_decimal(_fetch_card_withdraw_value_by_token_id(token_id))
+        if fallback_value > 0:
+            card_withdraw_total += fallback_value
 
     pack_spent_total = pull_spent_total + inferred_spent_total
     total_spent = pack_spent_total + trade_spent_total

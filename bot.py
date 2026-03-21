@@ -172,7 +172,9 @@ _USER_SETTINGS_CACHE: dict[str, object] = {
 
 
 def _user_settings_dir() -> str:
-    return str(os.getenv("SYNC_DATA_DIR", "/data/renaiss_sync")).strip() or "/data/renaiss_sync"
+    app_env = str(os.getenv("APP_ENV", "local")).strip().lower() or "local"
+    default_dir = "/data/renaiss_sync" if app_env == "server" else "./data/renaiss_sync"
+    return str(os.getenv("SYNC_DATA_DIR", default_dir)).strip() or default_dir
 
 
 def _user_settings_path() -> str:
@@ -234,6 +236,82 @@ def _get_user_default_wallet(user_id: str) -> str | None:
     if not user_data:
         return None
     return user_data.get("wallet_address")
+
+
+_USAGE_STATS_LOCK = threading.Lock()
+
+
+def _bot_usage_stats_path() -> str:
+    return os.path.join(_user_settings_dir(), "state", "bot_usage_stats.json")
+
+
+def _record_bot_usage(
+    user_id: str,
+    command_name: str,
+    *,
+    guild_id: int | None = None,
+    channel_id: int | None = None,
+) -> None:
+    name = str(command_name or "").strip()
+    if not name:
+        return
+    uid = str(user_id or "unknown").strip() or "unknown"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    path = _bot_usage_stats_path()
+
+    with _USAGE_STATS_LOCK:
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    data = {}
+            else:
+                data = {}
+        except Exception:
+            data = {}
+
+        total = _parse_int(data.get("total")) or 0
+        data["total"] = total + 1
+        data["updated_at"] = now_iso
+
+        commands = data.get("commands")
+        if not isinstance(commands, dict):
+            commands = {}
+        commands[name] = (_parse_int(commands.get(name)) or 0) + 1
+        data["commands"] = commands
+
+        users = data.get("users")
+        if not isinstance(users, dict):
+            users = {}
+        user_row = users.get(uid)
+        if not isinstance(user_row, dict):
+            user_row = {}
+        user_total = _parse_int(user_row.get("total")) or 0
+        user_row["total"] = user_total + 1
+        user_commands = user_row.get("commands")
+        if not isinstance(user_commands, dict):
+            user_commands = {}
+        user_commands[name] = (_parse_int(user_commands.get(name)) or 0) + 1
+        user_row["commands"] = user_commands
+        user_row["last_command"] = name
+        user_row["updated_at"] = now_iso
+        if guild_id is not None:
+            user_row["last_guild_id"] = str(guild_id)
+        if channel_id is not None:
+            user_row["last_channel_id"] = str(channel_id)
+        users[uid] = user_row
+        data["users"] = users
+
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp_path = path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            os.replace(tmp_path, path)
+        except Exception:
+            return
 
 
 _RANKING_LATEST_CACHE: dict[str, object] = {
@@ -6026,6 +6104,23 @@ async def profile(interaction: discord.Interaction, address: str = None):
         await thread.send(f"❌ 生成失敗：{e}")
 
 
+@tree.interaction_check
+async def _global_interaction_usage_check(interaction: discord.Interaction) -> bool:
+    # Count every slash command usage in persistent data storage.
+    try:
+        cmd = getattr(interaction, "command", None)
+        cmd_name = getattr(cmd, "qualified_name", None) or getattr(cmd, "name", None) or "unknown"
+        _record_bot_usage(
+            str(getattr(interaction.user, "id", "unknown")),
+            f"/{cmd_name}",
+            guild_id=interaction.guild_id,
+            channel_id=interaction.channel_id,
+        )
+    except Exception:
+        pass
+    return True
+
+
 @tree.command(name="sync_status", description="查看 NFT holders 同步狀態")
 async def sync_status(interaction: discord.Interaction):
     status_path = _nft_sync_status_path()
@@ -6276,6 +6371,12 @@ async def on_message(message):
     content_lower = message.content.lower().strip()
 
     if bot_mentioned and "!sync" in content_lower:
+        _record_bot_usage(
+            str(getattr(message.author, "id", "unknown")),
+            "!sync",
+            guild_id=getattr(message.guild, "id", None),
+            channel_id=getattr(message.channel, "id", None),
+        )
         try:
             # 1. 先同步到當前伺服器 (Guild Sync - 幾乎即時生效)
             print(f"⚙️ 正在同步指令到伺服器: {message.guild.id}")
