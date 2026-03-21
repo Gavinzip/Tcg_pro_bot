@@ -110,7 +110,7 @@ NFT_SYNC_STARTUP_DONE = False
 NFT_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
 NFT_SYNC_TZ = str(os.getenv("NFT_SYNC_TZ", "Asia/Taipei")).strip() or "Asia/Taipei"
 NFT_SYNC_COMPARE_ON_STARTUP = _env_true("NFT_SYNC_COMPARE_ON_STARTUP", True)
-NFT_SYNC_HOUR = max(0, min(23, int(os.getenv("NFT_SYNC_HOUR", "14"))))
+NFT_SYNC_HOUR = max(0, min(23, int(os.getenv("NFT_SYNC_HOUR", "6"))))
 NFT_SYNC_MINUTE = max(0, min(59, int(os.getenv("NFT_SYNC_MINUTE", "0"))))
 AUTO_IMAGE_THREAD_MONITOR_ENABLED = _env_true("AUTO_IMAGE_THREAD_MONITOR_ENABLED", False)
 AUTO_IMAGE_THREAD_CHANNEL_IDS = _parse_int_set(os.getenv("AUTO_IMAGE_THREAD_CHANNEL_IDS", ""))
@@ -138,7 +138,7 @@ RANK_SYNC_STARTUP_DONE = False
 RANK_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
 RANK_SYNC_TZ = str(os.getenv("RANK_SYNC_TZ", "Asia/Taipei")).strip() or "Asia/Taipei"
 RANK_SYNC_COMPARE_ON_STARTUP = _env_true("RANK_SYNC_COMPARE_ON_STARTUP", False)
-RANK_SYNC_HOUR = max(0, min(23, int(os.getenv("RANK_SYNC_HOUR", "14"))))
+RANK_SYNC_HOUR = max(0, min(23, int(os.getenv("RANK_SYNC_HOUR", "6"))))
 RANK_SYNC_MINUTE = max(0, min(59, int(os.getenv("RANK_SYNC_MINUTE", "0"))))
 RANK_SYNC_RUN_TIME = dt_time(hour=RANK_SYNC_HOUR, minute=RANK_SYNC_MINUTE, tzinfo=_safe_tzinfo(RANK_SYNC_TZ))
 
@@ -312,6 +312,19 @@ def _record_bot_usage(
             os.replace(tmp_path, path)
         except Exception:
             return
+
+
+def _load_bot_usage_stats() -> dict[str, object]:
+    path = _bot_usage_stats_path()
+    with _USAGE_STATS_LOCK:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            return {}
+    return {}
 
 
 _RANKING_LATEST_CACHE: dict[str, object] = {
@@ -6353,6 +6366,55 @@ async def ranking(interaction: discord.Interaction):
     except Exception:
         pass
     await thread.send(text)
+
+
+@tree.command(name="bot_usage", description="查看機器人使用次數（總次數 + 各指令）")
+async def bot_usage(interaction: discord.Interaction):
+    path = _bot_usage_stats_path()
+    data = _load_bot_usage_stats()
+    if not data:
+        await interaction.response.send_message(
+            f"⚠️ 尚無使用統計資料：`{path}`\n先執行幾次指令後再查看。",
+            ephemeral=True,
+        )
+        return
+
+    total = _parse_int(data.get("total")) or 0
+    updated_at = str(data.get("updated_at") or "-")
+    commands_raw = data.get("commands")
+    commands = commands_raw if isinstance(commands_raw, dict) else {}
+    items: list[tuple[str, int]] = []
+    for name, count_raw in commands.items():
+        name_s = str(name or "").strip()
+        if not name_s:
+            continue
+        count = _parse_int(count_raw) or 0
+        items.append((name_s, count))
+    items.sort(key=lambda x: (-x[1], x[0].lower()))
+
+    lines = [
+        f"**總使用次數**：`{_format_number(total)}`",
+        "",
+        "**各指令使用次數**",
+    ]
+    if not items:
+        lines.append("無資料")
+    else:
+        max_len = 1850
+        rendered = 0
+        for idx, (name, count) in enumerate(items, start=1):
+            line = f"{idx}. `{name}`: `{_format_number(count)}`"
+            draft = "\n".join(lines + [line])
+            if len(draft) > max_len:
+                remain = len(items) - rendered
+                lines.append(f"... 其餘 `{_format_number(remain)}` 個指令略過")
+                break
+            lines.append(line)
+            rendered += 1
+    lines.append("")
+    lines.append(f"Updated: `{updated_at}`")
+    lines.append(f"Path: `{path}`")
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
 @tree.command(name="clear_stale_commands", description="[Owner] 清除所有全域斜線指令並重置 (建議改用 !sync)")
