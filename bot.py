@@ -164,6 +164,80 @@ def _rank_sync_status_path() -> str:
     return os.path.join(_rank_sync_data_dir(), "state", "ranking_status.json")
 
 
+_USER_SETTINGS_CACHE: dict[str, object] = {
+    "path": "",
+    "mtime": -1.0,
+    "settings": {},
+}
+
+
+def _user_settings_dir() -> str:
+    app_env = str(os.getenv("APP_ENV", "local")).strip().lower() or "local"
+    default_dir = "/data/renaiss_sync" if app_env == "server" else "./data/renaiss_sync"
+    return str(os.getenv("SYNC_DATA_DIR", default_dir)).strip() or default_dir
+
+
+def _user_settings_path() -> str:
+    return os.path.join(_user_settings_dir(), "user_settings.json")
+
+
+def _load_user_settings() -> dict[str, dict]:
+    settings_path = _user_settings_path()
+    try:
+        mtime = os.path.getmtime(settings_path)
+    except OSError:
+        os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+        return {}
+
+    if (
+        _USER_SETTINGS_CACHE.get("path") == settings_path
+        and _USER_SETTINGS_CACHE.get("mtime") == mtime
+        and isinstance(_USER_SETTINGS_CACHE.get("settings"), dict)
+    ):
+        return _USER_SETTINGS_CACHE.get("settings")  # type: ignore[return-value]
+
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    _USER_SETTINGS_CACHE["path"] = settings_path
+    _USER_SETTINGS_CACHE["mtime"] = mtime
+    _USER_SETTINGS_CACHE["settings"] = data
+    return data
+
+
+def _save_user_settings(user_id: str, wallet_address: str) -> bool:
+    settings_path = _user_settings_path()
+    settings = _load_user_settings()
+    settings[user_id] = {
+        "wallet_address": wallet_address.lower(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+        with open(settings_path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+        os.replace(settings_path + ".tmp", settings_path)
+        _USER_SETTINGS_CACHE["settings"] = settings
+        _USER_SETTINGS_CACHE["mtime"] = os.path.getmtime(settings_path)
+        return True
+    except Exception:
+        return False
+
+
+def _get_user_default_wallet(user_id: str) -> str | None:
+    settings = _load_user_settings()
+    user_data = settings.get(str(user_id))
+    if not user_data:
+        return None
+    return user_data.get("wallet_address")
+
+
 _RANKING_LATEST_CACHE: dict[str, object] = {
     "path": "",
     "mtime": -1.0,
@@ -5779,9 +5853,57 @@ async def cardset(interaction: discord.Interaction, series_code: str):
         shutil.rmtree(card_out_dir, ignore_errors=True)
 
 
+@tree.command(name="settings", description="設定你的預設錢包地址")
+@app_commands.describe(wallet="錢包地址（0x 開頭），留空則顯示目前設定")
+async def settings(interaction: discord.Interaction, wallet: str = None):
+    user_id = str(interaction.user.id)
+    
+    if wallet is None:
+        current = _get_user_default_wallet(user_id)
+        if current:
+            await interaction.response.send_message(
+                f"✅ 你的預設錢包地址：\n`{current}`\n\n要更新請重新輸入 `/settings wallet:0x...`",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "📝 你尚未設定預設錢包地址。\n\n請使用 `/settings wallet:0x...` 來設定。",
+                ephemeral=True,
+            )
+        return
+    
+    addr = _normalize_wallet_address(wallet)
+    if not addr:
+        await interaction.response.send_message(
+            "❌ 錢包地址格式錯誤，請輸入 `0x` 開頭且長度 42 的地址。",
+            ephemeral=True,
+        )
+        return
+    
+    if _save_user_settings(user_id, addr):
+        await interaction.response.send_message(
+            f"✅ 已儲存你的預設錢包地址：\n`{addr}`",
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            "❌ 儲存失敗，請稍後再試。",
+            ephemeral=True,
+        )
+
+
 @tree.command(name="profile", description="輸入錢包地址，開啟互動式海報設定面板")
-@app_commands.describe(address="錢包地址（0x 開頭）")
-async def profile(interaction: discord.Interaction, address: str):
+@app_commands.describe(address="錢包地址（可留空使用已儲存的預設地址）")
+async def profile(interaction: discord.Interaction, address: str = None):
+    if not address:
+        address = _get_user_default_wallet(str(interaction.user.id))
+        if not address:
+            await interaction.response.send_message(
+                "❌ 請輸入錢包地址，或先使用 `/settings wallet:0x...` 設定預設地址。",
+                ephemeral=True,
+            )
+            return
+    
     wallet = _normalize_wallet_address(address)
     if not wallet:
         await interaction.response.send_message(
