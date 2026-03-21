@@ -1,4 +1,5 @@
 .env
+SERVER_ENV_BACKUP.md
 __pycache__/
 *.pyc
 /venv
