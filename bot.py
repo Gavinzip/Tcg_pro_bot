@@ -6231,7 +6231,33 @@ async def ranking(interaction: discord.Interaction):
     text = "\n".join(lines).strip()
     if len(text) > 1900:
         text = text[:1890] + "\n...(truncated)"
-    await interaction.response.send_message(text, ephemeral=False)
+    if isinstance(interaction.channel, discord.Thread):
+        await interaction.response.send_message(text, ephemeral=False)
+        return
+
+    try:
+        await interaction.response.send_message("📊 正在建立 ranking 討論串...", ephemeral=False)
+        starter = await interaction.original_response()
+    except discord.NotFound:
+        channel = interaction.channel
+        if channel is None:
+            print("❌ /ranking 互動已失效且找不到可用頻道。", file=sys.stderr)
+            return
+        starter = await channel.send("📊 正在建立 ranking 討論串...")
+
+    thread_name = f"ranking-{datetime.now().strftime('%m%d-%H%M')}"
+    try:
+        thread = await starter.create_thread(name=thread_name, auto_archive_duration=60)
+    except Exception as e:
+        print(f"❌ /ranking 建立討論串失敗: {e}", file=sys.stderr)
+        await starter.reply(f"❌ 建立討論串失敗：{e}")
+        return
+
+    try:
+        await thread.add_user(interaction.user)
+    except Exception:
+        pass
+    await thread.send(text)
 
 
 @tree.command(name="clear_stale_commands", description="[Owner] 清除所有全域斜線指令並重置 (建議改用 !sync)")
