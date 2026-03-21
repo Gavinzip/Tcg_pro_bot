@@ -338,6 +338,12 @@ PROFILE_ENABLE_DISK_IMAGE_CACHE = str(os.getenv("PROFILE_ENABLE_DISK_IMAGE_CACHE
     "yes",
     "on",
 )
+PROFILE_ENABLE_DISK_FMV_CACHE = _env_true("PROFILE_ENABLE_DISK_FMV_CACHE", True)
+PROFILE_DISK_FMV_CACHE_TTL_SEC = max(0, int(os.getenv("PROFILE_DISK_FMV_CACHE_TTL_SEC", "86400")))
+PROFILE_DISK_FMV_CACHE_DIR = (
+    str(os.getenv("PROFILE_DISK_FMV_CACHE_DIR", os.path.join(_nft_sync_data_dir(), "cache", "fmv"))).strip()
+    or os.path.join(_nft_sync_data_dir(), "cache", "fmv")
+)
 PROFILE_CARD_WITHDRAW_ADDRESS = str(
     os.getenv("PROFILE_CARD_WITHDRAW_ADDRESS", "0x341Edb3EdC1E45612E5704F29eC8d26fBb4072b4")
 ).strip().lower()
@@ -357,6 +363,7 @@ _CARD_IMAGE_CACHE: dict[str, str] = {}
 _CARD_COLLECTIBLE_CACHE: dict[str, dict] = {}
 _PROFILE_SBT_BADGE_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _PREPARED_CARD_IMAGE_CACHE: dict[str, str] = {}
+_PROFILE_FMV_DISK_LOCK = threading.Lock()
 PROFILE_PREPARED_CARD_CACHE_DIR = os.path.join(BASE_DIR, "templates", "profile", "cache_cards")
 PACK_PRICE_MAP_PATH = (
     str(os.getenv("PACK_PRICE_MAP_PATH", os.path.join(BASE_DIR, "data", "pack_price_map.json"))).strip()
@@ -454,6 +461,52 @@ def _to_decimal(value) -> Decimal:
         return Decimal(text)
     except (InvalidOperation, ValueError):
         return Decimal("0")
+
+
+def _fmv_disk_cache_path(cache_key: str) -> str:
+    digest = hashlib.sha1(str(cache_key or "").encode("utf-8")).hexdigest()
+    return os.path.join(PROFILE_DISK_FMV_CACHE_DIR, f"{digest}.json")
+
+
+def _load_fmv_from_disk_cache(cache_key: str) -> Decimal | None:
+    if not PROFILE_ENABLE_DISK_FMV_CACHE:
+        return None
+    path = _fmv_disk_cache_path(cache_key)
+    try:
+        with _PROFILE_FMV_DISK_LOCK:
+            if not os.path.exists(path):
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                row = json.load(f)
+        if not isinstance(row, dict):
+            return None
+        updated_at = _parse_int(row.get("updated_at")) or 0
+        if PROFILE_DISK_FMV_CACHE_TTL_SEC > 0 and updated_at > 0:
+            if (int(time.time()) - updated_at) > PROFILE_DISK_FMV_CACHE_TTL_SEC:
+                return None
+        return _to_decimal(row.get("value"))
+    except Exception:
+        return None
+
+
+def _save_fmv_to_disk_cache(cache_key: str, value: Decimal) -> None:
+    if not PROFILE_ENABLE_DISK_FMV_CACHE:
+        return
+    path = _fmv_disk_cache_path(cache_key)
+    payload = {
+        "cache_key": str(cache_key),
+        "value": format(_to_decimal(value), "f"),
+        "updated_at": int(time.time()),
+    }
+    try:
+        with _PROFILE_FMV_DISK_LOCK:
+            os.makedirs(PROFILE_DISK_FMV_CACHE_DIR, exist_ok=True)
+            tmp_path = f"{path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp_path, path)
+    except Exception:
+        return
 
 
 def _wei_to_usdt(value) -> Decimal:
@@ -1596,6 +1649,11 @@ def _fetch_card_fmv_by_token_id(token_id: str, allow_trade_fallback: bool = True
     cache_key = tid if allow_trade_fallback else f"{tid}|no_trade"
     if PROFILE_ENABLE_RUNTIME_CACHE and cache_key in _CARD_FMV_CACHE:
         return _CARD_FMV_CACHE[cache_key]
+    cached_disk_value = _load_fmv_from_disk_cache(cache_key)
+    if cached_disk_value is not None:
+        if PROFILE_ENABLE_RUNTIME_CACHE:
+            _CARD_FMV_CACHE[cache_key] = cached_disk_value
+        return cached_disk_value
 
     value = Decimal("0")
     try:
@@ -1621,6 +1679,7 @@ def _fetch_card_fmv_by_token_id(token_id: str, allow_trade_fallback: bool = True
 
     if PROFILE_ENABLE_RUNTIME_CACHE:
         _CARD_FMV_CACHE[cache_key] = value
+    _save_fmv_to_disk_cache(cache_key, value)
     return value
 
 
@@ -3423,6 +3482,7 @@ def _build_wallet_profile_context(
     sbt_total = sum((b.get("balance") or 0) for b in sbt_badges)
     sbt_live_total = int(sbt_total)
     volume_rank_chip = _rank_chip_payload((ranking_row or {}).get("volume_rank"))
+    total_spent_rank_chip = _rank_chip_payload((ranking_row or {}).get("total_spent_rank"))
     holdings_rank_chip = _rank_chip_payload((ranking_row or {}).get("holdings_rank"))
     pnl_rank_chip = _rank_chip_payload((ranking_row or {}).get("pnl_rank"))
     participation_rank_chip = _rank_chip_payload((ranking_row or {}).get("participation_days_rank"))
@@ -3539,6 +3599,8 @@ def _build_wallet_profile_context(
         "metric_total_spent_label": history_labels.get("kpi_total_spent", "Total Spent"),
         "metric_total_spent_note": history_labels.get("kpi_total_spent_note", ""),
         "metric_total_spent_value": _format_usdt_decimal(history_data.get("total_spent")),
+        "metric_total_spent_rank": total_spent_rank_chip["text"],
+        "metric_total_spent_rank_tier": total_spent_rank_chip["tier"],
         "metric_total_earned_label": history_labels.get("kpi_total_earned", "Total Earned"),
         "metric_total_earned_note": history_labels.get("kpi_total_earned_note", ""),
         "metric_total_earned_value": _format_usdt_decimal(history_data.get("total_earned")),
@@ -6067,6 +6129,109 @@ async def ranking_sync_status(interaction: discord.Interaction):
     if message:
         txt += f"\nMessage: `{message[:1200]}`"
     await interaction.response.send_message(txt, ephemeral=True)
+
+
+@tree.command(name="ranking", description="查看各項排名 Top 10（文字版）")
+async def ranking(interaction: discord.Interaction):
+    latest_path = os.path.join(_rank_sync_data_dir(), "latest.json")
+    if not os.path.exists(latest_path):
+        await interaction.response.send_message(
+            f"⚠️ 尚無排名資料：`{latest_path}`\n請先執行一次 ranking 同步。",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        with open(latest_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            raise RuntimeError("latest.json 格式錯誤")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ 讀取排名資料失敗：{e}", ephemeral=True)
+        return
+
+    wallets_raw = payload.get("wallets")
+    wallets = wallets_raw if isinstance(wallets_raw, list) else []
+    top_map = payload.get("top") if isinstance(payload.get("top"), dict) else {}
+
+    def _label(row: dict) -> str:
+        addr = _short_hex(str(row.get("address") or ""))
+        username = str(row.get("username") or "").strip()
+        if not username:
+            return addr or "unknown"
+        username = username[:28]
+        return f"{username} · {addr}" if addr else username
+
+    def _money_text(row: dict, field: str, signed: bool = False) -> str:
+        return _format_usdt_currency(_to_decimal(row.get(field)), signed=signed)
+
+    def _int_text(row: dict, field: str) -> str:
+        return _format_number(_parse_int(row.get(field)) or 0)
+
+    def _rank_text(row: dict, field: str) -> str:
+        val = _parse_int(row.get(field))
+        return str(val) if (val is not None and val > 0) else "-"
+
+    def _fallback_top(metric_field: str, *, numeric_type: str) -> list[dict]:
+        rows: list[dict] = []
+        for w in wallets:
+            if isinstance(w, dict):
+                rows.append(w)
+        if numeric_type == "int":
+            rows.sort(
+                key=lambda x: (_parse_int(x.get(metric_field)) or 0, str(x.get("address") or "").lower()),
+                reverse=True,
+            )
+        else:
+            rows.sort(
+                key=lambda x: (_to_decimal(x.get(metric_field)), str(x.get("address") or "").lower()),
+                reverse=True,
+            )
+        return rows[:10]
+
+    sections = [
+        ("volume", "交易量", "trade_volume_usdt", "volume_rank", "money"),
+        ("total_spent", "總花費", "total_spent_usdt", "total_spent_rank", "money"),
+        ("holdings", "持有價值", "holdings_value_usdt", "holdings_rank", "money"),
+        ("pnl", "總盈虧", "total_pnl_usdt", "pnl_rank", "money_signed"),
+        ("participation_days", "參與天數", "participation_days_count", "participation_days_rank", "int"),
+        ("sbt", "SBT", "sbt_owned_total", "sbt_rank", "int"),
+    ]
+
+    lines: list[str] = []
+    for top_key, title, value_field, rank_field, value_type in sections:
+        top_rows_raw = top_map.get(top_key) if isinstance(top_map, dict) else None
+        if isinstance(top_rows_raw, list) and top_rows_raw:
+            rows = [x for x in top_rows_raw if isinstance(x, dict)][:10]
+        else:
+            rows = _fallback_top(value_field, numeric_type=("int" if value_type == "int" else "decimal"))
+
+        lines.append(f"**{title} Top 10**")
+        if not rows:
+            lines.append("無資料")
+            lines.append("")
+            continue
+
+        for idx, row in enumerate(rows, start=1):
+            if value_type == "money":
+                value_txt = _money_text(row, value_field, signed=False)
+            elif value_type == "money_signed":
+                value_txt = _money_text(row, value_field, signed=True)
+            else:
+                value_txt = _int_text(row, value_field)
+            lines.append(f"{idx}. `{_rank_text(row, rank_field)}` {_label(row)} | {value_txt}")
+        lines.append("")
+
+    updated_at = "-"
+    meta = payload.get("meta")
+    if isinstance(meta, dict):
+        updated_at = str(meta.get("updated_at") or "-")
+    lines.append(f"Updated: `{updated_at}`")
+
+    text = "\n".join(lines).strip()
+    if len(text) > 1900:
+        text = text[:1890] + "\n...(truncated)"
+    await interaction.response.send_message(text, ephemeral=False)
 
 
 @tree.command(name="clear_stale_commands", description="[Owner] 清除所有全域斜線指令並重置 (建議改用 !sync)")

@@ -362,6 +362,7 @@ class WalletRecord:
     sbt_owned_total: int = 0
     sbt_owned_badge_count: int = 0
     volume_rank: int | None = None
+    total_spent_rank: int | None = None
     holdings_rank: int | None = None
     pnl_rank: int | None = None
     participation_days_rank: int | None = None
@@ -677,6 +678,11 @@ def _from_wallet_row(row: dict[str, Any]) -> WalletRecord | None:
         participation_days_count=int(_to_decimal(row.get("participation_days_count"))),
         sbt_owned_total=int(_to_decimal(row.get("sbt_owned_total"))),
         sbt_owned_badge_count=int(_to_decimal(row.get("sbt_owned_badge_count"))),
+        total_spent_rank=(
+            int(_to_decimal(row.get("total_spent_rank")))
+            if str(row.get("total_spent_rank") or "").strip()
+            else None
+        ),
     )
     return rec
 
@@ -1132,12 +1138,14 @@ def build_payload(
     holders_file: Path | None,
 ) -> dict[str, Any]:
     assign_rank(records, lambda r: r.trade_volume_usdt, "volume_rank")
+    assign_rank(records, lambda r: r.total_spent_usdt, "total_spent_rank")
     assign_rank(records, lambda r: r.holdings_value_usdt, "holdings_rank")
     assign_rank(records, lambda r: r.total_pnl_usdt, "pnl_rank")
     assign_rank(records, lambda r: r.participation_days_count, "participation_days_rank")
     assign_rank(records, lambda r: r.sbt_owned_total, "sbt_rank")
 
     by_volume = sorted(records, key=lambda x: (x.trade_volume_usdt, x.address), reverse=True)
+    by_total_spent = sorted(records, key=lambda x: (x.total_spent_usdt, x.address), reverse=True)
     by_holdings = sorted(records, key=lambda x: (x.holdings_value_usdt, x.address), reverse=True)
     by_pnl = sorted(records, key=lambda x: (x.total_pnl_usdt, x.address), reverse=True)
     by_participation = sorted(records, key=lambda x: (x.participation_days_count, x.address), reverse=True)
@@ -1163,6 +1171,7 @@ def build_payload(
             "sbt_owned_total": rec.sbt_owned_total,
             "sbt_owned_badge_count": rec.sbt_owned_badge_count,
             "volume_rank": rec.volume_rank,
+            "total_spent_rank": rec.total_spent_rank,
             "holdings_rank": rec.holdings_rank,
             "pnl_rank": rec.pnl_rank,
             "participation_days_rank": rec.participation_days_rank,
@@ -1188,6 +1197,7 @@ def build_payload(
         },
         "top": {
             "volume": [to_wallet_dict(x) for x in by_volume[:100]],
+            "total_spent": [to_wallet_dict(x) for x in by_total_spent[:100]],
             "holdings": [to_wallet_dict(x) for x in by_holdings[:100]],
             "pnl": [to_wallet_dict(x) for x in by_pnl[:100]],
             "participation_days": [to_wallet_dict(x) for x in by_participation[:100]],

@@ -769,7 +769,10 @@
         <div class="stat-value usdt metal-red">{{ metric_market_buy_value }}</div>
       </div>
       <div class="glass-card stat-card">
-        <div class="stat-label">{{ metric_total_spent_label }}</div>
+        <div class="stat-label-row">
+          <div class="stat-label">{{ metric_total_spent_label }}</div>
+          <div class="rank-chip rank-{{ metric_total_spent_rank_tier }}">{{ metric_total_spent_rank }}</div>
+        </div>
         <div class="stat-note">({{ metric_total_spent_note }})</div>
         <div class="stat-value usdt metal-red">{{ metric_total_spent_value }}</div>
       </div>
