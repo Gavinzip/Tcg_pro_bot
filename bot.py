@@ -172,10 +172,7 @@ _USER_SETTINGS_CACHE: dict[str, object] = {
 
 
 def _user_settings_dir() -> str:
-    app_env = str(os.getenv("APP_ENV", "local")).strip().lower() or "local"
-    if app_env == "server":
-        return str(os.getenv("SYNC_DATA_DIR", "/data/renaiss_sync")).strip() or "/data/renaiss_sync"
-    return str(os.getenv("SYNC_DATA_DIR", "/Users/gavin/renaiss_project/renaiss_sync_data")).strip() or "/Users/gavin/renaiss_project/renaiss_sync_data"
+    return str(os.getenv("SYNC_DATA_DIR", "/data/renaiss_sync")).strip() or "/data/renaiss_sync"
 
 
 def _user_settings_path() -> str:
