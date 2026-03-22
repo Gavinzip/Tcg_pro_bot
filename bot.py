@@ -6756,6 +6756,28 @@ async def market_bootstrap(
     )
 
 
+@tree.command(name="market_push_backup", description="僅推送 market/ranking 快取到資料 Git（不重掃 market）")
+async def market_push_backup(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "⏳ 正在執行 market/ranking 備份推送（push-only）...",
+        ephemeral=True,
+    )
+    backup_ok = await _run_ranking_sync_script(
+        "market_manual_push",
+        bootstrap_only=False,
+        full_rebuild=False,
+        push_only=True,
+    )
+    await interaction.followup.send(
+        (
+            "✅ market/ranking 備份推送完成。"
+            if backup_ok
+            else "⚠️ 備份推送失敗，請檢查 BACKUP_GIT_ENABLED / BACKUP_GIT_REPO 與伺服器網路。"
+        ),
+        ephemeral=True,
+    )
+
+
 @tree.command(name="settings", description="設定你的預設錢包地址")
 @app_commands.describe(wallet="錢包地址（0x 開頭），留空則顯示目前設定")
 async def settings(interaction: discord.Interaction, wallet: str = None):
