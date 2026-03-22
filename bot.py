@@ -5266,7 +5266,12 @@ async def _before_nft_daily_sync_job():
     await client.wait_until_ready()
 
 
-async def _run_ranking_sync_script(trigger: str, bootstrap_only: bool = False, full_rebuild: bool = False) -> bool:
+async def _run_ranking_sync_script(
+    trigger: str,
+    bootstrap_only: bool = False,
+    full_rebuild: bool = False,
+    push_only: bool = False,
+) -> bool:
     if not RANK_SYNC_ENABLE:
         return True
     if not os.path.exists(RANK_SYNC_SCRIPT_PATH):
@@ -5278,10 +5283,13 @@ async def _run_ranking_sync_script(trigger: str, bootstrap_only: bool = False, f
         cmd.append("--bootstrap-only")
     if full_rebuild:
         cmd.append("--full-rebuild")
+    if push_only:
+        cmd.append("--push-only")
 
     print(
         "🕒 Ranking sync start "
-        f"trigger={trigger} bootstrap_only={1 if bootstrap_only else 0} full_rebuild={1 if full_rebuild else 0}"
+        f"trigger={trigger} bootstrap_only={1 if bootstrap_only else 0} "
+        f"full_rebuild={1 if full_rebuild else 0} push_only={1 if push_only else 0}"
     )
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -6673,7 +6681,12 @@ async def market_bootstrap(
             "⏳ 依你的要求，正在直接觸發一次備份推送...",
             ephemeral=True,
         )
-        backup_ok = await _run_ranking_sync_script("market_bootstrap_push", bootstrap_only=False, full_rebuild=True)
+        backup_ok = await _run_ranking_sync_script(
+            "market_bootstrap_push",
+            bootstrap_only=False,
+            full_rebuild=False,
+            push_only=True,
+        )
         await interaction.followup.send(
             (
                 "✅ 備份推送流程已完成（請到資料 repo 檢查最新 commit）。"
@@ -6727,7 +6740,12 @@ async def market_bootstrap(
         return
 
     await interaction.followup.send(summary_msg + "\n⏳ 正在觸發備份推送...", ephemeral=True)
-    backup_ok = await _run_ranking_sync_script("market_bootstrap", bootstrap_only=False, full_rebuild=True)
+    backup_ok = await _run_ranking_sync_script(
+        "market_bootstrap",
+        bootstrap_only=False,
+        full_rebuild=False,
+        push_only=True,
+    )
     await interaction.followup.send(
         (
             "✅ 備份推送流程已完成（請到資料 repo 檢查最新 commit）。"

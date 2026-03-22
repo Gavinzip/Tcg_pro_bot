@@ -621,6 +621,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Incremental ranking sync with startup bootstrap and git backup")
     parser.add_argument("--trigger", default="manual")
     parser.add_argument("--bootstrap-only", action="store_true")
+    parser.add_argument("--push-only", action="store_true", help="Skip sync and only push current rankings/market_cache to backup git")
     parser.add_argument("--full-rebuild", action="store_true")
     parser.add_argument("--data-dir", default=os.getenv("RANKING_DATA_DIR", ""))
     parser.add_argument("--workers", type=int, default=max(2, int(os.getenv("RANKING_WORKERS", "8"))))
@@ -783,7 +784,8 @@ def git_push_rankings(cfg: RankingConfig, now_dt: datetime, commit_message: str)
     (dataset_dir / "state").mkdir(parents=True, exist_ok=True)
 
     history_path = cfg.history_path(now_dt)
-    shutil.copy2(cfg.latest_path, dataset_dir / "latest.json")
+    if cfg.latest_path.exists():
+        shutil.copy2(cfg.latest_path, dataset_dir / "latest.json")
     if history_path.exists():
         shutil.copy2(history_path, dataset_dir / "history" / history_path.name)
     if cfg.state_path.exists():
@@ -1889,6 +1891,35 @@ def main() -> int:
             extra={
                 "bootstrap_only": True,
                 "bootstrapped": bootstrapped,
+                "latest_path": str(cfg.latest_path),
+            },
+        )
+        send_webhook(cfg, msg, success=True)
+        return 0
+
+    if args.push_only:
+        commit_hash = "git-disabled"
+        backup_status = "not_attempted"
+        if cfg.backup_git_enabled:
+            commit_message = (
+                f"ranking push-only {datetime.now(tz=cfg.tzinfo).strftime('%Y-%m-%d %H:%M:%S')} "
+                f"trigger={cfg.trigger}"
+            )
+            commit_hash = git_push_rankings(cfg, now_dt=datetime.now(tz=cfg.tzinfo), commit_message=commit_message)
+            backup_status = "pushed" if commit_hash not in ("no-change", "git-disabled", "") else "no-change"
+        msg = (
+            f"trigger={cfg.trigger} push_only=1 backup_status={backup_status} commit={commit_hash} "
+            f"latest={cfg.latest_path}"
+        )
+        print(f"[OK] {msg}")
+        write_status(
+            cfg,
+            success=True,
+            message=msg,
+            extra={
+                "push_only": True,
+                "backup_status": backup_status,
+                "commit": commit_hash,
                 "latest_path": str(cfg.latest_path),
             },
         )
