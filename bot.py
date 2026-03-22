@@ -4164,6 +4164,55 @@ def _market_save_bootstrap_state(payload: dict[str, object]) -> None:
         pass
 
 
+def _market_load_cached_index(limit: int | None = MARKET_RECENT_LIMIT) -> tuple[list[dict], dict]:
+    path = _market_index_path()
+    if not os.path.exists(path):
+        return [], {
+            "from_cache": False,
+            "cache_path": path,
+            "error": f"market cache 不存在：{path}",
+        }
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as e:
+        return [], {
+            "from_cache": False,
+            "cache_path": path,
+            "error": f"market cache 讀取失敗：{e}",
+        }
+    if not isinstance(payload, dict):
+        return [], {
+            "from_cache": False,
+            "cache_path": path,
+            "error": "market cache 格式錯誤",
+        }
+
+    items_raw = payload.get("items")
+    items = [x for x in items_raw if isinstance(x, dict)] if isinstance(items_raw, list) else []
+    items.sort(key=lambda item: int(item.get("created_at_ts") or 0), reverse=True)
+    if isinstance(limit, int) and limit > 0:
+        items = items[:limit]
+        limit_meta: int | str = int(limit)
+    else:
+        limit_meta = "all"
+
+    meta = {
+        "from_cache": True,
+        "cache_path": path,
+        "source_channel_id": int(_parse_int(payload.get("source_channel_id")) or MARKET_SOURCE_CHANNEL_ID),
+        "active_thread_count": int(_parse_int(payload.get("active_thread_count")) or 0),
+        "scanned_thread_count": int(_parse_int(payload.get("scanned_thread_count")) or 0),
+        "listing_count": len(items),
+        "include_archived": bool(payload.get("include_archived")),
+        "recent_limit": limit_meta,
+        "index_path": path,
+        "images_dir": _market_cache_images_dir(),
+        "updated_at": str(payload.get("updated_at") or ""),
+    }
+    return items, meta
+
+
 async def _market_collect_source_threads(
     channel: discord.TextChannel | discord.ForumChannel,
     guild: discord.Guild,
@@ -4361,22 +4410,29 @@ async def _market_collect_listings(
     limit: int | None = MARKET_RECENT_LIMIT,
     archived_limit: int | None = MARKET_BOOTSTRAP_ARCHIVED_LIMIT,
 ) -> tuple[list[dict], dict]:
+    def _fallback(error_message: str) -> tuple[list[dict], dict]:
+        cached_items, cached_meta = _market_load_cached_index(limit=limit)
+        fallback_meta = dict(cached_meta or {})
+        fallback_meta["error"] = error_message
+        fallback_meta["used_cache_fallback"] = bool(fallback_meta.get("from_cache"))
+        return cached_items, fallback_meta
+
     if MARKET_SOURCE_CHANNEL_ID <= 0:
-        return [], {"error": "MARKET_SOURCE_CHANNEL_ID 未設定。"}
+        return _fallback("MARKET_SOURCE_CHANNEL_ID 未設定。")
 
     channel = client.get_channel(MARKET_SOURCE_CHANNEL_ID)
     if channel is None:
         try:
             channel = await client.fetch_channel(MARKET_SOURCE_CHANNEL_ID)
         except Exception as e:
-            return [], {"error": f"無法取得來源頻道：{e}"}
+            return _fallback(f"無法取得來源頻道：{e}")
 
     if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
-        return [], {"error": f"來源頻道型別不支援：{type(channel).__name__}"}
+        return _fallback(f"來源頻道型別不支援：{type(channel).__name__}")
 
     guild = channel.guild
     if guild is None:
-        return [], {"error": "來源頻道不在 guild 中。"}
+        return _fallback("來源頻道不在 guild 中。")
 
     try:
         source_threads = await _market_collect_source_threads(
@@ -4386,7 +4442,7 @@ async def _market_collect_listings(
             archived_limit=archived_limit,
         )
     except Exception as e:
-        return [], {"error": f"無法讀取來源討論串：{e}"}
+        return _fallback(f"無法讀取來源討論串：{e}")
 
     listings: list[dict] = []
     image_cache_tasks: list[asyncio.Task] = []
@@ -6647,7 +6703,16 @@ async def market(interaction: discord.Interaction):
             pass
 
     if error:
-        await thread.send(f"⚠️ 讀取 market 來源時發生問題：`{error}`")
+        if bool(meta.get("used_cache_fallback")):
+            updated_at = str(meta.get("updated_at") or "").strip() or "-"
+            await thread.send(
+                "⚠️ 讀取 market 來源失敗，已改用本地快取。\n"
+                f"Error: `{error}`\n"
+                f"Cache Updated: `{updated_at}`\n"
+                f"Cache Path: `{meta.get('index_path') or _market_index_path()}`"
+            )
+        else:
+            await thread.send(f"⚠️ 讀取 market 來源時發生問題：`{error}`")
 
     view = MarketBrowserView(interaction.user.id, listings, meta=meta)
     panel_msg = await thread.send(view.render_message(), view=view)
