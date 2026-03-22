@@ -127,7 +127,6 @@ MARKET_RECENT_LIMIT = 50
 MARKET_SCAN_MESSAGES_PER_THREAD = 25
 MARKET_CACHE_IMAGES = True
 MARKET_BOOTSTRAP_ARCHIVED_LIMIT = 2000
-MARKET_BOOTSTRAP_INDEX_LIMIT = 500
 
 
 def _safe_tzinfo(name: str):
@@ -4170,6 +4169,7 @@ async def _market_collect_source_threads(
     guild: discord.Guild,
     *,
     include_archived: bool = False,
+    archived_limit: int | None = MARKET_BOOTSTRAP_ARCHIVED_LIMIT,
 ) -> list[discord.Thread]:
     thread_map: dict[int, discord.Thread] = {}
 
@@ -4192,7 +4192,7 @@ async def _market_collect_source_threads(
                     continue
                 thread_map[int(t.id)] = t
                 archived_count += 1
-                if archived_count >= MARKET_BOOTSTRAP_ARCHIVED_LIMIT:
+                if isinstance(archived_limit, int) and archived_limit > 0 and archived_count >= archived_limit:
                     break
         except Exception:
             pass
@@ -4358,7 +4358,8 @@ async def _market_find_fallback_image(thread: discord.Thread) -> str:
 async def _market_collect_listings(
     *,
     include_archived: bool = False,
-    limit: int | None = None,
+    limit: int | None = MARKET_RECENT_LIMIT,
+    archived_limit: int | None = MARKET_BOOTSTRAP_ARCHIVED_LIMIT,
 ) -> tuple[list[dict], dict]:
     if MARKET_SOURCE_CHANNEL_ID <= 0:
         return [], {"error": "MARKET_SOURCE_CHANNEL_ID 未設定。"}
@@ -4382,6 +4383,7 @@ async def _market_collect_listings(
             channel,
             guild,
             include_archived=include_archived,
+            archived_limit=archived_limit,
         )
     except Exception as e:
         return [], {"error": f"無法讀取來源討論串：{e}"}
@@ -4400,8 +4402,11 @@ async def _market_collect_listings(
             image_cache_tasks.append(asyncio.create_task(_market_cache_image_async(image_url, cache_path)))
 
     listings.sort(key=lambda item: int(item.get("created_at_ts") or 0), reverse=True)
-    final_limit = int(limit) if isinstance(limit, int) and limit > 0 else MARKET_RECENT_LIMIT
-    listings = listings[:final_limit]
+    if isinstance(limit, int) and limit > 0:
+        listings = listings[:limit]
+        limit_meta: int | str = int(limit)
+    else:
+        limit_meta = "all"
 
     market_index_path = _market_index_path()
     try:
@@ -4412,7 +4417,7 @@ async def _market_collect_listings(
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "source_channel_id": int(channel.id),
                     "summary_bot_id": int(MARKET_SUMMARY_BOT_ID),
-                    "recent_limit": int(final_limit),
+                    "recent_limit": limit_meta,
                     "include_archived": bool(include_archived),
                     "scanned_thread_count": len(source_threads),
                     "listing_count": len(listings),
@@ -4437,6 +4442,7 @@ async def _market_collect_listings(
         "active_thread_count": len([t for t in source_threads if not bool(getattr(t, "archived", False))]),
         "scanned_thread_count": len(source_threads),
         "listing_count": len(listings),
+        "recent_limit": limit_meta,
         "include_archived": bool(include_archived),
         "index_path": market_index_path,
         "images_dir": _market_cache_images_dir(),
@@ -6650,7 +6656,7 @@ async def market(interaction: discord.Interaction):
 
 @tree.command(name="market_bootstrap", description="一次性全頻道掃描 market thread（含封存）")
 @app_commands.describe(
-    force="強制重跑（預設 false：已完成就跳過）",
+    force="保留參數（目前每次都會完整重掃，可忽略）",
     push_backup="完成後是否立即觸發一次備份推送到資料 Git（預設 true）",
 )
 async def market_bootstrap(
@@ -6658,53 +6664,15 @@ async def market_bootstrap(
     force: bool = False,
     push_backup: bool = True,
 ):
-    state = _market_load_bootstrap_state()
-    done = bool(state.get("done"))
-    if done and not force:
-        completed_at = str(state.get("completed_at") or "-")
-        matched = int(_parse_int(state.get("listing_count")) or 0)
-        scanned = int(_parse_int(state.get("scanned_thread_count")) or 0)
-        if not push_backup:
-            await interaction.response.send_message(
-                "✅ `market_bootstrap` 已完成過，這次不會重掃。\n"
-                f"Completed: `{completed_at}`\n"
-                f"Scanned Threads: `{scanned}`\n"
-                f"Matched Listings: `{matched}`\n"
-                f"Index: `{_market_index_path()}`\n"
-                "如要重跑請改用：`/market_bootstrap force:true`",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message(
-            "✅ `market_bootstrap` 已完成過，這次不重掃。\n"
-            "⏳ 依你的要求，正在直接觸發一次備份推送...",
-            ephemeral=True,
-        )
-        backup_ok = await _run_ranking_sync_script(
-            "market_bootstrap_push",
-            bootstrap_only=False,
-            full_rebuild=False,
-            push_only=True,
-        )
-        await interaction.followup.send(
-            (
-                "✅ 備份推送流程已完成（請到資料 repo 檢查最新 commit）。"
-                if backup_ok
-                else "⚠️ 備份推送失敗，請檢查 BACKUP_GIT_ENABLED / BACKUP_GIT_REPO 與伺服器網路。"
-            ),
-            ephemeral=True,
-        )
-        return
-
     await interaction.response.send_message(
-        "⏳ 正在執行一次性 market 全掃（含封存討論串），完成後會回報索引路徑...",
+        "⏳ 正在執行 market 全掃（每次都完整重掃，含封存討論串），完成後會回報索引路徑...",
         ephemeral=True,
     )
     started_at = datetime.now(timezone.utc)
     listings, meta = await _market_collect_listings(
         include_archived=True,
-        limit=MARKET_BOOTSTRAP_INDEX_LIMIT,
+        limit=None,
+        archived_limit=None,
     )
     error = str(meta.get("error") or "").strip()
     if error:
@@ -6719,6 +6687,7 @@ async def market_bootstrap(
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "started_at": started_at.isoformat(),
         "forced": bool(force),
+        "mode": "always_rescan",
         "source_channel_id": int(meta.get("source_channel_id") or MARKET_SOURCE_CHANNEL_ID),
         "include_archived": True,
         "scanned_thread_count": int(meta.get("scanned_thread_count") or 0),
@@ -6729,7 +6698,7 @@ async def market_bootstrap(
     _market_save_bootstrap_state(state_payload)
 
     summary_msg = (
-        "✅ `market_bootstrap` 完成（後續不會自動重掃）。\n"
+        "✅ `market_bootstrap` 完成（本指令每次都會完整重掃）。\n"
         f"Scanned Threads: `{state_payload['scanned_thread_count']}`\n"
         f"Matched Listings: `{state_payload['listing_count']}`\n"
         f"Index: `{state_payload['index_path']}`\n"
