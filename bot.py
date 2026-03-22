@@ -4612,6 +4612,11 @@ async def _market_collect_listings(
     )
     if not index_write_ok:
         print(f"⚠️ market index write failed: {index_write_error}", file=sys.stderr)
+    else:
+        print(
+            "🗂️ market index written "
+            f"path={market_index_path} listings={len(listings)} updated_at={index_updated_at}"
+        )
 
     if image_cache_tasks:
         # 不阻塞 /market 互動流程，讓快取背景下載即可。
@@ -5513,7 +5518,15 @@ async def _run_ranking_sync_script(
         print(f"⚠️ Ranking sync script not found: {RANK_SYNC_SCRIPT_PATH}")
         return False
 
-    cmd = [sys.executable, RANK_SYNC_SCRIPT_PATH, "--trigger", trigger]
+    rank_data_dir = _rank_sync_data_dir()
+    cmd = [
+        sys.executable,
+        RANK_SYNC_SCRIPT_PATH,
+        "--trigger",
+        trigger,
+        "--data-dir",
+        rank_data_dir,
+    ]
     if bootstrap_only:
         cmd.append("--bootstrap-only")
     if full_rebuild:
@@ -5526,7 +5539,8 @@ async def _run_ranking_sync_script(
     print(
         "🕒 Ranking sync start "
         f"trigger={trigger} bootstrap_only={1 if bootstrap_only else 0} "
-        f"full_rebuild={1 if full_rebuild else 0} push_only={1 if push_only else 0} market_only={1 if market_only else 0}"
+        f"full_rebuild={1 if full_rebuild else 0} push_only={1 if push_only else 0} market_only={1 if market_only else 0} "
+        f"data_dir={rank_data_dir}"
     )
     proc = await asyncio.create_subprocess_exec(
         *cmd,

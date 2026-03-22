@@ -813,8 +813,7 @@ def git_push_rankings(cfg: RankingConfig, now_dt: datetime, commit_message: str)
     if status.returncode != 0:
         raise RuntimeError(f"git status failed: {status.stderr.strip() or status.stdout.strip()}")
     if not status.stdout.strip():
-        head = _run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir)
-        return head.stdout.strip() or "no-change"
+        return "no-change"
 
     commit = _run(["git", "commit", "-m", commit_message], cwd=repo_dir)
     if commit.returncode != 0:
@@ -847,8 +846,7 @@ def git_push_market_cache(cfg: RankingConfig, commit_message: str) -> str:
     if status.returncode != 0:
         raise RuntimeError(f"git status failed: {status.stderr.strip() or status.stdout.strip()}")
     if not status.stdout.strip():
-        head = _run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir)
-        return head.stdout.strip() or "no-change"
+        return "no-change"
 
     commit = _run(["git", "commit", "-m", commit_message], cwd=repo_dir)
     if commit.returncode != 0:
@@ -1950,10 +1948,15 @@ def main() -> int:
                 )
                 commit_hash = git_push_rankings(cfg, now_dt=now_dt, commit_message=commit_message)
             backup_status = "pushed" if commit_hash not in ("no-change", "git-disabled", "") else "no-change"
+        latest_field = (
+            f"market_index={cfg.market_cache_dir / 'market_index.json'}"
+            if args.market_only
+            else f"latest={cfg.latest_path}"
+        )
         msg = (
             f"trigger={cfg.trigger} push_only=1 market_only={1 if args.market_only else 0} "
             f"backup_status={backup_status} commit={commit_hash} "
-            f"latest={cfg.latest_path}"
+            f"{latest_field}"
         )
         print(f"[OK] {msg}")
         write_status(
@@ -1966,6 +1969,7 @@ def main() -> int:
                 "backup_status": backup_status,
                 "commit": commit_hash,
                 "latest_path": str(cfg.latest_path),
+                "market_index_path": str(cfg.market_cache_dir / "market_index.json"),
             },
         )
         send_webhook(cfg, msg, success=True)
