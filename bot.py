@@ -131,6 +131,10 @@ MARKET_LIVE_SYNC_ON_EVENT = True
 MARKET_LIVE_SYNC_DEBOUNCE_SEC = 8.0
 MARKET_LIVE_SYNC_LOCK: asyncio.Lock | None = None
 MARKET_LIVE_SYNC_LAST_TS = 0.0
+MARKET_AUTO_PUSH_ON_NEW = True
+MARKET_AUTO_PUSH_COOLDOWN_SEC = 45.0
+MARKET_AUTO_PUSH_LOCK: asyncio.Lock | None = None
+MARKET_AUTO_PUSH_LAST_TS = 0.0
 
 
 def _safe_tzinfo(name: str):
@@ -4624,16 +4628,30 @@ async def _market_live_sync_refresh(reason: str, force: bool = False) -> bool:
         now2 = time.time()
         if (not force) and (now2 - MARKET_LIVE_SYNC_LAST_TS < MARKET_LIVE_SYNC_DEBOUNCE_SEC):
             return False
+        before_items, _before_meta = _market_load_cached_index(limit=None)
+        before_keys = {
+            str(it.get("key") or "").strip()
+            for it in list(before_items or [])
+            if str(it.get("key") or "").strip()
+        }
         listings, meta = await _market_collect_listings()
         MARKET_LIVE_SYNC_LAST_TS = time.time()
         err = str(meta.get("error") or "").strip()
         if err:
             print(f"⚠️ market live sync failed reason={reason} error={err}")
             return False
+        after_keys = {
+            str(it.get("key") or "").strip()
+            for it in list(listings or [])
+            if str(it.get("key") or "").strip()
+        }
+        new_keys = after_keys - before_keys
         print(
             "✅ market live sync "
             f"reason={reason} listings={len(listings)} active_threads={int(meta.get('active_thread_count') or 0)}"
         )
+        if new_keys:
+            asyncio.create_task(_market_auto_push_market_cache(reason=f"{reason}:new={len(new_keys)}"))
         return True
 
 
@@ -5465,6 +5483,7 @@ async def _run_ranking_sync_script(
     bootstrap_only: bool = False,
     full_rebuild: bool = False,
     push_only: bool = False,
+    market_only: bool = False,
 ) -> bool:
     if not RANK_SYNC_ENABLE:
         return True
@@ -5479,11 +5498,13 @@ async def _run_ranking_sync_script(
         cmd.append("--full-rebuild")
     if push_only:
         cmd.append("--push-only")
+    if market_only:
+        cmd.append("--market-only")
 
     print(
         "🕒 Ranking sync start "
         f"trigger={trigger} bootstrap_only={1 if bootstrap_only else 0} "
-        f"full_rebuild={1 if full_rebuild else 0} push_only={1 if push_only else 0}"
+        f"full_rebuild={1 if full_rebuild else 0} push_only={1 if push_only else 0} market_only={1 if market_only else 0}"
     )
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -5503,6 +5524,37 @@ async def _run_ranking_sync_script(
         return False
     print(f"✅ Ranking sync done trigger={trigger}")
     return True
+
+
+async def _market_auto_push_market_cache(reason: str, force: bool = False) -> bool:
+    if not MARKET_AUTO_PUSH_ON_NEW:
+        return False
+    global MARKET_AUTO_PUSH_LOCK, MARKET_AUTO_PUSH_LAST_TS
+    if MARKET_AUTO_PUSH_LOCK is None:
+        MARKET_AUTO_PUSH_LOCK = asyncio.Lock()
+    now = time.time()
+    if (not force) and (now - MARKET_AUTO_PUSH_LAST_TS < MARKET_AUTO_PUSH_COOLDOWN_SEC):
+        return False
+    if MARKET_AUTO_PUSH_LOCK.locked() and not force:
+        return False
+
+    async with MARKET_AUTO_PUSH_LOCK:
+        now2 = time.time()
+        if (not force) and (now2 - MARKET_AUTO_PUSH_LAST_TS < MARKET_AUTO_PUSH_COOLDOWN_SEC):
+            return False
+        ok = await _run_ranking_sync_script(
+            "market_auto_push",
+            bootstrap_only=False,
+            full_rebuild=False,
+            push_only=True,
+            market_only=True,
+        )
+        MARKET_AUTO_PUSH_LAST_TS = time.time()
+        if ok:
+            print(f"✅ market auto push done reason={reason}")
+        else:
+            print(f"⚠️ market auto push failed reason={reason}")
+        return ok
 
 
 @tasks.loop(time=RANK_SYNC_RUN_TIME)
@@ -7075,6 +7127,7 @@ async def market_bootstrap(
         bootstrap_only=False,
         full_rebuild=False,
         push_only=True,
+        market_only=True,
     )
     await interaction.followup.send(
         (
@@ -7086,10 +7139,10 @@ async def market_bootstrap(
     )
 
 
-@tree.command(name="market_push_backup", description="僅推送 market/ranking 快取到資料 Git（不重掃 market）")
+@tree.command(name="market_push_backup", description="僅推送 market 快取到資料 Git（不重掃 market）")
 async def market_push_backup(interaction: discord.Interaction):
     await interaction.response.send_message(
-        "⏳ 正在執行 market/ranking 備份推送（push-only）...",
+        "⏳ 正在執行 market 備份推送（push-only）...",
         ephemeral=True,
     )
     backup_ok = await _run_ranking_sync_script(
@@ -7097,10 +7150,11 @@ async def market_push_backup(interaction: discord.Interaction):
         bootstrap_only=False,
         full_rebuild=False,
         push_only=True,
+        market_only=True,
     )
     await interaction.followup.send(
         (
-            "✅ market/ranking 備份推送完成。"
+            "✅ market 備份推送完成。"
             if backup_ok
             else "⚠️ 備份推送失敗，請檢查 BACKUP_GIT_ENABLED / BACKUP_GIT_REPO 與伺服器網路。"
         ),

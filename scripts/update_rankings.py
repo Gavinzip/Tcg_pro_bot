@@ -622,6 +622,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trigger", default="manual")
     parser.add_argument("--bootstrap-only", action="store_true")
     parser.add_argument("--push-only", action="store_true", help="Skip sync and only push current rankings/market_cache to backup git")
+    parser.add_argument("--market-only", action="store_true", help="With --push-only, push only market_cache to backup git")
     parser.add_argument("--full-rebuild", action="store_true")
     parser.add_argument("--data-dir", default=os.getenv("RANKING_DATA_DIR", ""))
     parser.add_argument("--workers", type=int, default=max(2, int(os.getenv("RANKING_WORKERS", "8"))))
@@ -808,6 +809,40 @@ def git_push_rankings(cfg: RankingConfig, now_dt: datetime, commit_message: str)
     _run(["git", "add", "-A", "rankings"], cwd=repo_dir)
     if cfg.market_cache_dir.exists() or had_repo_market_cache:
         _run(["git", "add", "-A", "market_cache"], cwd=repo_dir)
+    status = _run(["git", "status", "--porcelain"], cwd=repo_dir)
+    if status.returncode != 0:
+        raise RuntimeError(f"git status failed: {status.stderr.strip() or status.stdout.strip()}")
+    if not status.stdout.strip():
+        head = _run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir)
+        return head.stdout.strip() or "no-change"
+
+    commit = _run(["git", "commit", "-m", commit_message], cwd=repo_dir)
+    if commit.returncode != 0:
+        raise RuntimeError(f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()}")
+    push = _run(["git", "push", "origin", cfg.backup_git_branch], cwd=repo_dir)
+    if push.returncode != 0:
+        raise RuntimeError(f"git push failed: {push.stderr.strip() or push.stdout.strip()}")
+    head = _run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir)
+    return head.stdout.strip() or "unknown"
+
+
+def git_push_market_cache(cfg: RankingConfig, commit_message: str) -> str:
+    if cfg.test_mode:
+        return "test-mode-skip-push"
+    repo_dir = ensure_repo(cfg)
+    git_pull(cfg, repo_dir)
+
+    had_repo_market_cache = cfg.repo_market_cache_dir.exists()
+    if cfg.market_cache_dir.exists():
+        if cfg.repo_market_cache_dir.exists():
+            shutil.rmtree(cfg.repo_market_cache_dir, ignore_errors=True)
+        shutil.copytree(cfg.market_cache_dir, cfg.repo_market_cache_dir)
+    elif had_repo_market_cache:
+        shutil.rmtree(cfg.repo_market_cache_dir, ignore_errors=True)
+
+    _run(["git", "config", "user.name", os.getenv("BACKUP_GIT_USER_NAME", "tcg-pro-bot")], cwd=repo_dir)
+    _run(["git", "config", "user.email", os.getenv("BACKUP_GIT_USER_EMAIL", "tcg-pro-bot@example.com")], cwd=repo_dir)
+    _run(["git", "add", "-A", "market_cache"], cwd=repo_dir)
     status = _run(["git", "status", "--porcelain"], cwd=repo_dir)
     if status.returncode != 0:
         raise RuntimeError(f"git status failed: {status.stderr.strip() or status.stdout.strip()}")
@@ -1901,14 +1936,23 @@ def main() -> int:
         commit_hash = "git-disabled"
         backup_status = "not_attempted"
         if cfg.backup_git_enabled:
-            commit_message = (
-                f"ranking push-only {datetime.now(tz=cfg.tzinfo).strftime('%Y-%m-%d %H:%M:%S')} "
-                f"trigger={cfg.trigger}"
-            )
-            commit_hash = git_push_rankings(cfg, now_dt=datetime.now(tz=cfg.tzinfo), commit_message=commit_message)
+            now_dt = datetime.now(tz=cfg.tzinfo)
+            if args.market_only:
+                commit_message = (
+                    f"market push-only {now_dt.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"trigger={cfg.trigger}"
+                )
+                commit_hash = git_push_market_cache(cfg, commit_message=commit_message)
+            else:
+                commit_message = (
+                    f"ranking push-only {now_dt.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"trigger={cfg.trigger}"
+                )
+                commit_hash = git_push_rankings(cfg, now_dt=now_dt, commit_message=commit_message)
             backup_status = "pushed" if commit_hash not in ("no-change", "git-disabled", "") else "no-change"
         msg = (
-            f"trigger={cfg.trigger} push_only=1 backup_status={backup_status} commit={commit_hash} "
+            f"trigger={cfg.trigger} push_only=1 market_only={1 if args.market_only else 0} "
+            f"backup_status={backup_status} commit={commit_hash} "
             f"latest={cfg.latest_path}"
         )
         print(f"[OK] {msg}")
@@ -1918,6 +1962,7 @@ def main() -> int:
             message=msg,
             extra={
                 "push_only": True,
+                "market_only": bool(args.market_only),
                 "backup_status": backup_status,
                 "commit": commit_hash,
                 "latest_path": str(cfg.latest_path),
