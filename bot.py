@@ -6641,21 +6641,45 @@ async def market(interaction: discord.Interaction):
 
 
 @tree.command(name="market_bootstrap", description="一次性全頻道掃描 market thread（含封存）")
-@app_commands.describe(force="強制重跑（預設 false：已完成就跳過）")
-async def market_bootstrap(interaction: discord.Interaction, force: bool = False):
+@app_commands.describe(
+    force="強制重跑（預設 false：已完成就跳過）",
+    push_backup="完成後是否立即觸發一次備份推送到資料 Git（預設 true）",
+)
+async def market_bootstrap(
+    interaction: discord.Interaction,
+    force: bool = False,
+    push_backup: bool = True,
+):
     state = _market_load_bootstrap_state()
     done = bool(state.get("done"))
     if done and not force:
         completed_at = str(state.get("completed_at") or "-")
         matched = int(_parse_int(state.get("listing_count")) or 0)
         scanned = int(_parse_int(state.get("scanned_thread_count")) or 0)
+        if not push_backup:
+            await interaction.response.send_message(
+                "✅ `market_bootstrap` 已完成過，這次不會重掃。\n"
+                f"Completed: `{completed_at}`\n"
+                f"Scanned Threads: `{scanned}`\n"
+                f"Matched Listings: `{matched}`\n"
+                f"Index: `{_market_index_path()}`\n"
+                "如要重跑請改用：`/market_bootstrap force:true`",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.send_message(
-            "✅ `market_bootstrap` 已完成過，這次不會重掃。\n"
-            f"Completed: `{completed_at}`\n"
-            f"Scanned Threads: `{scanned}`\n"
-            f"Matched Listings: `{matched}`\n"
-            f"Index: `{_market_index_path()}`\n"
-            "如要重跑請改用：`/market_bootstrap force:true`",
+            "✅ `market_bootstrap` 已完成過，這次不重掃。\n"
+            "⏳ 依你的要求，正在直接觸發一次備份推送...",
+            ephemeral=True,
+        )
+        backup_ok = await _run_ranking_sync_script("market_bootstrap_push", bootstrap_only=False, full_rebuild=True)
+        await interaction.followup.send(
+            (
+                "✅ 備份推送流程已完成（請到資料 repo 檢查最新 commit）。"
+                if backup_ok
+                else "⚠️ 備份推送失敗，請檢查 BACKUP_GIT_ENABLED / BACKUP_GIT_REPO 與伺服器網路。"
+            ),
             ephemeral=True,
         )
         return
@@ -6691,12 +6715,25 @@ async def market_bootstrap(interaction: discord.Interaction, force: bool = False
     }
     _market_save_bootstrap_state(state_payload)
 
-    await interaction.followup.send(
+    summary_msg = (
         "✅ `market_bootstrap` 完成（後續不會自動重掃）。\n"
         f"Scanned Threads: `{state_payload['scanned_thread_count']}`\n"
         f"Matched Listings: `{state_payload['listing_count']}`\n"
         f"Index: `{state_payload['index_path']}`\n"
-        f"Images: `{state_payload['images_dir']}`",
+        f"Images: `{state_payload['images_dir']}`"
+    )
+    if not push_backup:
+        await interaction.followup.send(summary_msg, ephemeral=True)
+        return
+
+    await interaction.followup.send(summary_msg + "\n⏳ 正在觸發備份推送...", ephemeral=True)
+    backup_ok = await _run_ranking_sync_script("market_bootstrap", bootstrap_only=False, full_rebuild=True)
+    await interaction.followup.send(
+        (
+            "✅ 備份推送流程已完成（請到資料 repo 檢查最新 commit）。"
+            if backup_ok
+            else "⚠️ 備份推送失敗，請檢查 BACKUP_GIT_ENABLED / BACKUP_GIT_REPO 與伺服器網路。"
+        ),
         ephemeral=True,
     )
 
