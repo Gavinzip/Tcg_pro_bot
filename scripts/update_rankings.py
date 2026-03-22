@@ -608,6 +608,14 @@ class RankingConfig:
     def repo_dataset_dir(self) -> Path:
         return self.backup_git_dir / "rankings"
 
+    @property
+    def market_cache_dir(self) -> Path:
+        return self.data_dir.parent / "market_cache"
+
+    @property
+    def repo_market_cache_dir(self) -> Path:
+        return self.backup_git_dir / "market_cache"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Incremental ranking sync with startup bootstrap and git backup")
@@ -785,9 +793,19 @@ def git_push_rankings(cfg: RankingConfig, now_dt: datetime, commit_message: str)
     if cfg.checkpoint_path.exists():
         shutil.copy2(cfg.checkpoint_path, dataset_dir / "state" / cfg.checkpoint_path.name)
 
+    had_repo_market_cache = cfg.repo_market_cache_dir.exists()
+    if cfg.market_cache_dir.exists():
+        if cfg.repo_market_cache_dir.exists():
+            shutil.rmtree(cfg.repo_market_cache_dir, ignore_errors=True)
+        shutil.copytree(cfg.market_cache_dir, cfg.repo_market_cache_dir)
+    elif had_repo_market_cache:
+        shutil.rmtree(cfg.repo_market_cache_dir, ignore_errors=True)
+
     _run(["git", "config", "user.name", os.getenv("BACKUP_GIT_USER_NAME", "tcg-pro-bot")], cwd=repo_dir)
     _run(["git", "config", "user.email", os.getenv("BACKUP_GIT_USER_EMAIL", "tcg-pro-bot@example.com")], cwd=repo_dir)
-    _run(["git", "add", "rankings"], cwd=repo_dir)
+    _run(["git", "add", "-A", "rankings"], cwd=repo_dir)
+    if cfg.market_cache_dir.exists() or had_repo_market_cache:
+        _run(["git", "add", "-A", "market_cache"], cwd=repo_dir)
     status = _run(["git", "status", "--porcelain"], cwd=repo_dir)
     if status.returncode != 0:
         raise RuntimeError(f"git status failed: {status.stderr.strip() or status.stdout.strip()}")
@@ -839,6 +857,11 @@ def bootstrap_from_git(cfg: RankingConfig) -> bool:
     if repo_checkpoint.exists():
         cfg.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(repo_checkpoint, cfg.checkpoint_path)
+
+    if cfg.repo_market_cache_dir.exists():
+        if cfg.market_cache_dir.exists():
+            shutil.rmtree(cfg.market_cache_dir, ignore_errors=True)
+        shutil.copytree(cfg.repo_market_cache_dir, cfg.market_cache_dir)
     return True
 
 

@@ -120,6 +120,14 @@ AUTO_IMAGE_THREAD_AUTO_ARCHIVE_MIN = _coerce_thread_auto_archive_minutes(
 )
 AUTO_IMAGE_THREAD_NAME_PREFIX = str(os.getenv("AUTO_IMAGE_THREAD_NAME_PREFIX", "圖片討論")).strip() or "圖片討論"
 AUTO_IMAGE_THREAD_POST_NOTE = _env_true("AUTO_IMAGE_THREAD_POST_NOTE", False)
+# 固定 market 來源設定（依需求不從 .env 讀取）
+MARKET_SOURCE_CHANNEL_ID = 1483342992864706675
+MARKET_SUMMARY_BOT_ID = 1484044461276139600
+MARKET_RECENT_LIMIT = 50
+MARKET_SCAN_MESSAGES_PER_THREAD = 25
+MARKET_CACHE_IMAGES = True
+MARKET_BOOTSTRAP_ARCHIVED_LIMIT = 2000
+MARKET_BOOTSTRAP_INDEX_LIMIT = 500
 
 
 def _safe_tzinfo(name: str):
@@ -4113,6 +4121,328 @@ def _is_image_attachment(att: discord.Attachment) -> bool:
     return any(filename.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"])
 
 
+_MARKET_LISTING_RE = re.compile(r"^\s*(WTS|WTB)\b(?:\s*[·•\-:：|]\s*)?(.*)$", re.IGNORECASE)
+
+
+def _market_cache_root_dir() -> str:
+    # 對齊 rankings 的 server/local 路徑策略：
+    # 直接掛在 _rank_sync_data_dir() 的同層，讓 server 外掛磁碟與本地測試都跟著切換。
+    rank_dir = os.path.abspath(_rank_sync_data_dir())
+    return os.path.join(os.path.dirname(rank_dir), "market_cache")
+
+
+def _market_cache_images_dir() -> str:
+    return os.path.join(_market_cache_root_dir(), "images")
+
+
+def _market_index_path() -> str:
+    return os.path.join(_market_cache_root_dir(), "market_index.json")
+
+
+def _market_bootstrap_state_path() -> str:
+    return os.path.join(_market_cache_root_dir(), "state", "bootstrap_once.json")
+
+
+def _market_load_bootstrap_state() -> dict[str, object]:
+    path = _market_bootstrap_state_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _market_save_bootstrap_state(payload: dict[str, object]) -> None:
+    path = _market_bootstrap_state_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(path + ".tmp", path)
+    except Exception:
+        pass
+
+
+async def _market_collect_source_threads(
+    channel: discord.TextChannel | discord.ForumChannel,
+    guild: discord.Guild,
+    *,
+    include_archived: bool = False,
+) -> list[discord.Thread]:
+    thread_map: dict[int, discord.Thread] = {}
+
+    try:
+        active_threads = await guild.active_threads()
+    except Exception:
+        active_threads = []
+
+    for t in active_threads:
+        if isinstance(t, discord.Thread) and t.parent_id == channel.id and not bool(getattr(t, "archived", False)):
+            thread_map[int(t.id)] = t
+
+    if include_archived:
+        archived_count = 0
+        try:
+            async for t in channel.archived_threads(limit=None):
+                if not isinstance(t, discord.Thread):
+                    continue
+                if t.parent_id != channel.id:
+                    continue
+                thread_map[int(t.id)] = t
+                archived_count += 1
+                if archived_count >= MARKET_BOOTSTRAP_ARCHIVED_LIMIT:
+                    break
+        except Exception:
+            pass
+
+    threads = list(thread_map.values())
+    threads.sort(key=lambda t: int(getattr(t, "last_message_id", 0) or t.id or 0), reverse=True)
+    return threads
+
+
+async def _market_parse_thread_listing(thread: discord.Thread, guild: discord.Guild) -> dict[str, object] | None:
+    summary_msg: discord.Message | None = None
+    parsed_side = None
+    parsed_title = ""
+    try:
+        async for msg in thread.history(limit=MARKET_SCAN_MESSAGES_PER_THREAD, oldest_first=False):
+            author_id = int(getattr(getattr(msg, "author", None), "id", 0) or 0)
+            if MARKET_SUMMARY_BOT_ID > 0 and author_id != MARKET_SUMMARY_BOT_ID:
+                continue
+            side, title = _market_parse_summary(str(getattr(msg, "content", "") or ""))
+            if side in ("WTS", "WTB"):
+                summary_msg = msg
+                parsed_side = side
+                parsed_title = title
+                break
+    except Exception:
+        return None
+
+    if summary_msg is None or parsed_side not in ("WTS", "WTB"):
+        return None
+
+    image_url = _market_extract_image_url(summary_msg)
+    if not image_url:
+        image_url = await _market_find_fallback_image(thread)
+    cache_path = ""
+    if image_url:
+        cache_path = _market_image_cache_path(int(thread.id), int(summary_msg.id), image_url)
+
+    created_at = getattr(summary_msg, "created_at", None) or getattr(thread, "created_at", datetime.now(timezone.utc))
+    return {
+        "key": f"{thread.id}:{summary_msg.id}",
+        "side": parsed_side,
+        "title": parsed_title,
+        "summary": str(getattr(summary_msg, "content", "") or "").strip()[:500],
+        "thread_id": int(thread.id),
+        "message_id": int(summary_msg.id),
+        "thread_name": str(getattr(thread, "name", "") or ""),
+        "thread_url": str(getattr(summary_msg, "jump_url", "") or f"https://discord.com/channels/{guild.id}/{thread.id}"),
+        "created_at_ts": int(created_at.timestamp()) if created_at else 0,
+        "image_url": image_url,
+        "local_image_path": cache_path,
+    }
+
+
+def _market_parse_summary(content: str) -> tuple[str | None, str]:
+    first_line = ""
+    for raw_line in str(content or "").splitlines():
+        if raw_line.strip():
+            first_line = raw_line.strip()
+            break
+    if not first_line:
+        return None, ""
+    matched = _MARKET_LISTING_RE.match(first_line)
+    if not matched:
+        return None, first_line[:120]
+    side = str(matched.group(1) or "").upper()
+    title = str(matched.group(2) or "").strip()
+    if not title:
+        title = first_line
+    return side, title[:160]
+
+
+def _market_extract_image_url(message: discord.Message | None) -> str:
+    if message is None:
+        return ""
+    for att in list(getattr(message, "attachments", []) or []):
+        if _is_image_attachment(att):
+            url = str(getattr(att, "url", "") or "").strip()
+            if url:
+                return url
+    for emb in list(getattr(message, "embeds", []) or []):
+        image = getattr(emb, "image", None)
+        image_url = str(getattr(image, "url", "") or "").strip()
+        if image_url:
+            return image_url
+        thumb = getattr(emb, "thumbnail", None)
+        thumb_url = str(getattr(thumb, "url", "") or "").strip()
+        if thumb_url:
+            return thumb_url
+    return ""
+
+
+def _market_image_cache_path(thread_id: int, message_id: int, image_url: str) -> str:
+    key = hashlib.sha1(f"{thread_id}:{message_id}:{image_url}".encode("utf-8")).hexdigest()
+    return os.path.join(_market_cache_images_dir(), f"{key}.img")
+
+
+def _market_cache_image_sync(image_url: str, output_path: str):
+    if not image_url:
+        return
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        return
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    tmp_path = f"{output_path}.tmp"
+    try:
+        resp = requests.get(image_url, timeout=12)
+        resp.raise_for_status()
+        content_type = str(resp.headers.get("Content-Type") or "").lower()
+        if content_type and not content_type.startswith("image/"):
+            return
+        with open(tmp_path, "wb") as f:
+            f.write(resp.content)
+        os.replace(tmp_path, output_path)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+async def _market_cache_image_async(image_url: str, output_path: str):
+    if not image_url or not output_path:
+        return
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _market_cache_image_sync, image_url, output_path)
+
+
+async def _market_find_fallback_image(thread: discord.Thread) -> str:
+    starter = getattr(thread, "starter_message", None)
+    if starter:
+        image = _market_extract_image_url(starter)
+        if image:
+            return image
+
+    try:
+        starter_msg = await thread.fetch_message(thread.id)
+        image = _market_extract_image_url(starter_msg)
+        if image:
+            return image
+    except Exception:
+        pass
+
+    parent = getattr(thread, "parent", None)
+    if parent is not None:
+        try:
+            starter_msg = await parent.fetch_message(thread.id)
+            image = _market_extract_image_url(starter_msg)
+            if image:
+                return image
+        except Exception:
+            pass
+
+    try:
+        async for msg in thread.history(limit=20, oldest_first=True):
+            image = _market_extract_image_url(msg)
+            if image:
+                return image
+    except Exception:
+        pass
+    return ""
+
+
+async def _market_collect_listings(
+    *,
+    include_archived: bool = False,
+    limit: int | None = None,
+) -> tuple[list[dict], dict]:
+    if MARKET_SOURCE_CHANNEL_ID <= 0:
+        return [], {"error": "MARKET_SOURCE_CHANNEL_ID 未設定。"}
+
+    channel = client.get_channel(MARKET_SOURCE_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(MARKET_SOURCE_CHANNEL_ID)
+        except Exception as e:
+            return [], {"error": f"無法取得來源頻道：{e}"}
+
+    if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+        return [], {"error": f"來源頻道型別不支援：{type(channel).__name__}"}
+
+    guild = channel.guild
+    if guild is None:
+        return [], {"error": "來源頻道不在 guild 中。"}
+
+    try:
+        source_threads = await _market_collect_source_threads(
+            channel,
+            guild,
+            include_archived=include_archived,
+        )
+    except Exception as e:
+        return [], {"error": f"無法讀取來源討論串：{e}"}
+
+    listings: list[dict] = []
+    image_cache_tasks: list[asyncio.Task] = []
+    for thread in source_threads:
+        item = await _market_parse_thread_listing(thread, guild)
+        if not item:
+            continue
+        listings.append(item)
+
+        image_url = str(item.get("image_url") or "").strip()
+        cache_path = str(item.get("local_image_path") or "").strip()
+        if image_url and cache_path and MARKET_CACHE_IMAGES and not os.path.exists(cache_path):
+            image_cache_tasks.append(asyncio.create_task(_market_cache_image_async(image_url, cache_path)))
+
+    listings.sort(key=lambda item: int(item.get("created_at_ts") or 0), reverse=True)
+    final_limit = int(limit) if isinstance(limit, int) and limit > 0 else MARKET_RECENT_LIMIT
+    listings = listings[:final_limit]
+
+    market_index_path = _market_index_path()
+    try:
+        os.makedirs(os.path.dirname(market_index_path), exist_ok=True)
+        with open(market_index_path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "source_channel_id": int(channel.id),
+                    "summary_bot_id": int(MARKET_SUMMARY_BOT_ID),
+                    "recent_limit": int(final_limit),
+                    "include_archived": bool(include_archived),
+                    "scanned_thread_count": len(source_threads),
+                    "listing_count": len(listings),
+                    "items": listings,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+            f.write("\n")
+        os.replace(market_index_path + ".tmp", market_index_path)
+    except Exception:
+        pass
+
+    if image_cache_tasks:
+        # 不阻塞 /market 互動流程，讓快取背景下載即可。
+        for task in image_cache_tasks:
+            task.add_done_callback(lambda _: None)
+
+    return listings, {
+        "source_channel_id": int(channel.id),
+        "active_thread_count": len([t for t in source_threads if not bool(getattr(t, "archived", False))]),
+        "scanned_thread_count": len(source_threads),
+        "listing_count": len(listings),
+        "include_archived": bool(include_archived),
+        "index_path": market_index_path,
+        "images_dir": _market_cache_images_dir(),
+    }
+
+
 def _json_loads_loose(text: str):
     cleaned = (text or "").replace("```json", "").replace("```", "").strip()
     try:
@@ -5698,6 +6028,252 @@ class FlexPackConfigView(discord.ui.View):
         await self._run_generate(interaction)
 
 
+class MarketListingSelect(discord.ui.Select):
+    def __init__(self, parent_view: "MarketBrowserView", items: list[dict]):
+        self.parent_view = parent_view
+        options = []
+        for item in items[:25]:
+            title = str(item.get("title") or "Untitled").strip() or "Untitled"
+            label = title[:100]
+            description = f"{item.get('side', '-')}"[:100]
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=str(item.get("key") or "")[:100],
+                    description=description or None,
+                )
+            )
+        super().__init__(
+            placeholder="選擇卡片查看圖片與直達連結",
+            min_values=1,
+            max_values=1,
+            options=options or [discord.SelectOption(label="目前無卡片", value="__none__")],
+            row=2,
+        )
+        if not options:
+            self.disabled = True
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        if selected == "__none__":
+            await interaction.response.send_message("目前這頁沒有可選擇的卡片。", ephemeral=True)
+            return
+
+        item = self.parent_view.key_to_item.get(selected)
+        if not item:
+            await interaction.response.send_message("找不到該卡片資料，請按「重新整理」。", ephemeral=True)
+            return
+
+        side = str(item.get("side") or "-")
+        title = str(item.get("title") or "Untitled").strip() or "Untitled"
+        thread_url = str(item.get("thread_url") or "").strip()
+        image_url = str(item.get("image_url") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        ts = int(item.get("created_at_ts") or 0)
+
+        desc_lines = [f"類型：**{side}**"]
+        if ts > 0:
+            desc_lines.append(f"時間：<t:{ts}:f>（<t:{ts}:R>）")
+        if thread_url:
+            desc_lines.append(f"[直達討論串]({thread_url})")
+        if summary:
+            desc_lines.append("")
+            desc_lines.append(f"```text\n{summary[:600]}\n```")
+
+        embed = discord.Embed(
+            title=title[:256],
+            description="\n".join(desc_lines)[:4000],
+            color=0x2ECC71 if side == "WTS" else 0x3498DB,
+        )
+        if image_url:
+            embed.set_image(url=image_url)
+
+        detail_view = discord.ui.View()
+        if thread_url:
+            detail_view.add_item(discord.ui.Button(label="直達討論串", url=thread_url))
+        await interaction.response.send_message(embed=embed, view=detail_view, ephemeral=True)
+
+
+class MarketBrowserView(discord.ui.View):
+    def __init__(self, author_id: int, listings: list[dict], meta: dict | None = None):
+        super().__init__(timeout=300)
+        self.author_id = int(author_id)
+        self.listings = list(listings or [])
+        self.meta = dict(meta or {})
+        self.selected_side = "WTS"
+        self.page = 0
+        self.page_size = 10
+        self.bound_message: discord.Message | None = None
+        self.key_to_item: dict[str, dict] = {}
+        self._rebuild_components()
+
+    def bind_message(self, message: discord.Message):
+        self.bound_message = message
+
+    def _count_by_side(self, side: str) -> int:
+        target = str(side or "").upper()
+        return sum(1 for item in self.listings if str(item.get("side") or "").upper() == target)
+
+    def _filtered(self) -> list[dict]:
+        target = str(self.selected_side or "").upper()
+        return [item for item in self.listings if str(item.get("side") or "").upper() == target]
+
+    def _total_pages(self) -> int:
+        total = len(self._filtered())
+        return max(1, (total + self.page_size - 1) // self.page_size)
+
+    def _page_items(self) -> list[dict]:
+        rows = self._filtered()
+        total_pages = self._total_pages()
+        if self.page >= total_pages:
+            self.page = total_pages - 1
+        if self.page < 0:
+            self.page = 0
+        start = self.page * self.page_size
+        end = start + self.page_size
+        return rows[start:end]
+
+    def render_message(self) -> str:
+        active_threads = int(self.meta.get("active_thread_count") or 0)
+        source_channel_id = int(self.meta.get("source_channel_id") or MARKET_SOURCE_CHANNEL_ID)
+        filtered = self._filtered()
+        page_items = self._page_items()
+        total_pages = self._total_pages()
+        start_idx = self.page * self.page_size
+
+        lines = [
+            "📦 **Market Browser**",
+            f"來源頻道：<#{source_channel_id}>（只看未封存討論串）",
+            f"目前索引：**{len(self.listings)}** 筆（最近 {MARKET_RECENT_LIMIT}）｜ Active Threads：**{active_threads}**",
+            f"篩選：**{self.selected_side}**（WTS={self._count_by_side('WTS')} / WTB={self._count_by_side('WTB')}）｜ 第 **{self.page + 1}/{total_pages}** 頁",
+            "",
+        ]
+
+        if not filtered:
+            lines.append("目前沒有符合的卡片。")
+        else:
+            for idx, item in enumerate(page_items, start=start_idx + 1):
+                title = str(item.get("title") or "Untitled").strip() or "Untitled"
+                thread_url = str(item.get("thread_url") or "").strip()
+                image_url = str(item.get("image_url") or "").strip()
+                ts = int(item.get("created_at_ts") or 0)
+                lines.append(f"{idx}. **{title[:140]}**")
+                sub = []
+                if thread_url:
+                    sub.append(f"[直達討論串]({thread_url})")
+                if image_url:
+                    sub.append(f"[圖片]({image_url})")
+                if ts > 0:
+                    sub.append(f"<t:{ts}:R>")
+                if sub:
+                    lines.append("｜".join(sub))
+
+        lines.append("")
+        lines.append("提示：可用下拉選單查看單一卡片的大圖與按鈕連結。")
+        return "\n".join(lines)[:3900]
+
+    def _rebuild_components(self):
+        self.clear_items()
+        self.key_to_item = {}
+        page_items = self._page_items()
+        for item in page_items:
+            key = str(item.get("key") or "").strip()
+            if key:
+                self.key_to_item[key] = item
+
+        wts_btn = discord.ui.Button(
+            label=f"WTS ({self._count_by_side('WTS')})",
+            style=discord.ButtonStyle.primary if self.selected_side == "WTS" else discord.ButtonStyle.secondary,
+            row=0,
+        )
+        wtb_btn = discord.ui.Button(
+            label=f"WTB ({self._count_by_side('WTB')})",
+            style=discord.ButtonStyle.primary if self.selected_side == "WTB" else discord.ButtonStyle.secondary,
+            row=0,
+        )
+
+        prev_btn = discord.ui.Button(
+            label="上一頁",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+            disabled=(self.page <= 0),
+        )
+        next_btn = discord.ui.Button(
+            label="下一頁",
+            style=discord.ButtonStyle.secondary,
+            row=1,
+            disabled=(self.page + 1 >= self._total_pages()),
+        )
+        refresh_btn = discord.ui.Button(label="重新整理", style=discord.ButtonStyle.success, row=1)
+
+        async def _on_wts(interaction: discord.Interaction):
+            self.selected_side = "WTS"
+            self.page = 0
+            self._rebuild_components()
+            await interaction.response.edit_message(content=self.render_message(), view=self)
+
+        async def _on_wtb(interaction: discord.Interaction):
+            self.selected_side = "WTB"
+            self.page = 0
+            self._rebuild_components()
+            await interaction.response.edit_message(content=self.render_message(), view=self)
+
+        async def _on_prev(interaction: discord.Interaction):
+            self.page = max(0, self.page - 1)
+            self._rebuild_components()
+            await interaction.response.edit_message(content=self.render_message(), view=self)
+
+        async def _on_next(interaction: discord.Interaction):
+            self.page = min(self._total_pages() - 1, self.page + 1)
+            self._rebuild_components()
+            await interaction.response.edit_message(content=self.render_message(), view=self)
+
+        async def _on_refresh(interaction: discord.Interaction):
+            await interaction.response.defer()
+            listings, meta = await _market_collect_listings()
+            self.listings = list(listings or [])
+            self.meta = dict(meta or {})
+            self.page = 0
+            if self.selected_side not in ("WTS", "WTB"):
+                self.selected_side = "WTS"
+            self._rebuild_components()
+            if self.bound_message:
+                await self.bound_message.edit(content=self.render_message(), view=self)
+            else:
+                await interaction.edit_original_response(content=self.render_message(), view=self)
+
+        wts_btn.callback = _on_wts
+        wtb_btn.callback = _on_wtb
+        prev_btn.callback = _on_prev
+        next_btn.callback = _on_next
+        refresh_btn.callback = _on_refresh
+
+        self.add_item(wts_btn)
+        self.add_item(wtb_btn)
+        self.add_item(prev_btn)
+        self.add_item(next_btn)
+        self.add_item(refresh_btn)
+        self.add_item(MarketListingSelect(self, page_items))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("只有 `/market` 指令發起者可以操作這個面板。", ephemeral=True)
+            return False
+        return True
+
+    def _disable_all(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def on_timeout(self):
+        self._disable_all()
+        if self.bound_message:
+            try:
+                await self.bound_message.edit(content="⏰ `/market` 面板已逾時，請重新輸入 `/market`。", view=self)
+            except Exception:
+                pass
+
+
 @tree.command(name="flex_pack", description="指定卡包生成 Flex 海報（剛抽排版 / 天堂地獄）")
 @app_commands.describe(address="錢包地址（可留空使用已儲存的預設地址）")
 async def flex_pack(interaction: discord.Interaction, address: str = None):
@@ -6020,6 +6596,109 @@ async def cardset(interaction: discord.Interaction, series_code: str):
         await thread.send(f"❌ 發生異常：\n```python\n{error_trace[-1900:]}\n```")
     finally:
         shutil.rmtree(card_out_dir, ignore_errors=True)
+
+
+@tree.command(name="market", description="瀏覽市場討論串（WTS / WTB）")
+async def market(interaction: discord.Interaction):
+    listings, meta = await _market_collect_listings()
+    error = str(meta.get("error") or "").strip()
+
+    if isinstance(interaction.channel, discord.Thread):
+        thread = interaction.channel
+        try:
+            await interaction.response.send_message("📦 正在載入 `/market` 面板...", ephemeral=False)
+        except Exception:
+            pass
+    else:
+        try:
+            await interaction.response.send_message("📦 正在建立 `/market` 討論串...", ephemeral=False)
+            starter = await interaction.original_response()
+        except discord.NotFound:
+            channel = interaction.channel
+            if channel is None:
+                print("❌ /market 互動已失效且找不到可用頻道。", file=sys.stderr)
+                return
+            starter = await channel.send("📦 正在建立 `/market` 討論串...")
+
+        thread_name = f"market-{datetime.now().strftime('%m%d-%H%M')}"
+        try:
+            thread = await starter.create_thread(name=thread_name, auto_archive_duration=60)
+        except Exception as e:
+            print(f"❌ /market 建立討論串失敗: {e}", file=sys.stderr)
+            await starter.reply(f"❌ 建立討論串失敗：{e}")
+            return
+        try:
+            await thread.add_user(interaction.user)
+        except Exception:
+            pass
+
+    if error:
+        await thread.send(f"⚠️ 讀取 market 來源時發生問題：`{error}`")
+
+    view = MarketBrowserView(interaction.user.id, listings, meta=meta)
+    panel_msg = await thread.send(view.render_message(), view=view)
+    view.bind_message(panel_msg)
+
+
+@tree.command(name="market_bootstrap", description="一次性全頻道掃描 market thread（含封存）")
+@app_commands.describe(force="強制重跑（預設 false：已完成就跳過）")
+async def market_bootstrap(interaction: discord.Interaction, force: bool = False):
+    state = _market_load_bootstrap_state()
+    done = bool(state.get("done"))
+    if done and not force:
+        completed_at = str(state.get("completed_at") or "-")
+        matched = int(_parse_int(state.get("listing_count")) or 0)
+        scanned = int(_parse_int(state.get("scanned_thread_count")) or 0)
+        await interaction.response.send_message(
+            "✅ `market_bootstrap` 已完成過，這次不會重掃。\n"
+            f"Completed: `{completed_at}`\n"
+            f"Scanned Threads: `{scanned}`\n"
+            f"Matched Listings: `{matched}`\n"
+            f"Index: `{_market_index_path()}`\n"
+            "如要重跑請改用：`/market_bootstrap force:true`",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        "⏳ 正在執行一次性 market 全掃（含封存討論串），完成後會回報索引路徑...",
+        ephemeral=True,
+    )
+    started_at = datetime.now(timezone.utc)
+    listings, meta = await _market_collect_listings(
+        include_archived=True,
+        limit=MARKET_BOOTSTRAP_INDEX_LIMIT,
+    )
+    error = str(meta.get("error") or "").strip()
+    if error:
+        await interaction.followup.send(
+            f"❌ `market_bootstrap` 失敗：`{error}`",
+            ephemeral=True,
+        )
+        return
+
+    state_payload: dict[str, object] = {
+        "done": True,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": started_at.isoformat(),
+        "forced": bool(force),
+        "source_channel_id": int(meta.get("source_channel_id") or MARKET_SOURCE_CHANNEL_ID),
+        "include_archived": True,
+        "scanned_thread_count": int(meta.get("scanned_thread_count") or 0),
+        "listing_count": len(listings),
+        "index_path": str(meta.get("index_path") or _market_index_path()),
+        "images_dir": str(meta.get("images_dir") or _market_cache_images_dir()),
+    }
+    _market_save_bootstrap_state(state_payload)
+
+    await interaction.followup.send(
+        "✅ `market_bootstrap` 完成（後續不會自動重掃）。\n"
+        f"Scanned Threads: `{state_payload['scanned_thread_count']}`\n"
+        f"Matched Listings: `{state_payload['listing_count']}`\n"
+        f"Index: `{state_payload['index_path']}`\n"
+        f"Images: `{state_payload['images_dir']}`",
+        ephemeral=True,
+    )
 
 
 @tree.command(name="settings", description="設定你的預設錢包地址")
