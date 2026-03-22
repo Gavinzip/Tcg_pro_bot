@@ -242,6 +242,9 @@ _USAGE_STATS_LOCK = threading.Lock()
 
 
 def _bot_usage_stats_path() -> str:
+    raw = str(os.getenv("BOT_USAGE_STATS_PATH", "")).strip()
+    if raw:
+        return raw
     return os.path.join(_user_settings_dir(), "state", "bot_usage_stats.json")
 
 
@@ -315,15 +318,22 @@ def _record_bot_usage(
 
 
 def _load_bot_usage_stats() -> dict[str, object]:
-    path = _bot_usage_stats_path()
+    primary = _bot_usage_stats_path()
+    fallback = os.path.join(_rank_sync_data_dir(), "state", "bot_usage_stats.json")
+    paths = []
+    for p in (primary, fallback):
+        p_norm = str(p).strip()
+        if p_norm and p_norm not in paths:
+            paths.append(p_norm)
     with _USAGE_STATS_LOCK:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            return {}
+        for path in paths:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                continue
     return {}
 
 
@@ -6126,11 +6136,11 @@ async def _global_interaction_usage_check(interaction: discord.Interaction) -> b
         _record_bot_usage(
             str(getattr(interaction.user, "id", "unknown")),
             f"/{cmd_name}",
-            guild_id=interaction.guild_id,
-            channel_id=interaction.channel_id,
+            guild_id=getattr(interaction, "guild_id", None),
+            channel_id=getattr(interaction, "channel_id", None),
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ usage stats record failed in interaction_check: {e}", file=sys.stderr)
     return True
 
 
@@ -6370,11 +6380,32 @@ async def ranking(interaction: discord.Interaction):
 
 @tree.command(name="bot_usage", description="查看機器人使用次數（總次數 + 各指令）")
 async def bot_usage(interaction: discord.Interaction):
+    # Self-heal: ensure this command itself is counted even if global interaction_check misses.
+    try:
+        _record_bot_usage(
+            str(getattr(interaction.user, "id", "unknown")),
+            "/bot_usage",
+            guild_id=getattr(interaction, "guild_id", None),
+            channel_id=getattr(interaction, "channel_id", None),
+        )
+    except Exception as e:
+        print(f"⚠️ usage stats self-heal record failed: {e}", file=sys.stderr)
+
     path = _bot_usage_stats_path()
     data = _load_bot_usage_stats()
     if not data:
+        app_env = str(os.getenv("APP_ENV", "local")).strip() or "local"
+        sync_data_dir = str(os.getenv("SYNC_DATA_DIR", "")).strip() or "(unset)"
+        rank_data_dir = str(os.getenv("RANK_SYNC_DATA_DIR", os.getenv("RANKING_DATA_DIR", ""))).strip() or "(unset)"
+        fallback_path = os.path.join(_rank_sync_data_dir(), "state", "bot_usage_stats.json")
         await interaction.response.send_message(
-            f"⚠️ 尚無使用統計資料：`{path}`\n先執行幾次指令後再查看。",
+            "⚠️ 尚無使用統計資料。\n"
+            f"usage path: `{path}`\n"
+            f"fallback path: `{fallback_path}`\n"
+            f"APP_ENV: `{app_env}`\n"
+            f"SYNC_DATA_DIR: `{sync_data_dir}`\n"
+            f"RANK_SYNC_DATA_DIR: `{rank_data_dir}`\n"
+            "先執行幾次 `/profile`、`/ranking`、`/bot_usage` 後再查看。",
             ephemeral=True,
         )
         return
