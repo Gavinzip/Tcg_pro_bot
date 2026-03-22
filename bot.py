@@ -4646,10 +4646,12 @@ async def _market_live_sync_refresh(reason: str, force: bool = False) -> bool:
         if (not force) and (now2 - MARKET_LIVE_SYNC_LAST_TS < MARKET_LIVE_SYNC_DEBOUNCE_SEC):
             return False
         before_items, _before_meta = _market_load_cached_index(limit=None)
-        before_keys = {
-            str(it.get("key") or "").strip()
+        # Auto-push should only trigger on truly new listings (new thread), not
+        # when the summary bot posts another message in an existing thread.
+        before_thread_ids = {
+            int(_parse_int(it.get("thread_id")) or 0)
             for it in list(before_items or [])
-            if str(it.get("key") or "").strip()
+            if int(_parse_int(it.get("thread_id")) or 0) > 0
         }
         listings, meta = await _market_collect_listings()
         MARKET_LIVE_SYNC_LAST_TS = time.time()
@@ -4657,18 +4659,18 @@ async def _market_live_sync_refresh(reason: str, force: bool = False) -> bool:
         if err:
             print(f"⚠️ market live sync failed reason={reason} error={err}")
             return False
-        after_keys = {
-            str(it.get("key") or "").strip()
+        after_thread_ids = {
+            int(_parse_int(it.get("thread_id")) or 0)
             for it in list(listings or [])
-            if str(it.get("key") or "").strip()
+            if int(_parse_int(it.get("thread_id")) or 0) > 0
         }
-        new_keys = after_keys - before_keys
+        new_thread_ids = after_thread_ids - before_thread_ids
         print(
             "✅ market live sync "
             f"reason={reason} listings={len(listings)} active_threads={int(meta.get('active_thread_count') or 0)}"
         )
-        if new_keys:
-            asyncio.create_task(_market_auto_push_market_cache(reason=f"{reason}:new={len(new_keys)}"))
+        if new_thread_ids:
+            asyncio.create_task(_market_auto_push_market_cache(reason=f"{reason}:new_threads={len(new_thread_ids)}"))
         return True
 
 
