@@ -6808,18 +6808,8 @@ async def profile(interaction: discord.Interaction, address: str = None):
 
 @tree.interaction_check
 async def _global_interaction_usage_check(interaction: discord.Interaction) -> bool:
-    # Count every slash command usage in persistent data storage.
-    try:
-        cmd = getattr(interaction, "command", None)
-        cmd_name = getattr(cmd, "qualified_name", None) or getattr(cmd, "name", None) or "unknown"
-        _record_bot_usage(
-            str(getattr(interaction.user, "id", "unknown")),
-            f"/{cmd_name}",
-            guild_id=getattr(interaction, "guild_id", None),
-            channel_id=getattr(interaction, "channel_id", None),
-        )
-    except Exception as e:
-        print(f"⚠️ usage stats record failed in interaction_check: {e}", file=sys.stderr)
+    # Keep as a permissive global check.
+    # Usage counting is handled in on_interaction for reliability.
     return True
 
 
@@ -7059,17 +7049,6 @@ async def ranking(interaction: discord.Interaction):
 
 @tree.command(name="bot_usage", description="查看機器人使用次數（總次數 + 各指令）")
 async def bot_usage(interaction: discord.Interaction):
-    # Self-heal: ensure this command itself is counted even if global interaction_check misses.
-    try:
-        _record_bot_usage(
-            str(getattr(interaction.user, "id", "unknown")),
-            "/bot_usage",
-            guild_id=getattr(interaction, "guild_id", None),
-            channel_id=getattr(interaction, "channel_id", None),
-        )
-    except Exception as e:
-        print(f"⚠️ usage stats self-heal record failed: {e}", file=sys.stderr)
-
     path = _bot_usage_stats_path()
     data = _load_bot_usage_stats()
     if not data:
@@ -7133,6 +7112,28 @@ async def clear_stale(interaction: discord.Interaction):
     # Note: Global sync can be slow. 
     await tree.sync()
     await interaction.followup.send("✅ 已發送同步請求。若指令未更新，請嘗試使用文字指令 `!sync` (需標註機器人)。", ephemeral=True)
+
+
+@client.event
+async def on_interaction(interaction: discord.Interaction):
+    try:
+        if getattr(interaction, "type", None) == discord.InteractionType.application_command:
+            raw = interaction.data if isinstance(interaction.data, dict) else {}
+            cmd_name = str(raw.get("name") or "").strip()
+            if not cmd_name:
+                cmd = getattr(interaction, "command", None)
+                cmd_name = str(
+                    getattr(cmd, "qualified_name", None) or getattr(cmd, "name", None) or "unknown"
+                ).strip()
+            _record_bot_usage(
+                str(getattr(interaction.user, "id", "unknown")),
+                f"/{cmd_name}",
+                guild_id=getattr(interaction, "guild_id", None),
+                channel_id=getattr(interaction, "channel_id", None),
+            )
+    except Exception as e:
+        print(f"⚠️ usage stats record failed in on_interaction: {e}", file=sys.stderr)
+
 
 @client.event
 async def on_message(message):
