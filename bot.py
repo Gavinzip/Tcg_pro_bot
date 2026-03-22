@@ -4201,7 +4201,7 @@ def _market_load_cached_index(limit: int | None = MARKET_RECENT_LIMIT) -> tuple[
     items = [x for x in items_raw if isinstance(x, dict)] if isinstance(items_raw, list) else []
     items.sort(key=lambda item: int(item.get("created_at_ts") or 0), reverse=True)
     if isinstance(limit, int) and limit > 0:
-        items = items[:limit]
+        items = _market_limit_items_per_side(items, limit)
         limit_meta: int | str = int(limit)
     else:
         limit_meta = "all"
@@ -4220,6 +4220,23 @@ def _market_load_cached_index(limit: int | None = MARKET_RECENT_LIMIT) -> tuple[
         "updated_at": str(payload.get("updated_at") or ""),
     }
     return items, meta
+
+
+def _market_limit_items_per_side(items: list[dict], per_side_limit: int | None) -> list[dict]:
+    if not isinstance(per_side_limit, int) or per_side_limit <= 0:
+        return list(items or [])
+    out: list[dict] = []
+    side_count: dict[str, int] = {}
+    for item in list(items or []):
+        side = str(item.get("side") or "").upper().strip()
+        if side not in ("WTS", "WTB"):
+            continue
+        used = int(side_count.get(side, 0))
+        if used >= per_side_limit:
+            continue
+        side_count[side] = used + 1
+        out.append(item)
+    return out
 
 
 async def _market_collect_source_threads(
@@ -4564,7 +4581,7 @@ async def _market_collect_listings(
 
     listings.sort(key=lambda item: int(item.get("created_at_ts") or 0), reverse=True)
     if isinstance(limit, int) and limit > 0:
-        listings = listings[:limit]
+        listings = _market_limit_items_per_side(listings, limit)
         limit_meta: int | str = int(limit)
     else:
         limit_meta = "all"
@@ -6434,7 +6451,7 @@ class MarketBrowserView(discord.ui.View):
         lines = [
             "📦 **Market Browser**",
             _t(self.lang, f"來源頻道：<#{source_channel_id}>（只看未封存討論串）", f"Source: <#{source_channel_id}> (unarchived threads only)", f"소스 채널: <#{source_channel_id}> (미보관 스레드만)", f"来源频道：<#{source_channel_id}>（仅看未封存讨论串）"),
-            _t(self.lang, f"目前索引：**{len(self.listings)}** 筆（最近 {MARKET_RECENT_LIMIT}）｜ Active Threads：**{active_threads}**", f"Indexed: **{len(self.listings)}** (latest {MARKET_RECENT_LIMIT}) | Active Threads: **{active_threads}**", f"인덱스: **{len(self.listings)}** (최근 {MARKET_RECENT_LIMIT}) | 활성 스레드: **{active_threads}**", f"当前索引：**{len(self.listings)}** 笔（最近 {MARKET_RECENT_LIMIT}）｜Active Threads：**{active_threads}**"),
+            _t(self.lang, f"目前索引：**{len(self.listings)}** 筆（賣/買單邊各 {MARKET_RECENT_LIMIT}）｜ Active Threads：**{active_threads}**", f"Indexed: **{len(self.listings)}** (up to {MARKET_RECENT_LIMIT} per side) | Active Threads: **{active_threads}**", f"인덱스: **{len(self.listings)}** (매도/매수 각 {MARKET_RECENT_LIMIT}개) | 활성 스레드: **{active_threads}**", f"当前索引：**{len(self.listings)}** 笔（卖/买单边各 {MARKET_RECENT_LIMIT}）｜Active Threads：**{active_threads}**"),
             _t(self.lang, f"篩選：**{_market_side_label(self.selected_side, self.lang)}**（賣={self._count_by_side('WTS')} / 買={self._count_by_side('WTB')}）｜ 第 **{self.page + 1}/{total_pages}** 頁", f"Filter: **{_market_side_label(self.selected_side, self.lang)}** (Sell={self._count_by_side('WTS')} / Buy={self._count_by_side('WTB')}) | Page **{self.page + 1}/{total_pages}**", f"필터: **{_market_side_label(self.selected_side, self.lang)}** (판매={self._count_by_side('WTS')} / 구매={self._count_by_side('WTB')}) | **{self.page + 1}/{total_pages}** 페이지", f"筛选：**{_market_side_label(self.selected_side, self.lang)}**（卖={self._count_by_side('WTS')} / 买={self._count_by_side('WTB')}）｜第 **{self.page + 1}/{total_pages}** 页"),
             "",
         ]
