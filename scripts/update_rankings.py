@@ -1905,7 +1905,8 @@ def main() -> int:
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
 
     bootstrapped = False
-    if cfg.bootstrap_from_git and cfg.backup_git_enabled:
+    should_bootstrap_from_git = cfg.bootstrap_from_git and cfg.backup_git_enabled and not args.push_only
+    if should_bootstrap_from_git:
         try:
             bootstrapped = bootstrap_from_git(cfg)
         except Exception as e:  # noqa: BLE001
