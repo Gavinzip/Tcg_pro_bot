@@ -4173,41 +4173,6 @@ def _market_save_bootstrap_state(payload: dict[str, object]) -> None:
         pass
 
 
-def _market_touch_index_for_push(reason: str) -> bool:
-    path = _market_index_path()
-    payload: dict[str, object] = {}
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-            if isinstance(loaded, dict):
-                payload = loaded
-        except Exception:
-            payload = {}
-
-    items_raw = payload.get("items")
-    items = [x for x in items_raw if isinstance(x, dict)] if isinstance(items_raw, list) else []
-    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-    payload["auto_push_reason"] = str(reason or "")
-    payload["source_channel_id"] = int(_parse_int(payload.get("source_channel_id")) or MARKET_SOURCE_CHANNEL_ID)
-    payload["summary_bot_id"] = int(_parse_int(payload.get("summary_bot_id")) or MARKET_SUMMARY_BOT_ID)
-    payload["recent_limit"] = int(_parse_int(payload.get("recent_limit")) or MARKET_RECENT_LIMIT)
-    payload["include_archived"] = bool(payload.get("include_archived"))
-    payload["scanned_thread_count"] = int(_parse_int(payload.get("scanned_thread_count")) or 0)
-    payload["active_thread_count"] = int(_parse_int(payload.get("active_thread_count")) or 0)
-    payload["listing_count"] = len(items)
-    payload["items"] = items
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path + ".tmp", "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-        os.replace(path + ".tmp", path)
-        return True
-    except Exception:
-        return False
-
-
 def _market_load_cached_index(limit: int | None = MARKET_RECENT_LIMIT) -> tuple[list[dict], dict]:
     path = _market_index_path()
     if not os.path.exists(path):
@@ -4236,7 +4201,7 @@ def _market_load_cached_index(limit: int | None = MARKET_RECENT_LIMIT) -> tuple[
     items = [x for x in items_raw if isinstance(x, dict)] if isinstance(items_raw, list) else []
     items.sort(key=lambda item: int(item.get("created_at_ts") or 0), reverse=True)
     if isinstance(limit, int) and limit > 0:
-        items = _market_limit_items_per_side(items, limit)
+        items = items[:limit]
         limit_meta: int | str = int(limit)
     else:
         limit_meta = "all"
@@ -4255,23 +4220,6 @@ def _market_load_cached_index(limit: int | None = MARKET_RECENT_LIMIT) -> tuple[
         "updated_at": str(payload.get("updated_at") or ""),
     }
     return items, meta
-
-
-def _market_limit_items_per_side(items: list[dict], per_side_limit: int | None) -> list[dict]:
-    if not isinstance(per_side_limit, int) or per_side_limit <= 0:
-        return list(items or [])
-    out: list[dict] = []
-    side_count: dict[str, int] = {}
-    for item in list(items or []):
-        side = str(item.get("side") or "").upper().strip()
-        if side not in ("WTS", "WTB"):
-            continue
-        used = int(side_count.get(side, 0))
-        if used >= per_side_limit:
-            continue
-        side_count[side] = used + 1
-        out.append(item)
-    return out
 
 
 async def _market_collect_source_threads(
@@ -4616,7 +4564,7 @@ async def _market_collect_listings(
 
     listings.sort(key=lambda item: int(item.get("created_at_ts") or 0), reverse=True)
     if isinstance(limit, int) and limit > 0:
-        listings = _market_limit_items_per_side(listings, limit)
+        listings = listings[:limit]
         limit_meta: int | str = int(limit)
     else:
         limit_meta = "all"
@@ -5594,7 +5542,6 @@ async def _market_auto_push_market_cache(reason: str, force: bool = False) -> bo
         now2 = time.time()
         if (not force) and (now2 - MARKET_AUTO_PUSH_LAST_TS < MARKET_AUTO_PUSH_COOLDOWN_SEC):
             return False
-        _market_touch_index_for_push(reason)
         ok = await _run_ranking_sync_script(
             "market_auto_push",
             bootstrap_only=False,
@@ -6387,7 +6334,7 @@ class MarketListingSelect(discord.ui.Select):
         item = self.parent_view.key_to_item.get(selected)
         if not item:
             await interaction.response.send_message(
-                _t(lang, "找不到該卡片資料，請重新輸入 `/market`。", "Card data not found. Please run `/market` again.", "카드 데이터를 찾을 수 없습니다. `/market`을 다시 실행해주세요.", "找不到该卡片数据，请重新输入 `/market`。"),
+                _t(lang, "找不到該卡片資料，請按「重新整理」。", "Card data not found. Please click Refresh.", "카드 데이터를 찾을 수 없습니다. 새로고침을 눌러주세요.", "找不到该卡片数据，请按“刷新”。"),
                 ephemeral=True,
             )
             return
@@ -6487,7 +6434,7 @@ class MarketBrowserView(discord.ui.View):
         lines = [
             "📦 **Market Browser**",
             _t(self.lang, f"來源頻道：<#{source_channel_id}>（只看未封存討論串）", f"Source: <#{source_channel_id}> (unarchived threads only)", f"소스 채널: <#{source_channel_id}> (미보관 스레드만)", f"来源频道：<#{source_channel_id}>（仅看未封存讨论串）"),
-            _t(self.lang, f"目前索引：**{len(self.listings)}** 筆（賣/買單邊各 {MARKET_RECENT_LIMIT}）｜ Active Threads：**{active_threads}**", f"Indexed: **{len(self.listings)}** (up to {MARKET_RECENT_LIMIT} per side) | Active Threads: **{active_threads}**", f"인덱스: **{len(self.listings)}** (매도/매수 각 {MARKET_RECENT_LIMIT}개) | 활성 스레드: **{active_threads}**", f"当前索引：**{len(self.listings)}** 笔（卖/买单边各 {MARKET_RECENT_LIMIT}）｜Active Threads：**{active_threads}**"),
+            _t(self.lang, f"目前索引：**{len(self.listings)}** 筆（最近 {MARKET_RECENT_LIMIT}）｜ Active Threads：**{active_threads}**", f"Indexed: **{len(self.listings)}** (latest {MARKET_RECENT_LIMIT}) | Active Threads: **{active_threads}**", f"인덱스: **{len(self.listings)}** (최근 {MARKET_RECENT_LIMIT}) | 활성 스레드: **{active_threads}**", f"当前索引：**{len(self.listings)}** 笔（最近 {MARKET_RECENT_LIMIT}）｜Active Threads：**{active_threads}**"),
             _t(self.lang, f"篩選：**{_market_side_label(self.selected_side, self.lang)}**（賣={self._count_by_side('WTS')} / 買={self._count_by_side('WTB')}）｜ 第 **{self.page + 1}/{total_pages}** 頁", f"Filter: **{_market_side_label(self.selected_side, self.lang)}** (Sell={self._count_by_side('WTS')} / Buy={self._count_by_side('WTB')}) | Page **{self.page + 1}/{total_pages}**", f"필터: **{_market_side_label(self.selected_side, self.lang)}** (판매={self._count_by_side('WTS')} / 구매={self._count_by_side('WTB')}) | **{self.page + 1}/{total_pages}** 페이지", f"筛选：**{_market_side_label(self.selected_side, self.lang)}**（卖={self._count_by_side('WTS')} / 买={self._count_by_side('WTB')}）｜第 **{self.page + 1}/{total_pages}** 页"),
             "",
         ]
@@ -6498,7 +6445,7 @@ class MarketBrowserView(discord.ui.View):
             lines.append(_t(self.lang, "卡片已用嵌入卡片顯示於下方（小圖預覽 + 價格 + 連結）。", "Cards are shown below as embeds (thumbnail + price + link).", "아래에 임베드 카드로 표시됩니다 (썸네일 + 가격 + 링크).", "卡片已以下方嵌入卡片显示（小图预览 + 价格 + 链接）。"))
 
         lines.append("")
-        lines.append(_t(self.lang, "提示：點嵌入圖片可放大檢視。", "Tip: Click an embedded image to zoom in.", "팁: 임베드 이미지를 눌러 확대해서 볼 수 있습니다.", "提示：点击嵌入图片可放大查看。"))
+        lines.append(_t(self.lang, "提示：按「重新整理」可即時更新列表；點嵌入圖片可放大檢視。", "Tip: Click Refresh to update the list now; click an embedded image to zoom in.", "팁: 새로고침으로 목록을 즉시 갱신할 수 있고, 임베드 이미지를 눌러 확대해서 볼 수 있습니다.", "提示：按“刷新”可即时更新列表；点击嵌入图片可放大查看。"))
         text = "\n".join(lines)
         # Discord message content hard limit is 2000.
         if len(text) > 1950:
@@ -6567,6 +6514,7 @@ class MarketBrowserView(discord.ui.View):
             row=1,
             disabled=(self.page + 1 >= self._total_pages()),
         )
+        refresh_btn = discord.ui.Button(label=_t(self.lang, "重新整理", "Refresh", "새로고침", "刷新"), style=discord.ButtonStyle.success, row=1)
 
         async def _on_wts(interaction: discord.Interaction):
             self.selected_side = "WTS"
@@ -6590,15 +6538,41 @@ class MarketBrowserView(discord.ui.View):
             self._rebuild_components()
             await interaction.response.edit_message(content=self.render_message(), embeds=self.render_embeds(), view=self)
 
+        async def _on_refresh(interaction: discord.Interaction):
+            await interaction.response.defer()
+            try:
+                # Force one live fetch attempt, then render from newest cache snapshot.
+                await _market_live_sync_refresh("manual_refresh", force=True)
+                cached_items, cached_meta = _market_load_cached_index(limit=MARKET_RECENT_LIMIT)
+                if bool(cached_meta.get("from_cache")) and (cached_items or os.path.exists(_market_index_path())):
+                    listings = cached_items
+                    meta = cached_meta
+                else:
+                    listings, meta = await _market_collect_listings()
+                self.listings = [item for item in list(listings or []) if _market_item_image_url(item)]
+                self.meta = dict(meta or {})
+            except Exception as e:
+                print(f"⚠️ market refresh failed: {e}", file=sys.stderr)
+            self.page = 0
+            if self.selected_side not in ("WTS", "WTB"):
+                self.selected_side = "WTS"
+            self._rebuild_components()
+            if self.bound_message:
+                await self.bound_message.edit(content=self.render_message(), embeds=self.render_embeds(), view=self)
+            else:
+                await interaction.edit_original_response(content=self.render_message(), embeds=self.render_embeds(), view=self)
+
         wts_btn.callback = _on_wts
         wtb_btn.callback = _on_wtb
         prev_btn.callback = _on_prev
         next_btn.callback = _on_next
+        refresh_btn.callback = _on_refresh
 
         self.add_item(wts_btn)
         self.add_item(wtb_btn)
         self.add_item(prev_btn)
         self.add_item(next_btn)
+        self.add_item(refresh_btn)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
