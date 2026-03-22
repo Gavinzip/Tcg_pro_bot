@@ -127,6 +127,10 @@ MARKET_RECENT_LIMIT = 50
 MARKET_SCAN_MESSAGES_PER_THREAD = 25
 MARKET_CACHE_IMAGES = True
 MARKET_BOOTSTRAP_ARCHIVED_LIMIT = 2000
+MARKET_LIVE_SYNC_ON_EVENT = True
+MARKET_LIVE_SYNC_DEBOUNCE_SEC = 8.0
+MARKET_LIVE_SYNC_LOCK: asyncio.Lock | None = None
+MARKET_LIVE_SYNC_LAST_TS = 0.0
 
 
 def _safe_tzinfo(name: str):
@@ -4121,6 +4125,7 @@ def _is_image_attachment(att: discord.Attachment) -> bool:
 
 
 _MARKET_LISTING_RE = re.compile(r"^\s*(WTS|WTB)\b(?:\s*[·•\-:：|]\s*)?(.*)$", re.IGNORECASE)
+_MARKET_PRICE_RE = re.compile(r"(\d+(?:[.,]\d{1,2})?)\s*(USD|USDT)\b", re.IGNORECASE)
 
 
 def _market_cache_root_dir() -> str:
@@ -4279,12 +4284,18 @@ async def _market_parse_thread_listing(thread: discord.Thread, guild: discord.Gu
     if image_url:
         cache_path = _market_image_cache_path(int(thread.id), int(summary_msg.id), image_url)
 
+    summary_text = str(getattr(summary_msg, "content", "") or "").strip()[:500]
+    price_amount, price_currency = _market_parse_price(summary_text)
+    if not price_amount:
+        price_amount, price_currency = _market_parse_price(parsed_title)
+    price_text = f"{price_amount} {price_currency}".strip() if price_amount and price_currency else ""
+
     created_at = getattr(summary_msg, "created_at", None) or getattr(thread, "created_at", datetime.now(timezone.utc))
     return {
         "key": f"{thread.id}:{summary_msg.id}",
         "side": parsed_side,
         "title": parsed_title,
-        "summary": str(getattr(summary_msg, "content", "") or "").strip()[:500],
+        "summary": summary_text,
         "thread_id": int(thread.id),
         "message_id": int(summary_msg.id),
         "thread_name": str(getattr(thread, "name", "") or ""),
@@ -4292,6 +4303,9 @@ async def _market_parse_thread_listing(thread: discord.Thread, guild: discord.Gu
         "created_at_ts": int(created_at.timestamp()) if created_at else 0,
         "image_url": image_url,
         "local_image_path": cache_path,
+        "price_amount": price_amount,
+        "price_currency": price_currency,
+        "price_text": price_text,
     }
 
 
@@ -4313,23 +4327,109 @@ def _market_parse_summary(content: str) -> tuple[str | None, str]:
     return side, title[:160]
 
 
+def _market_parse_price(content: str) -> tuple[str, str]:
+    text = str(content or "")
+    best_match = None
+    for m in _MARKET_PRICE_RE.finditer(text):
+        best_match = m
+    if best_match is None:
+        return "", ""
+    amount_raw = str(best_match.group(1) or "").replace(",", "").strip()
+    currency = str(best_match.group(2) or "").upper().strip()
+    if not amount_raw or not currency:
+        return "", ""
+    try:
+        d = Decimal(amount_raw)
+        amount = format(d.normalize(), "f")
+        if "." in amount:
+            amount = amount.rstrip("0").rstrip(".")
+        amount = amount or "0"
+    except Exception:
+        amount = amount_raw
+    return amount, currency
+
+
+def _market_is_public_image_url(url: str | None) -> bool:
+    u = str(url or "").strip()
+    return u.startswith("https://") or u.startswith("http://")
+
+
+def _market_item_price_text(item: dict) -> str:
+    direct = str(item.get("price_text") or "").strip()
+    if direct:
+        return direct
+    for field in ("summary", "title"):
+        amount, currency = _market_parse_price(str(item.get(field) or ""))
+        if amount and currency:
+            return f"{amount} {currency}"
+    return ""
+
+
+def _market_side_label(side: str | None, lang: str = "zh") -> str:
+    s = str(side or "").upper().strip()
+    if s == "WTS":
+        return _t(lang, "賣", "Sell", "판매", "卖")
+    if s == "WTB":
+        return _t(lang, "買", "Buy", "구매", "买")
+    return s or "-"
+
+
+def _market_item_image_url(item: dict) -> str:
+    url = str(item.get("image_url") or "").strip()
+    if _market_is_public_image_url(url):
+        return url
+    return ""
+
+
+def _market_item_local_image_path(item: dict) -> str:
+    path = str(item.get("local_image_path") or "").strip()
+    if path and os.path.exists(path):
+        return path
+    return ""
+
+
+def _market_local_image_filename(item: dict, local_path: str) -> str:
+    allowed_ext = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+    src_url = str(item.get("image_url") or "").strip()
+    url_path = re.split(r"[?#]", src_url, maxsplit=1)[0]
+    ext = os.path.splitext(url_path)[1].lower()
+    if ext not in allowed_ext:
+        local_ext = os.path.splitext(local_path)[1].lower()
+        ext = local_ext if local_ext in allowed_ext else ".jpg"
+    return f"market_{item.get('thread_id', 'x')}_{item.get('message_id', 'x')}{ext}"
+
+
 def _market_extract_image_url(message: discord.Message | None) -> str:
     if message is None:
         return ""
-    for att in list(getattr(message, "attachments", []) or []):
+    attachments = list(getattr(message, "attachments", []) or [])
+    for att in attachments:
         if _is_image_attachment(att):
             url = str(getattr(att, "url", "") or "").strip()
-            if url:
+            if _market_is_public_image_url(url):
                 return url
     for emb in list(getattr(message, "embeds", []) or []):
         image = getattr(emb, "image", None)
         image_url = str(getattr(image, "url", "") or "").strip()
-        if image_url:
-            return image_url
+        image_proxy = str(getattr(image, "proxy_url", "") or "").strip()
+        for cand in (image_url, image_proxy):
+            if _market_is_public_image_url(cand):
+                return cand
+            if cand.startswith("attachment://"):
+                filename = cand[len("attachment://"):].strip()
+                if not filename:
+                    continue
+                for att in attachments:
+                    if str(getattr(att, "filename", "") or "").strip() == filename and _is_image_attachment(att):
+                        att_url = str(getattr(att, "url", "") or "").strip()
+                        if _market_is_public_image_url(att_url):
+                            return att_url
         thumb = getattr(emb, "thumbnail", None)
         thumb_url = str(getattr(thumb, "url", "") or "").strip()
-        if thumb_url:
-            return thumb_url
+        thumb_proxy = str(getattr(thumb, "proxy_url", "") or "").strip()
+        for cand in (thumb_url, thumb_proxy):
+            if _market_is_public_image_url(cand):
+                return cand
     return ""
 
 
@@ -4503,6 +4603,36 @@ async def _market_collect_listings(
         "index_path": market_index_path,
         "images_dir": _market_cache_images_dir(),
     }
+
+
+async def _market_live_sync_refresh(reason: str, force: bool = False) -> bool:
+    if not MARKET_LIVE_SYNC_ON_EVENT:
+        return False
+    global MARKET_LIVE_SYNC_LOCK, MARKET_LIVE_SYNC_LAST_TS
+    if MARKET_LIVE_SYNC_LOCK is None:
+        MARKET_LIVE_SYNC_LOCK = asyncio.Lock()
+
+    now = time.time()
+    if (not force) and (now - MARKET_LIVE_SYNC_LAST_TS < MARKET_LIVE_SYNC_DEBOUNCE_SEC):
+        return False
+    if MARKET_LIVE_SYNC_LOCK.locked() and not force:
+        return False
+
+    async with MARKET_LIVE_SYNC_LOCK:
+        now2 = time.time()
+        if (not force) and (now2 - MARKET_LIVE_SYNC_LAST_TS < MARKET_LIVE_SYNC_DEBOUNCE_SEC):
+            return False
+        listings, meta = await _market_collect_listings()
+        MARKET_LIVE_SYNC_LAST_TS = time.time()
+        err = str(meta.get("error") or "").strip()
+        if err:
+            print(f"⚠️ market live sync failed reason={reason} error={err}")
+            return False
+        print(
+            "✅ market live sync "
+            f"reason={reason} listings={len(listings)} active_threads={int(meta.get('active_thread_count') or 0)}"
+        )
+        return True
 
 
 def _json_loads_loose(text: str):
@@ -5426,6 +5556,9 @@ async def on_ready():
         if not ranking_daily_sync_job.is_running():
             ranking_daily_sync_job.start()
 
+    if MARKET_LIVE_SYNC_ON_EVENT and MARKET_SOURCE_CHANNEL_ID > 0:
+        asyncio.create_task(_market_live_sync_refresh("startup", force=True))
+
 class PCSelect(discord.ui.Select):
     def __init__(self, candidates):
         options = []
@@ -6101,11 +6234,16 @@ class FlexPackConfigView(discord.ui.View):
 class MarketListingSelect(discord.ui.Select):
     def __init__(self, parent_view: "MarketBrowserView", items: list[dict]):
         self.parent_view = parent_view
+        lang = self.parent_view.lang
         options = []
         for item in items[:25]:
             title = str(item.get("title") or "Untitled").strip() or "Untitled"
             label = title[:100]
-            description = f"{item.get('side', '-')}"[:100]
+            side = str(item.get("side") or "-")
+            price = _market_item_price_text(item)
+            side_label = _market_side_label(side, lang)
+            description = f"{side_label}｜💵{price}" if price else side_label
+            description = description[:100]
             options.append(
                 discord.SelectOption(
                     label=label,
@@ -6114,38 +6252,58 @@ class MarketListingSelect(discord.ui.Select):
                 )
             )
         super().__init__(
-            placeholder="選擇卡片查看圖片與直達連結",
+            placeholder=_t(
+                lang,
+                "選擇卡片查看圖片與直達連結",
+                "Select a card to view image and direct link",
+                "카드를 선택해 이미지와 바로가기 확인",
+                "选择卡片查看图片与直达链接",
+            ),
             min_values=1,
             max_values=1,
-            options=options or [discord.SelectOption(label="目前無卡片", value="__none__")],
+            options=options or [discord.SelectOption(label=_t(lang, "目前無卡片", "No cards", "카드 없음", "暂无卡片"), value="__none__")],
             row=2,
         )
         if not options:
             self.disabled = True
 
     async def callback(self, interaction: discord.Interaction):
+        lang = self.parent_view.lang
         selected = self.values[0]
         if selected == "__none__":
-            await interaction.response.send_message("目前這頁沒有可選擇的卡片。", ephemeral=True)
+            await interaction.response.send_message(
+                _t(lang, "目前這頁沒有可選擇的卡片。", "No selectable cards on this page.", "이 페이지에는 선택 가능한 카드가 없습니다.", "当前页没有可选择的卡片。"),
+                ephemeral=True,
+            )
             return
 
         item = self.parent_view.key_to_item.get(selected)
         if not item:
-            await interaction.response.send_message("找不到該卡片資料，請按「重新整理」。", ephemeral=True)
+            await interaction.response.send_message(
+                _t(lang, "找不到該卡片資料，請按「重新整理」。", "Card data not found. Please click Refresh.", "카드 데이터를 찾을 수 없습니다. 새로고침을 눌러주세요.", "找不到该卡片数据，请按“刷新”。"),
+                ephemeral=True,
+            )
             return
 
         side = str(item.get("side") or "-")
+        side_label = _market_side_label(side, lang)
         title = str(item.get("title") or "Untitled").strip() or "Untitled"
         thread_url = str(item.get("thread_url") or "").strip()
-        image_url = str(item.get("image_url") or "").strip()
+        image_url = _market_item_image_url(item)
+        local_image_path = _market_item_local_image_path(item)
         summary = str(item.get("summary") or "").strip()
+        price_text = _market_item_price_text(item)
         ts = int(item.get("created_at_ts") or 0)
 
-        desc_lines = [f"類型：**{side}**"]
+        if price_text:
+            desc_lines = [f"💵 **{price_text}**"]
+        else:
+            desc_lines = [f"💵 **{_t(lang, '未標示', 'N/A', '미표시', '未标示')}**"]
+        desc_lines.append(f"{_t(lang, '類型', 'Type', '유형', '类型')}：**{side_label}**")
         if ts > 0:
-            desc_lines.append(f"時間：<t:{ts}:f>（<t:{ts}:R>）")
+            desc_lines.append(f"{_t(lang, '時間', 'Time', '시간', '时间')}：<t:{ts}:f>（<t:{ts}:R>）")
         if thread_url:
-            desc_lines.append(f"[直達討論串]({thread_url})")
+            desc_lines.append(f"[{_t(lang, '直達討論串', 'Open Thread', '스레드 바로가기', '直达讨论串')}]({thread_url})")
         if summary:
             desc_lines.append("")
             desc_lines.append(f"```text\n{summary[:600]}\n```")
@@ -6161,15 +6319,25 @@ class MarketListingSelect(discord.ui.Select):
         detail_view = discord.ui.View()
         if thread_url:
             detail_view.add_item(discord.ui.Button(label="直達討論串", url=thread_url))
+        if image_url:
+            await interaction.response.send_message(embed=embed, view=detail_view, ephemeral=True)
+            return
+        if local_image_path:
+            filename = _market_local_image_filename(item, local_image_path)
+            file = discord.File(local_image_path, filename=filename)
+            embed.set_image(url=f"attachment://{filename}")
+            await interaction.response.send_message(embed=embed, view=detail_view, file=file, ephemeral=True)
+            return
         await interaction.response.send_message(embed=embed, view=detail_view, ephemeral=True)
 
 
 class MarketBrowserView(discord.ui.View):
-    def __init__(self, author_id: int, listings: list[dict], meta: dict | None = None):
+    def __init__(self, author_id: int, listings: list[dict], meta: dict | None = None, lang: str = "zh"):
         super().__init__(timeout=300)
         self.author_id = int(author_id)
-        self.listings = list(listings or [])
+        self.listings = [item for item in list(listings or []) if _market_item_image_url(item)]
         self.meta = dict(meta or {})
+        self.lang = str(lang or "zh")
         self.selected_side = "WTS"
         self.page = 0
         self.page_size = 10
@@ -6207,44 +6375,58 @@ class MarketBrowserView(discord.ui.View):
         active_threads = int(self.meta.get("active_thread_count") or 0)
         source_channel_id = int(self.meta.get("source_channel_id") or MARKET_SOURCE_CHANNEL_ID)
         filtered = self._filtered()
-        page_items = self._page_items()
         total_pages = self._total_pages()
-        start_idx = self.page * self.page_size
 
         lines = [
             "📦 **Market Browser**",
-            f"來源頻道：<#{source_channel_id}>（只看未封存討論串）",
-            f"目前索引：**{len(self.listings)}** 筆（最近 {MARKET_RECENT_LIMIT}）｜ Active Threads：**{active_threads}**",
-            f"篩選：**{self.selected_side}**（WTS={self._count_by_side('WTS')} / WTB={self._count_by_side('WTB')}）｜ 第 **{self.page + 1}/{total_pages}** 頁",
+            _t(self.lang, f"來源頻道：<#{source_channel_id}>（只看未封存討論串）", f"Source: <#{source_channel_id}> (unarchived threads only)", f"소스 채널: <#{source_channel_id}> (미보관 스레드만)", f"来源频道：<#{source_channel_id}>（仅看未封存讨论串）"),
+            _t(self.lang, f"目前索引：**{len(self.listings)}** 筆（最近 {MARKET_RECENT_LIMIT}）｜ Active Threads：**{active_threads}**", f"Indexed: **{len(self.listings)}** (latest {MARKET_RECENT_LIMIT}) | Active Threads: **{active_threads}**", f"인덱스: **{len(self.listings)}** (최근 {MARKET_RECENT_LIMIT}) | 활성 스레드: **{active_threads}**", f"当前索引：**{len(self.listings)}** 笔（最近 {MARKET_RECENT_LIMIT}）｜Active Threads：**{active_threads}**"),
+            _t(self.lang, f"篩選：**{_market_side_label(self.selected_side, self.lang)}**（賣={self._count_by_side('WTS')} / 買={self._count_by_side('WTB')}）｜ 第 **{self.page + 1}/{total_pages}** 頁", f"Filter: **{_market_side_label(self.selected_side, self.lang)}** (Sell={self._count_by_side('WTS')} / Buy={self._count_by_side('WTB')}) | Page **{self.page + 1}/{total_pages}**", f"필터: **{_market_side_label(self.selected_side, self.lang)}** (판매={self._count_by_side('WTS')} / 구매={self._count_by_side('WTB')}) | **{self.page + 1}/{total_pages}** 페이지", f"筛选：**{_market_side_label(self.selected_side, self.lang)}**（卖={self._count_by_side('WTS')} / 买={self._count_by_side('WTB')}）｜第 **{self.page + 1}/{total_pages}** 页"),
             "",
         ]
 
         if not filtered:
-            lines.append("目前沒有符合的卡片。")
+            lines.append(_t(self.lang, "目前沒有符合的卡片。", "No matching cards.", "조건에 맞는 카드가 없습니다.", "目前没有符合的卡片。"))
         else:
-            for idx, item in enumerate(page_items, start=start_idx + 1):
-                title = str(item.get("title") or "Untitled").strip() or "Untitled"
-                thread_url = str(item.get("thread_url") or "").strip()
-                image_url = str(item.get("image_url") or "").strip()
-                ts = int(item.get("created_at_ts") or 0)
-                lines.append(f"{idx}. **{title[:140]}**")
-                sub = []
-                if thread_url:
-                    sub.append(f"[直達討論串]({thread_url})")
-                if image_url:
-                    sub.append(f"[圖片]({image_url})")
-                if ts > 0:
-                    sub.append(f"<t:{ts}:R>")
-                if sub:
-                    lines.append("｜".join(sub))
+            lines.append(_t(self.lang, "卡片已用嵌入卡片顯示於下方（小圖預覽 + 價格 + 連結）。", "Cards are shown below as embeds (thumbnail + price + link).", "아래에 임베드 카드로 표시됩니다 (썸네일 + 가격 + 링크).", "卡片已以下方嵌入卡片显示（小图预览 + 价格 + 链接）。"))
 
         lines.append("")
-        lines.append("提示：可用下拉選單查看單一卡片的大圖與按鈕連結。")
+        lines.append(_t(self.lang, "提示：可用下拉選單查看單一卡片完整大圖與按鈕連結。", "Tip: Use the dropdown to view one card's full image and button link.", "팁: 드롭다운에서 단일 카드의 큰 이미지와 버튼 링크를 확인할 수 있습니다.", "提示：可用下拉选单查看单一卡片完整大图与按钮链接。"))
         text = "\n".join(lines)
         # Discord message content hard limit is 2000.
         if len(text) > 1950:
             text = text[:1930].rstrip() + "\n…"
         return text
+
+    def render_embeds(self) -> list[discord.Embed]:
+        embeds: list[discord.Embed] = []
+        start_idx = self.page * self.page_size
+        for idx, item in enumerate(self._page_items(), start=start_idx + 1):
+            side = str(item.get("side") or "-")
+            side_label = _market_side_label(side, self.lang)
+            title = str(item.get("title") or "Untitled").strip() or "Untitled"
+            thread_url = str(item.get("thread_url") or "").strip()
+            ts = int(item.get("created_at_ts") or 0)
+            price_text = _market_item_price_text(item) or "未標示"
+            top_line = f"💵 {price_text}｜{side_label}"
+            desc_lines = [f"{idx}. {title[:220]}"]
+            if ts > 0:
+                desc_lines.append(f"<t:{ts}:R>")
+            if thread_url:
+                desc_lines.append(f"[{_t(self.lang, '直達討論串', 'Open Thread', '스레드 바로가기', '直达讨论串')}]({thread_url})")
+            embed = discord.Embed(
+                title=top_line[:256],
+                description="\n".join(desc_lines)[:1024],
+                color=0x2ECC71 if side == "WTS" else 0x3498DB,
+            )
+            image_url = _market_item_image_url(item)
+            if image_url:
+                # Medium preview size: larger than icon, smaller than full image.
+                embed.set_thumbnail(url=image_url)
+            embeds.append(embed)
+            if len(embeds) >= 10:
+                break
+        return embeds
 
     def _rebuild_components(self):
         self.clear_items()
@@ -6256,65 +6438,65 @@ class MarketBrowserView(discord.ui.View):
                 self.key_to_item[key] = item
 
         wts_btn = discord.ui.Button(
-            label=f"WTS ({self._count_by_side('WTS')})",
+            label=f"{_market_side_label('WTS', self.lang)} ({self._count_by_side('WTS')})",
             style=discord.ButtonStyle.primary if self.selected_side == "WTS" else discord.ButtonStyle.secondary,
             row=0,
         )
         wtb_btn = discord.ui.Button(
-            label=f"WTB ({self._count_by_side('WTB')})",
+            label=f"{_market_side_label('WTB', self.lang)} ({self._count_by_side('WTB')})",
             style=discord.ButtonStyle.primary if self.selected_side == "WTB" else discord.ButtonStyle.secondary,
             row=0,
         )
 
         prev_btn = discord.ui.Button(
-            label="上一頁",
+            label=_t(self.lang, "上一頁", "Prev", "이전", "上一页"),
             style=discord.ButtonStyle.secondary,
             row=1,
             disabled=(self.page <= 0),
         )
         next_btn = discord.ui.Button(
-            label="下一頁",
+            label=_t(self.lang, "下一頁", "Next", "다음", "下一页"),
             style=discord.ButtonStyle.secondary,
             row=1,
             disabled=(self.page + 1 >= self._total_pages()),
         )
-        refresh_btn = discord.ui.Button(label="重新整理", style=discord.ButtonStyle.success, row=1)
+        refresh_btn = discord.ui.Button(label=_t(self.lang, "重新整理", "Refresh", "새로고침", "刷新"), style=discord.ButtonStyle.success, row=1)
 
         async def _on_wts(interaction: discord.Interaction):
             self.selected_side = "WTS"
             self.page = 0
             self._rebuild_components()
-            await interaction.response.edit_message(content=self.render_message(), view=self)
+            await interaction.response.edit_message(content=self.render_message(), embeds=self.render_embeds(), view=self)
 
         async def _on_wtb(interaction: discord.Interaction):
             self.selected_side = "WTB"
             self.page = 0
             self._rebuild_components()
-            await interaction.response.edit_message(content=self.render_message(), view=self)
+            await interaction.response.edit_message(content=self.render_message(), embeds=self.render_embeds(), view=self)
 
         async def _on_prev(interaction: discord.Interaction):
             self.page = max(0, self.page - 1)
             self._rebuild_components()
-            await interaction.response.edit_message(content=self.render_message(), view=self)
+            await interaction.response.edit_message(content=self.render_message(), embeds=self.render_embeds(), view=self)
 
         async def _on_next(interaction: discord.Interaction):
             self.page = min(self._total_pages() - 1, self.page + 1)
             self._rebuild_components()
-            await interaction.response.edit_message(content=self.render_message(), view=self)
+            await interaction.response.edit_message(content=self.render_message(), embeds=self.render_embeds(), view=self)
 
         async def _on_refresh(interaction: discord.Interaction):
             await interaction.response.defer()
             listings, meta = await _market_collect_listings()
-            self.listings = list(listings or [])
+            self.listings = [item for item in list(listings or []) if _market_item_image_url(item)]
             self.meta = dict(meta or {})
             self.page = 0
             if self.selected_side not in ("WTS", "WTB"):
                 self.selected_side = "WTS"
             self._rebuild_components()
             if self.bound_message:
-                await self.bound_message.edit(content=self.render_message(), view=self)
+                await self.bound_message.edit(content=self.render_message(), embeds=self.render_embeds(), view=self)
             else:
-                await interaction.edit_original_response(content=self.render_message(), view=self)
+                await interaction.edit_original_response(content=self.render_message(), embeds=self.render_embeds(), view=self)
 
         wts_btn.callback = _on_wts
         wtb_btn.callback = _on_wtb
@@ -6331,7 +6513,10 @@ class MarketBrowserView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message("只有 `/market` 指令發起者可以操作這個面板。", ephemeral=True)
+            await interaction.response.send_message(
+                _t(self.lang, "只有 `/market` 指令發起者可以操作這個面板。", "Only the `/market` requester can use this panel.", "`/market` 요청자만 이 패널을 사용할 수 있습니다.", "只有 `/market` 指令发起者可以操作这个面板。"),
+                ephemeral=True,
+            )
             return False
         return True
 
@@ -6343,7 +6528,10 @@ class MarketBrowserView(discord.ui.View):
         self._disable_all()
         if self.bound_message:
             try:
-                await self.bound_message.edit(content="⏰ `/market` 面板已逾時，請重新輸入 `/market`。", view=self)
+                await self.bound_message.edit(
+                    content=_t(self.lang, "⏰ `/market` 面板已逾時，請重新輸入 `/market`。", "⏰ `/market` panel timed out. Please run `/market` again.", "⏰ `/market` 패널이 만료되었습니다. `/market`을 다시 실행하세요.", "⏰ `/market` 面板已超时，请重新输入 `/market`。"),
+                    view=self,
+                )
             except Exception:
                 pass
 
@@ -6675,30 +6863,51 @@ async def cardset(interaction: discord.Interaction, series_code: str):
 @tree.command(name="market", description="瀏覽市場討論串（WTS / WTB）")
 async def market(interaction: discord.Interaction):
     thread: discord.Thread | None = None
+    lang = "zh"
     try:
+        lang_view = LanguageSelectView(interaction.user.id, timeout_seconds=20)
+        await interaction.response.send_message(
+            "🌐 請先選擇語言 / Please choose language",
+            view=lang_view,
+            ephemeral=False,
+        )
+        starter = await interaction.original_response()
+        picked_lang, selected = await lang_view.wait_for_choice()
+        lang = picked_lang if selected and picked_lang else "zh"
+        lang_view._disable_all()
         try:
-            await interaction.response.defer(ephemeral=False, thinking=False)
+            if selected:
+                await starter.edit(
+                    content=_t(
+                        lang,
+                        f"✅ 語言已選擇：{LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '繁體中文')}**\n📦 正在載入 Market Browser...",
+                        f"✅ Language selected: {LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, 'English')}**\n📦 Loading Market Browser...",
+                        f"✅ 언어 선택 완료: {LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '한국어')}**\n📦 Market Browser를 불러오는 중...",
+                        f"✅ 语言已选择：{LANG_FLAGS.get(lang, '🌐')} **{LANG_LABELS.get(lang, '简体中文')}**\n📦 正在载入 Market Browser...",
+                    ),
+                    view=lang_view,
+                )
+            else:
+                await starter.edit(
+                    content=_t(
+                        lang,
+                        "⏱️ 20 秒未選擇，已使用預設語言：🇹🇼 **繁體中文**。\n📦 正在載入 Market Browser...",
+                        "⏱️ No selection in 20s. Default language set to 🇹🇼 **Traditional Chinese**.\n📦 Loading Market Browser...",
+                        "⏱️ 20초 내 미선택으로 기본 언어 🇹🇼 **번체 중국어**를 사용합니다.\n📦 Market Browser를 불러오는 중...",
+                        "⏱️ 20 秒未选择，已使用默认语言：🇹🇼 **繁体中文**。\n📦 正在载入 Market Browser...",
+                    ),
+                    view=lang_view,
+                )
         except Exception:
             pass
 
-        listings, meta = await _market_collect_listings()
-        error = str(meta.get("error") or "").strip()
-
         if isinstance(interaction.channel, discord.Thread):
             thread = interaction.channel
-            try:
-                await interaction.followup.send("📦 正在載入 `/market` 面板...")
-            except Exception:
-                pass
         else:
             channel = interaction.channel
-            try:
-                starter = await interaction.followup.send("📦 正在建立 `/market` 討論串...", wait=True)
-            except Exception:
-                if channel is None:
-                    print("❌ /market 互動已失效且找不到可用頻道。", file=sys.stderr)
-                    return
-                starter = await channel.send("📦 正在建立 `/market` 討論串...")
+            if channel is None:
+                print("❌ /market 互動已失效且找不到可用頻道。", file=sys.stderr)
+                return
 
             thread_name = f"market-{datetime.now().strftime('%m%d-%H%M')}"
             try:
@@ -6715,25 +6924,64 @@ async def market(interaction: discord.Interaction):
         if thread is None:
             raise RuntimeError("market thread is not available")
 
+        cached_items, cached_meta = _market_load_cached_index(limit=MARKET_RECENT_LIMIT)
+        if bool(cached_meta.get("from_cache")) and (cached_items or os.path.exists(_market_index_path())):
+            listings = list(cached_items or [])
+            meta = dict(cached_meta or {})
+            error = str(meta.get("error") or "").strip()
+            asyncio.create_task(_market_live_sync_refresh("market_open"))
+        else:
+            listings, meta = await _market_collect_listings()
+            error = str(meta.get("error") or "").strip()
+
         if error:
             if bool(meta.get("used_cache_fallback")):
                 updated_at = str(meta.get("updated_at") or "").strip() or "-"
                 await thread.send(
-                    "⚠️ 讀取 market 來源失敗，已改用本地快取。\n"
-                    f"Error: `{error}`\n"
-                    f"Cache Updated: `{updated_at}`\n"
-                    f"Cache Path: `{meta.get('index_path') or _market_index_path()}`"
+                    _t(
+                        lang,
+                        "⚠️ 讀取 market 來源失敗，已改用本地快取。\n"
+                        f"Error: `{error}`\n"
+                        f"Cache Updated: `{updated_at}`\n"
+                        f"Cache Path: `{meta.get('index_path') or _market_index_path()}`",
+                        "⚠️ Failed to read market source. Using local cache.\n"
+                        f"Error: `{error}`\n"
+                        f"Cache Updated: `{updated_at}`\n"
+                        f"Cache Path: `{meta.get('index_path') or _market_index_path()}`",
+                        "⚠️ 마켓 소스 읽기에 실패하여 로컬 캐시를 사용합니다.\n"
+                        f"Error: `{error}`\n"
+                        f"Cache Updated: `{updated_at}`\n"
+                        f"Cache Path: `{meta.get('index_path') or _market_index_path()}`",
+                        "⚠️ 读取 market 来源失败，已改用本地缓存。\n"
+                        f"Error: `{error}`\n"
+                        f"Cache Updated: `{updated_at}`\n"
+                        f"Cache Path: `{meta.get('index_path') or _market_index_path()}`",
+                    )
                 )
             else:
-                await thread.send(f"⚠️ 讀取 market 來源時發生問題：`{error}`")
+                await thread.send(
+                    _t(
+                        lang,
+                        f"⚠️ 讀取 market 來源時發生問題：`{error}`",
+                        f"⚠️ Error reading market source: `{error}`",
+                        f"⚠️ 마켓 소스 읽기 오류: `{error}`",
+                        f"⚠️ 读取 market 来源时发生问题：`{error}`",
+                    )
+                )
 
-        view = MarketBrowserView(interaction.user.id, listings, meta=meta)
-        panel_msg = await thread.send(view.render_message(), view=view)
+        view = MarketBrowserView(interaction.user.id, listings, meta=meta, lang=lang)
+        panel_msg = await thread.send(view.render_message(), embeds=view.render_embeds(), view=view)
         view.bind_message(panel_msg)
     except Exception as e:
         print(f"❌ /market 失敗: {e}", file=sys.stderr)
         print(traceback.format_exc(), file=sys.stderr)
-        err_text = f"❌ `/market` 執行失敗：{e}"
+        err_text = _t(
+            lang,
+            f"❌ `/market` 執行失敗：{e}",
+            f"❌ `/market` failed: {e}",
+            f"❌ `/market` 실행 실패: {e}",
+            f"❌ `/market` 执行失败：{e}",
+        )
         if thread is not None:
             try:
                 await thread.send(err_text)
@@ -7284,9 +7532,47 @@ async def on_interaction(interaction: discord.Interaction):
 
 
 @client.event
+async def on_thread_create(thread: discord.Thread):
+    try:
+        parent_id = int(getattr(thread, "parent_id", 0) or 0)
+        if parent_id != MARKET_SOURCE_CHANNEL_ID:
+            return
+        if bool(getattr(thread, "archived", False)):
+            return
+        asyncio.create_task(_market_live_sync_refresh("thread_create"))
+    except Exception as e:
+        print(f"⚠️ market thread_create hook failed: {e}", file=sys.stderr)
+
+
+@client.event
+async def on_thread_update(before: discord.Thread, after: discord.Thread):
+    try:
+        parent_id = int(getattr(after, "parent_id", 0) or 0)
+        if parent_id != MARKET_SOURCE_CHANNEL_ID:
+            return
+        if bool(getattr(before, "archived", False)) != bool(getattr(after, "archived", False)):
+            asyncio.create_task(_market_live_sync_refresh("thread_archive_state_changed"))
+    except Exception as e:
+        print(f"⚠️ market thread_update hook failed: {e}", file=sys.stderr)
+
+
+@client.event
 async def on_message(message):
     if message.author == client.user:
         return
+
+    try:
+        ch = message.channel
+        if isinstance(ch, discord.Thread):
+            parent_id = int(getattr(ch, "parent_id", 0) or 0)
+            if parent_id == MARKET_SOURCE_CHANNEL_ID:
+                author_id = int(getattr(message.author, "id", 0) or 0)
+                if MARKET_SUMMARY_BOT_ID <= 0 or author_id == MARKET_SUMMARY_BOT_ID:
+                    side, _title = _market_parse_summary(str(getattr(message, "content", "") or ""))
+                    if side in ("WTS", "WTB"):
+                        asyncio.create_task(_market_live_sync_refresh("summary_message"))
+    except Exception as e:
+        print(f"⚠️ market summary hook failed: {e}", file=sys.stderr)
 
     bot_mentioned = client.user in message.mentions
     content_lower = message.content.lower().strip()
