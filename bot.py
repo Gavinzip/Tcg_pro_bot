@@ -4546,6 +4546,7 @@ async def _market_collect_listings(
 
     listings: list[dict] = []
     image_cache_tasks: list[asyncio.Task] = []
+    active_thread_count = len([t for t in source_threads if not bool(getattr(t, "archived", False))])
     for thread in source_threads:
         item = await _market_parse_thread_listing(thread, guild)
         if not item:
@@ -4576,6 +4577,7 @@ async def _market_collect_listings(
                     "recent_limit": limit_meta,
                     "include_archived": bool(include_archived),
                     "scanned_thread_count": len(source_threads),
+                    "active_thread_count": int(active_thread_count),
                     "listing_count": len(listings),
                     "items": listings,
                 },
@@ -4595,7 +4597,7 @@ async def _market_collect_listings(
 
     return listings, {
         "source_channel_id": int(channel.id),
-        "active_thread_count": len([t for t in source_threads if not bool(getattr(t, "archived", False))]),
+        "active_thread_count": int(active_thread_count),
         "scanned_thread_count": len(source_threads),
         "listing_count": len(listings),
         "recent_limit": limit_meta,
