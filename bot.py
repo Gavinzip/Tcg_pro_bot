@@ -6240,7 +6240,11 @@ class MarketBrowserView(discord.ui.View):
 
         lines.append("")
         lines.append("提示：可用下拉選單查看單一卡片的大圖與按鈕連結。")
-        return "\n".join(lines)[:3900]
+        text = "\n".join(lines)
+        # Discord message content hard limit is 2000.
+        if len(text) > 1950:
+            text = text[:1930].rstrip() + "\n…"
+        return text
 
     def _rebuild_components(self):
         self.clear_items()
@@ -6670,53 +6674,86 @@ async def cardset(interaction: discord.Interaction, series_code: str):
 
 @tree.command(name="market", description="瀏覽市場討論串（WTS / WTB）")
 async def market(interaction: discord.Interaction):
-    listings, meta = await _market_collect_listings()
-    error = str(meta.get("error") or "").strip()
-
-    if isinstance(interaction.channel, discord.Thread):
-        thread = interaction.channel
+    thread: discord.Thread | None = None
+    try:
         try:
-            await interaction.response.send_message("📦 正在載入 `/market` 面板...", ephemeral=False)
-        except Exception:
-            pass
-    else:
-        try:
-            await interaction.response.send_message("📦 正在建立 `/market` 討論串...", ephemeral=False)
-            starter = await interaction.original_response()
-        except discord.NotFound:
-            channel = interaction.channel
-            if channel is None:
-                print("❌ /market 互動已失效且找不到可用頻道。", file=sys.stderr)
-                return
-            starter = await channel.send("📦 正在建立 `/market` 討論串...")
-
-        thread_name = f"market-{datetime.now().strftime('%m%d-%H%M')}"
-        try:
-            thread = await starter.create_thread(name=thread_name, auto_archive_duration=60)
-        except Exception as e:
-            print(f"❌ /market 建立討論串失敗: {e}", file=sys.stderr)
-            await starter.reply(f"❌ 建立討論串失敗：{e}")
-            return
-        try:
-            await thread.add_user(interaction.user)
+            await interaction.response.defer(ephemeral=False, thinking=False)
         except Exception:
             pass
 
-    if error:
-        if bool(meta.get("used_cache_fallback")):
-            updated_at = str(meta.get("updated_at") or "").strip() or "-"
-            await thread.send(
-                "⚠️ 讀取 market 來源失敗，已改用本地快取。\n"
-                f"Error: `{error}`\n"
-                f"Cache Updated: `{updated_at}`\n"
-                f"Cache Path: `{meta.get('index_path') or _market_index_path()}`"
-            )
+        listings, meta = await _market_collect_listings()
+        error = str(meta.get("error") or "").strip()
+
+        if isinstance(interaction.channel, discord.Thread):
+            thread = interaction.channel
+            try:
+                await interaction.followup.send("📦 正在載入 `/market` 面板...")
+            except Exception:
+                pass
         else:
-            await thread.send(f"⚠️ 讀取 market 來源時發生問題：`{error}`")
+            channel = interaction.channel
+            try:
+                starter = await interaction.followup.send("📦 正在建立 `/market` 討論串...", wait=True)
+            except Exception:
+                if channel is None:
+                    print("❌ /market 互動已失效且找不到可用頻道。", file=sys.stderr)
+                    return
+                starter = await channel.send("📦 正在建立 `/market` 討論串...")
 
-    view = MarketBrowserView(interaction.user.id, listings, meta=meta)
-    panel_msg = await thread.send(view.render_message(), view=view)
-    view.bind_message(panel_msg)
+            thread_name = f"market-{datetime.now().strftime('%m%d-%H%M')}"
+            try:
+                thread = await starter.create_thread(name=thread_name, auto_archive_duration=60)
+            except Exception as e:
+                print(f"❌ /market 建立討論串失敗: {e}", file=sys.stderr)
+                await starter.reply(f"❌ 建立討論串失敗：{e}")
+                return
+            try:
+                await thread.add_user(interaction.user)
+            except Exception:
+                pass
+
+        if thread is None:
+            raise RuntimeError("market thread is not available")
+
+        if error:
+            if bool(meta.get("used_cache_fallback")):
+                updated_at = str(meta.get("updated_at") or "").strip() or "-"
+                await thread.send(
+                    "⚠️ 讀取 market 來源失敗，已改用本地快取。\n"
+                    f"Error: `{error}`\n"
+                    f"Cache Updated: `{updated_at}`\n"
+                    f"Cache Path: `{meta.get('index_path') or _market_index_path()}`"
+                )
+            else:
+                await thread.send(f"⚠️ 讀取 market 來源時發生問題：`{error}`")
+
+        view = MarketBrowserView(interaction.user.id, listings, meta=meta)
+        panel_msg = await thread.send(view.render_message(), view=view)
+        view.bind_message(panel_msg)
+    except Exception as e:
+        print(f"❌ /market 失敗: {e}", file=sys.stderr)
+        print(traceback.format_exc(), file=sys.stderr)
+        err_text = f"❌ `/market` 執行失敗：{e}"
+        if thread is not None:
+            try:
+                await thread.send(err_text)
+                return
+            except Exception:
+                pass
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(err_text, ephemeral=True)
+            else:
+                await interaction.response.send_message(err_text, ephemeral=True)
+            return
+        except Exception:
+            pass
+        channel = interaction.channel
+        if channel is not None:
+            try:
+                await channel.send(err_text)
+            except Exception:
+                pass
 
 
 @tree.command(name="market_bootstrap", description="一次性全頻道掃描 market thread（含封存）")
