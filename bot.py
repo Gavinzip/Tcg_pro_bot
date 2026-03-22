@@ -7609,6 +7609,13 @@ async def on_message(message):
     ):
         valid_attachments = [a for a in message.attachments if _is_image_attachment(a)]
         if valid_attachments:
+            for _ in valid_attachments:
+                _record_bot_usage(
+                    str(getattr(message.author, "id", "unknown")),
+                    "image:auto_monitor",
+                    guild_id=getattr(message.guild, "id", None),
+                    channel_id=getattr(message.channel, "id", None),
+                )
             auto_monitor_handled = True
             asyncio.create_task(handle_images_from_monitored_channel(message, valid_attachments))
 
@@ -7622,6 +7629,14 @@ async def on_message(message):
             ]
             if not valid_attachments:
                 return
+
+            for _ in valid_attachments:
+                _record_bot_usage(
+                    str(getattr(message.author, "id", "unknown")),
+                    "image:mention",
+                    guild_id=getattr(message.guild, "id", None),
+                    channel_id=getattr(message.channel, "id", None),
+                )
 
             # 可用 !zh / !zhs(!cn) / !en / !ko 強制指定；未指定時用按鈕詢問，5 秒逾時預設繁中。
             lang_override = _parse_lang_override(content_lower)
