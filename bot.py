@@ -6334,7 +6334,7 @@ class MarketListingSelect(discord.ui.Select):
         item = self.parent_view.key_to_item.get(selected)
         if not item:
             await interaction.response.send_message(
-                _t(lang, "找不到該卡片資料，請重新輸入 `/market`。", "Card data not found. Please run `/market` again.", "카드 데이터를 찾을 수 없습니다. `/market`을 다시 실행해주세요.", "找不到该卡片数据，请重新输入 `/market`。"),
+                _t(lang, "找不到該卡片資料，請按「重新整理」。", "Card data not found. Please click Refresh.", "카드 데이터를 찾을 수 없습니다. 새로고침을 눌러주세요.", "找不到该卡片数据，请按“刷新”。"),
                 ephemeral=True,
             )
             return
@@ -6445,7 +6445,7 @@ class MarketBrowserView(discord.ui.View):
             lines.append(_t(self.lang, "卡片已用嵌入卡片顯示於下方（小圖預覽 + 價格 + 連結）。", "Cards are shown below as embeds (thumbnail + price + link).", "아래에 임베드 카드로 표시됩니다 (썸네일 + 가격 + 링크).", "卡片已以下方嵌入卡片显示（小图预览 + 价格 + 链接）。"))
 
         lines.append("")
-        lines.append(_t(self.lang, "提示：點嵌入圖片可放大檢視。", "Tip: Click an embedded image to zoom in.", "팁: 임베드 이미지를 눌러 확대해서 볼 수 있습니다.", "提示：点击嵌入图片可放大查看。"))
+        lines.append(_t(self.lang, "提示：按「重新整理」可即時更新列表；點嵌入圖片可放大檢視。", "Tip: Click Refresh to update the list now; click an embedded image to zoom in.", "팁: 새로고침으로 목록을 즉시 갱신할 수 있고, 임베드 이미지를 눌러 확대해서 볼 수 있습니다.", "提示：按“刷新”可即时更新列表；点击嵌入图片可放大查看。"))
         text = "\n".join(lines)
         # Discord message content hard limit is 2000.
         if len(text) > 1950:
@@ -6514,6 +6514,7 @@ class MarketBrowserView(discord.ui.View):
             row=1,
             disabled=(self.page + 1 >= self._total_pages()),
         )
+        refresh_btn = discord.ui.Button(label=_t(self.lang, "重新整理", "Refresh", "새로고침", "刷新"), style=discord.ButtonStyle.success, row=1)
 
         async def _on_wts(interaction: discord.Interaction):
             self.selected_side = "WTS"
@@ -6537,15 +6538,41 @@ class MarketBrowserView(discord.ui.View):
             self._rebuild_components()
             await interaction.response.edit_message(content=self.render_message(), embeds=self.render_embeds(), view=self)
 
+        async def _on_refresh(interaction: discord.Interaction):
+            await interaction.response.defer()
+            try:
+                # Force one live fetch attempt, then render from newest cache snapshot.
+                await _market_live_sync_refresh("manual_refresh", force=True)
+                cached_items, cached_meta = _market_load_cached_index(limit=MARKET_RECENT_LIMIT)
+                if bool(cached_meta.get("from_cache")) and (cached_items or os.path.exists(_market_index_path())):
+                    listings = cached_items
+                    meta = cached_meta
+                else:
+                    listings, meta = await _market_collect_listings()
+                self.listings = [item for item in list(listings or []) if _market_item_image_url(item)]
+                self.meta = dict(meta or {})
+            except Exception as e:
+                print(f"⚠️ market refresh failed: {e}", file=sys.stderr)
+            self.page = 0
+            if self.selected_side not in ("WTS", "WTB"):
+                self.selected_side = "WTS"
+            self._rebuild_components()
+            if self.bound_message:
+                await self.bound_message.edit(content=self.render_message(), embeds=self.render_embeds(), view=self)
+            else:
+                await interaction.edit_original_response(content=self.render_message(), embeds=self.render_embeds(), view=self)
+
         wts_btn.callback = _on_wts
         wtb_btn.callback = _on_wtb
         prev_btn.callback = _on_prev
         next_btn.callback = _on_next
+        refresh_btn.callback = _on_refresh
 
         self.add_item(wts_btn)
         self.add_item(wtb_btn)
         self.add_item(prev_btn)
         self.add_item(next_btn)
+        self.add_item(refresh_btn)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
