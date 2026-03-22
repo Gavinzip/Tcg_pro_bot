@@ -6393,7 +6393,7 @@ class MarketBrowserView(discord.ui.View):
             lines.append(_t(self.lang, "卡片已用嵌入卡片顯示於下方（小圖預覽 + 價格 + 連結）。", "Cards are shown below as embeds (thumbnail + price + link).", "아래에 임베드 카드로 표시됩니다 (썸네일 + 가격 + 링크).", "卡片已以下方嵌入卡片显示（小图预览 + 价格 + 链接）。"))
 
         lines.append("")
-        lines.append(_t(self.lang, "提示：按「重新整理」可即時更新列表。", "Tip: Click Refresh to update the list now.", "팁: 새로고침 버튼으로 목록을 즉시 갱신할 수 있습니다.", "提示：按“刷新”可即时更新列表。"))
+        lines.append(_t(self.lang, "提示：按「重新整理」可即時更新列表；點嵌入圖片可放大檢視。", "Tip: Click Refresh to update the list now; click an embedded image to zoom in.", "팁: 새로고침으로 목록을 즉시 갱신할 수 있고, 임베드 이미지를 눌러 확대해서 볼 수 있습니다.", "提示：按“刷新”可即时更新列表；点击嵌入图片可放大查看。"))
         text = "\n".join(lines)
         # Discord message content hard limit is 2000.
         if len(text) > 1950:
