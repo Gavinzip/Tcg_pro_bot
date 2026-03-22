@@ -813,8 +813,7 @@ def git_push_rankings(cfg: RankingConfig, now_dt: datetime, commit_message: str)
     if status.returncode != 0:
         raise RuntimeError(f"git status failed: {status.stderr.strip() or status.stdout.strip()}")
     if not status.stdout.strip():
-        head = _run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir)
-        return head.stdout.strip() or "no-change"
+        return "no-change"
 
     commit = _run(["git", "commit", "-m", commit_message], cwd=repo_dir)
     if commit.returncode != 0:
@@ -847,8 +846,7 @@ def git_push_market_cache(cfg: RankingConfig, commit_message: str) -> str:
     if status.returncode != 0:
         raise RuntimeError(f"git status failed: {status.stderr.strip() or status.stdout.strip()}")
     if not status.stdout.strip():
-        head = _run(["git", "rev-parse", "--short", "HEAD"], cwd=repo_dir)
-        return head.stdout.strip() or "no-change"
+        return "no-change"
 
     commit = _run(["git", "commit", "-m", commit_message], cwd=repo_dir)
     if commit.returncode != 0:
@@ -1929,7 +1927,11 @@ def main() -> int:
                 "latest_path": str(cfg.latest_path),
             },
         )
-        send_webhook(cfg, msg, success=True)
+        # Avoid noisy periodic notifications when push-only ran but nothing changed.
+        if backup_status == "pushed":
+            send_webhook(cfg, msg, success=True)
+        else:
+            print(f"[INFO] push_only no-change; webhook skipped trigger={cfg.trigger}")
         return 0
 
     if args.push_only:
