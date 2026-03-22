@@ -4173,6 +4173,39 @@ def _market_save_bootstrap_state(payload: dict[str, object]) -> None:
         pass
 
 
+def _market_write_index_file(
+    *,
+    listings: list[dict],
+    source_channel_id: int,
+    include_archived: bool,
+    scanned_thread_count: int,
+    active_thread_count: int,
+    recent_limit: int | str,
+) -> tuple[bool, str, str, str]:
+    market_index_path = _market_index_path()
+    updated_at = datetime.now(timezone.utc).isoformat()
+    payload: dict[str, object] = {
+        "updated_at": updated_at,
+        "source_channel_id": int(source_channel_id),
+        "summary_bot_id": int(MARKET_SUMMARY_BOT_ID),
+        "recent_limit": recent_limit,
+        "include_archived": bool(include_archived),
+        "scanned_thread_count": int(scanned_thread_count),
+        "active_thread_count": int(active_thread_count),
+        "listing_count": len(listings),
+        "items": list(listings or []),
+    }
+    try:
+        os.makedirs(os.path.dirname(market_index_path), exist_ok=True)
+        with open(market_index_path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(market_index_path + ".tmp", market_index_path)
+        return True, "", market_index_path, updated_at
+    except Exception as e:
+        return False, str(e), market_index_path, updated_at
+
+
 def _market_load_cached_index(limit: int | None = MARKET_RECENT_LIMIT) -> tuple[list[dict], dict]:
     path = _market_index_path()
     if not os.path.exists(path):
@@ -4569,30 +4602,16 @@ async def _market_collect_listings(
     else:
         limit_meta = "all"
 
-    market_index_path = _market_index_path()
-    try:
-        os.makedirs(os.path.dirname(market_index_path), exist_ok=True)
-        with open(market_index_path + ".tmp", "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "source_channel_id": int(channel.id),
-                    "summary_bot_id": int(MARKET_SUMMARY_BOT_ID),
-                    "recent_limit": limit_meta,
-                    "include_archived": bool(include_archived),
-                    "scanned_thread_count": len(source_threads),
-                    "active_thread_count": int(active_thread_count),
-                    "listing_count": len(listings),
-                    "items": listings,
-                },
-                f,
-                ensure_ascii=False,
-                indent=2,
-            )
-            f.write("\n")
-        os.replace(market_index_path + ".tmp", market_index_path)
-    except Exception:
-        pass
+    index_write_ok, index_write_error, market_index_path, index_updated_at = _market_write_index_file(
+        listings=listings,
+        source_channel_id=int(channel.id),
+        include_archived=bool(include_archived),
+        scanned_thread_count=len(source_threads),
+        active_thread_count=int(active_thread_count),
+        recent_limit=limit_meta,
+    )
+    if not index_write_ok:
+        print(f"⚠️ market index write failed: {index_write_error}", file=sys.stderr)
 
     if image_cache_tasks:
         # 不阻塞 /market 互動流程，讓快取背景下載即可。
@@ -4608,6 +4627,9 @@ async def _market_collect_listings(
         "include_archived": bool(include_archived),
         "index_path": market_index_path,
         "images_dir": _market_cache_images_dir(),
+        "updated_at": index_updated_at,
+        "index_write_ok": bool(index_write_ok),
+        "index_write_error": str(index_write_error or ""),
     }
 
 
@@ -7095,6 +7117,22 @@ async def market_bootstrap(
         )
         return
 
+    # 強制再寫一次索引，確保這次全掃內容一定落地到 market_index.json。
+    index_write_ok, index_write_error, forced_index_path, forced_updated_at = _market_write_index_file(
+        listings=listings,
+        source_channel_id=int(meta.get("source_channel_id") or MARKET_SOURCE_CHANNEL_ID),
+        include_archived=True,
+        scanned_thread_count=int(meta.get("scanned_thread_count") or 0),
+        active_thread_count=int(meta.get("active_thread_count") or 0),
+        recent_limit="all",
+    )
+    if not index_write_ok:
+        await interaction.followup.send(
+            f"❌ `market_bootstrap` 失敗：索引寫入失敗 `{index_write_error}`\nPath: `{forced_index_path}`",
+            ephemeral=True,
+        )
+        return
+
     state_payload: dict[str, object] = {
         "done": True,
         "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -7105,8 +7143,9 @@ async def market_bootstrap(
         "include_archived": True,
         "scanned_thread_count": int(meta.get("scanned_thread_count") or 0),
         "listing_count": len(listings),
-        "index_path": str(meta.get("index_path") or _market_index_path()),
+        "index_path": str(forced_index_path or meta.get("index_path") or _market_index_path()),
         "images_dir": str(meta.get("images_dir") or _market_cache_images_dir()),
+        "index_updated_at": str(forced_updated_at or meta.get("updated_at") or ""),
     }
     _market_save_bootstrap_state(state_payload)
 
