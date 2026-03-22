@@ -1927,11 +1927,7 @@ def main() -> int:
                 "latest_path": str(cfg.latest_path),
             },
         )
-        # Avoid noisy periodic notifications when push-only ran but nothing changed.
-        if backup_status == "pushed":
-            send_webhook(cfg, msg, success=True)
-        else:
-            print(f"[INFO] push_only no-change; webhook skipped trigger={cfg.trigger}")
+        send_webhook(cfg, msg, success=True)
         return 0
 
     if args.push_only:
@@ -1970,7 +1966,11 @@ def main() -> int:
                 "latest_path": str(cfg.latest_path),
             },
         )
-        send_webhook(cfg, msg, success=True)
+        # Avoid noisy periodic notifications when push-only ran but nothing changed.
+        if backup_status == "pushed":
+            send_webhook(cfg, msg, success=True)
+        else:
+            print(f"[INFO] push_only no-change; webhook skipped trigger={cfg.trigger}")
         return 0
 
     result = run_sync(cfg)
