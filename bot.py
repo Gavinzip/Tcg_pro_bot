@@ -710,6 +710,27 @@ def _subpack_monitor_render_change_message(prev: dict[str, object], curr: dict[s
     return "\n".join(lines)
 
 
+def _subpack_monitor_render_initial_message(curr: dict[str, object]) -> str:
+    tiers_obj = curr.get("tiers")
+    tiers_dict = tiers_obj if isinstance(tiers_obj, dict) else {}
+    tier_lines: list[str] = []
+    for tier_name in sorted(tiers_dict.keys(), key=_subpack_monitor_tier_sort_key):
+        tier_lines.append(f"- `{tier_name}`: `{_subpack_monitor_pct_text(str(tiers_dict.get(tier_name) or '0'))}`")
+
+    checked_at = int(curr.get("checked_at") or int(time.time()))
+    pack_id = str(curr.get("pack_id") or "")
+    ev_raw = str(curr.get("ev_raw") or "0")
+    lines = [
+        "🟢 **Subpack odds baseline initialized**",
+        f"packId: `{pack_id}`",
+        f"EV(raw): `{ev_raw}`",
+        "Current tiers:",
+        *(tier_lines or ["- (no tiers)"]),
+        f"Checked: <t:{checked_at}:F>",
+    ]
+    return "\n".join(lines)
+
+
 async def _subpack_monitor_send_message(text: str) -> bool:
     channel_id = int(SUBPACK_MONITOR_NOTIFY_CHANNEL_ID or 0)
     if channel_id <= 0:
@@ -757,12 +778,17 @@ async def _subpack_monitor_poll_once(trigger: str) -> bool:
         prev = SUBPACK_MONITOR_LAST_SNAPSHOT
         curr_sig = _subpack_monitor_snapshot_signature(curr)
         if not isinstance(prev, dict):
-            SUBPACK_MONITOR_LAST_SNAPSHOT = curr
-            print(
-                "📦 subpack monitor baseline set "
-                f"packId={SUBPACK_MONITOR_PACK_ID} ev={curr_sig[0]} tiers={len(curr_sig[1])}"
-            )
-            return True
+            init_msg = _subpack_monitor_render_initial_message(curr)
+            sent = await _subpack_monitor_send_message(init_msg)
+            if sent:
+                SUBPACK_MONITOR_LAST_SNAPSHOT = curr
+                print(
+                    "🟢 subpack monitor baseline sent "
+                    f"trigger={trigger} packId={SUBPACK_MONITOR_PACK_ID} "
+                    f"channel={SUBPACK_MONITOR_NOTIFY_CHANNEL_ID} ev={curr_sig[0]} tiers={len(curr_sig[1])}"
+                )
+                return True
+            return False
 
         prev_sig = _subpack_monitor_snapshot_signature(prev)
         if prev_sig == curr_sig:
