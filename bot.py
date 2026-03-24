@@ -432,6 +432,29 @@ RENAISS_COLLECTIBLE_BY_TOKEN_URL = "https://www.renaiss.xyz/api/trpc/collectible
 RENAISS_SBT_BADGES_URL = "https://www.renaiss.xyz/api/trpc/sbt.getUserBadges"
 RENAISS_ACTIVITY_LIST_URL = "https://www.renaiss.xyz/api/trpc/activity.getSubgraphUserActivities"
 RENAISS_TOKEN_ACTIVITY_URL = "https://www.renaiss.xyz/api/trpc/activity.getSubgraphTokenActivities"
+RENAISS_SUBPACK_INFO_URL = "https://www.renaiss.xyz/api/trpc/perpetualCardPack.getSubpackInfo"
+SUBPACK_MONITOR_ENABLED = _env_true("SUBPACK_MONITOR_ENABLED", True)
+SUBPACK_MONITOR_PACK_ID = str(
+    os.getenv("SUBPACK_MONITOR_PACK_ID", "a42fe06a-ae67-4f20-a275-6b2668e178fb")
+).strip()
+try:
+    SUBPACK_MONITOR_NOTIFY_CHANNEL_ID = int(
+        str(os.getenv("SUBPACK_MONITOR_NOTIFY_CHANNEL_ID", "1479720880845361242")).strip()
+    )
+except Exception:
+    SUBPACK_MONITOR_NOTIFY_CHANNEL_ID = 1479720880845361242
+try:
+    _subpack_monitor_interval_min = int(str(os.getenv("SUBPACK_MONITOR_INTERVAL_MINUTES", "1")).strip())
+except Exception:
+    _subpack_monitor_interval_min = 1
+SUBPACK_MONITOR_INTERVAL_MINUTES = max(1, _subpack_monitor_interval_min)
+try:
+    SUBPACK_MONITOR_TIMEOUT_SEC = max(3.0, float(str(os.getenv("SUBPACK_MONITOR_TIMEOUT_SEC", "12")).strip()))
+except Exception:
+    SUBPACK_MONITOR_TIMEOUT_SEC = 12.0
+SUBPACK_MONITOR_TIER_ORDER = ("common", "uncommon", "rare", "epic", "legendary")
+SUBPACK_MONITOR_LAST_SNAPSHOT: dict[str, object] | None = None
+SUBPACK_MONITOR_LOCK: asyncio.Lock | None = None
 PROFILE_PAGE_LIMIT = max(10, min(100, int(os.getenv("PROFILE_PAGE_LIMIT", "100"))))
 PROFILE_SCAN_MAX_OFFSET = max(PROFILE_PAGE_LIMIT, int(os.getenv("PROFILE_SCAN_MAX_OFFSET", "5000")))
 PROFILE_API_MAX_RETRIES = max(1, int(os.getenv("PROFILE_API_MAX_RETRIES", "4")))
@@ -577,6 +600,184 @@ def _to_decimal(value) -> Decimal:
         return Decimal(text)
     except (InvalidOperation, ValueError):
         return Decimal("0")
+
+
+def _subpack_monitor_tier_sort_key(tier: str) -> tuple[int, str]:
+    text = str(tier or "").strip().lower()
+    try:
+        return (SUBPACK_MONITOR_TIER_ORDER.index(text), text)
+    except ValueError:
+        return (len(SUBPACK_MONITOR_TIER_ORDER) + 10, text)
+
+
+def _subpack_monitor_fetch_snapshot_sync(pack_id: str) -> dict[str, object]:
+    pack_id_text = str(pack_id or "").strip()
+    if not pack_id_text:
+        raise ValueError("SUBPACK_MONITOR_PACK_ID is empty")
+
+    payload = {"0": {"json": {"packId": pack_id_text}}}
+    resp = _http_get(
+        RENAISS_SUBPACK_INFO_URL,
+        params={"batch": "1", "input": json.dumps(payload, separators=(",", ":"))},
+        timeout=SUBPACK_MONITOR_TIMEOUT_SEC,
+    )
+    resp.raise_for_status()
+    raw = resp.json()
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("Unexpected TRPC payload shape")
+    row0 = raw[0] if isinstance(raw[0], dict) else {}
+    err_obj = row0.get("error") if isinstance(row0, dict) else None
+    if err_obj:
+        raise RuntimeError(f"TRPC error: {err_obj}")
+
+    data_json = (
+        ((row0.get("result") or {}).get("data") or {}).get("json")
+        if isinstance(row0, dict)
+        else None
+    )
+    if not isinstance(data_json, dict):
+        raise ValueError("Missing result.data.json")
+
+    ev_raw = str(data_json.get("ev") or "0").strip() or "0"
+    tiers_raw = data_json.get("tiers") if isinstance(data_json.get("tiers"), dict) else {}
+
+    tiers: dict[str, str] = {}
+    for tier_name, tier_obj in tiers_raw.items():
+        if not isinstance(tier_obj, dict):
+            continue
+        chance_dec = _to_decimal(tier_obj.get("chance"))
+        tiers[str(tier_name).strip().lower()] = format(chance_dec, "f")
+
+    return {
+        "pack_id": pack_id_text,
+        "ev_raw": ev_raw,
+        "tiers": tiers,
+        "checked_at": int(time.time()),
+    }
+
+
+def _subpack_monitor_snapshot_signature(snapshot: dict[str, object]) -> tuple[str, tuple[tuple[str, str], ...]]:
+    ev_raw = str(snapshot.get("ev_raw") or "0")
+    tiers_obj = snapshot.get("tiers")
+    tiers_dict = tiers_obj if isinstance(tiers_obj, dict) else {}
+    pairs: list[tuple[str, str]] = []
+    for tier_name in sorted(tiers_dict.keys(), key=_subpack_monitor_tier_sort_key):
+        pairs.append((str(tier_name), str(tiers_dict.get(tier_name) or "0")))
+    return ev_raw, tuple(pairs)
+
+
+def _subpack_monitor_pct_text(chance_text: str | None) -> str:
+    chance = _to_decimal(chance_text)
+    pct = chance * Decimal("100")
+    return f"{pct:.4f}%"
+
+
+def _subpack_monitor_render_change_message(prev: dict[str, object], curr: dict[str, object]) -> str:
+    prev_tiers = prev.get("tiers") if isinstance(prev.get("tiers"), dict) else {}
+    curr_tiers = curr.get("tiers") if isinstance(curr.get("tiers"), dict) else {}
+    all_tiers = sorted({*prev_tiers.keys(), *curr_tiers.keys()}, key=_subpack_monitor_tier_sort_key)
+
+    changed_lines: list[str] = []
+    for tier in all_tiers:
+        before = str(prev_tiers.get(tier) or "0")
+        after = str(curr_tiers.get(tier) or "0")
+        if before == after:
+            continue
+        changed_lines.append(
+            f"- `{tier}`: `{_subpack_monitor_pct_text(before)}` -> `{_subpack_monitor_pct_text(after)}`"
+        )
+    if not changed_lines:
+        changed_lines.append("- tier values changed (raw comparison) but no formatted diff")
+
+    ev_before = str(prev.get("ev_raw") or "0")
+    ev_after = str(curr.get("ev_raw") or "0")
+    ev_line = (
+        f"`{ev_before}` -> `{ev_after}`"
+        if ev_before != ev_after
+        else f"`{ev_after}` (unchanged)"
+    )
+
+    checked_at = int(curr.get("checked_at") or int(time.time()))
+    pack_id = str(curr.get("pack_id") or "")
+    lines = [
+        "🔔 **Subpack odds updated**",
+        f"packId: `{pack_id}`",
+        f"EV(raw): {ev_line}",
+        "Changes:",
+        *changed_lines,
+        f"Checked: <t:{checked_at}:F>",
+    ]
+    return "\n".join(lines)
+
+
+async def _subpack_monitor_send_message(text: str) -> bool:
+    channel_id = int(SUBPACK_MONITOR_NOTIFY_CHANNEL_ID or 0)
+    if channel_id <= 0:
+        print("⚠️ subpack monitor: notify channel id is invalid")
+        return False
+    channel = client.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(channel_id)
+        except Exception as e:
+            print(f"⚠️ subpack monitor: cannot fetch channel {channel_id}: {e}")
+            return False
+    if channel is None or not hasattr(channel, "send"):
+        print(f"⚠️ subpack monitor: channel {channel_id} is not messageable")
+        return False
+    try:
+        await channel.send(text)
+        return True
+    except Exception as e:
+        print(f"⚠️ subpack monitor: send failed channel={channel_id} err={e}")
+        return False
+
+
+async def _subpack_monitor_poll_once(trigger: str) -> bool:
+    global SUBPACK_MONITOR_LOCK, SUBPACK_MONITOR_LAST_SNAPSHOT
+
+    if not SUBPACK_MONITOR_ENABLED:
+        return False
+    if not SUBPACK_MONITOR_PACK_ID:
+        print("⚠️ subpack monitor: pack id is empty")
+        return False
+    if SUBPACK_MONITOR_LOCK is None:
+        SUBPACK_MONITOR_LOCK = asyncio.Lock()
+    if SUBPACK_MONITOR_LOCK.locked():
+        return False
+
+    async with SUBPACK_MONITOR_LOCK:
+        loop = asyncio.get_running_loop()
+        try:
+            curr = await loop.run_in_executor(None, _subpack_monitor_fetch_snapshot_sync, SUBPACK_MONITOR_PACK_ID)
+        except Exception as e:
+            print(f"⚠️ subpack monitor fetch failed trigger={trigger}: {e}")
+            return False
+
+        prev = SUBPACK_MONITOR_LAST_SNAPSHOT
+        curr_sig = _subpack_monitor_snapshot_signature(curr)
+        if not isinstance(prev, dict):
+            SUBPACK_MONITOR_LAST_SNAPSHOT = curr
+            print(
+                "📦 subpack monitor baseline set "
+                f"packId={SUBPACK_MONITOR_PACK_ID} ev={curr_sig[0]} tiers={len(curr_sig[1])}"
+            )
+            return True
+
+        prev_sig = _subpack_monitor_snapshot_signature(prev)
+        if prev_sig == curr_sig:
+            return True
+
+        msg = _subpack_monitor_render_change_message(prev, curr)
+        sent = await _subpack_monitor_send_message(msg)
+        if sent:
+            SUBPACK_MONITOR_LAST_SNAPSHOT = curr
+            print(
+                "🔔 subpack monitor change sent "
+                f"trigger={trigger} packId={SUBPACK_MONITOR_PACK_ID} channel={SUBPACK_MONITOR_NOTIFY_CHANNEL_ID}"
+            )
+            return True
+        return False
 
 
 def _fmv_disk_cache_path(cache_key: str) -> str:
@@ -5603,6 +5804,16 @@ async def _before_ranking_daily_sync_job():
     await client.wait_until_ready()
 
 
+@tasks.loop(minutes=SUBPACK_MONITOR_INTERVAL_MINUTES)
+async def subpack_odds_monitor_job():
+    await _subpack_monitor_poll_once("interval")
+
+
+@subpack_odds_monitor_job.before_loop
+async def _before_subpack_odds_monitor_job():
+    await client.wait_until_ready()
+
+
 @client.event
 async def on_ready():
     global NFT_SYNC_STARTUP_DONE, NFT_SYNC_STARTUP_LOCK, RANK_SYNC_STARTUP_DONE, RANK_SYNC_STARTUP_LOCK
@@ -5648,6 +5859,15 @@ async def on_ready():
 
     if MARKET_LIVE_SYNC_ON_EVENT and MARKET_SOURCE_CHANNEL_ID > 0:
         asyncio.create_task(_market_live_sync_refresh("startup", force=True))
+    if SUBPACK_MONITOR_ENABLED and SUBPACK_MONITOR_PACK_ID:
+        asyncio.create_task(_subpack_monitor_poll_once("startup"))
+        if not subpack_odds_monitor_job.is_running():
+            subpack_odds_monitor_job.start()
+            print(
+                "✅ subpack monitor started "
+                f"packId={SUBPACK_MONITOR_PACK_ID} interval={SUBPACK_MONITOR_INTERVAL_MINUTES}m "
+                f"channel={SUBPACK_MONITOR_NOTIFY_CHANNEL_ID}"
+            )
 
 class PCSelect(discord.ui.Select):
     def __init__(self, candidates):
