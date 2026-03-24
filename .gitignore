@@ -16,6 +16,9 @@ templates/profile/cache_cards/
 data/
 .sync_data/
 tmp_backup_repo/
+tmp/
+bot.log
+_cleanup_trash/
 designer_live_server_pack/
 designer_live_server_pack_real/
 designer_live_server_pack*.zip
