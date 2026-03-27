@@ -455,6 +455,39 @@ except Exception:
 SUBPACK_MONITOR_TIER_ORDER = ("common", "uncommon", "rare", "epic", "legendary")
 SUBPACK_MONITOR_LAST_SNAPSHOT: dict[str, object] | None = None
 SUBPACK_MONITOR_LOCK: asyncio.Lock | None = None
+LEGENDARY_ALERT_MONITOR_ENABLED = _env_true("LEGENDARY_ALERT_MONITOR_ENABLED", True)
+LEGENDARY_ALERT_MONITOR_PACK_SLUG = str(
+    os.getenv("LEGENDARY_ALERT_MONITOR_PACK_SLUG", "renacrypt-pack")
+).strip() or "renacrypt-pack"
+try:
+    LEGENDARY_ALERT_MONITOR_CHANNEL_ID = int(
+        str(os.getenv("LEGENDARY_ALERT_MONITOR_CHANNEL_ID", "1426092926139633765")).strip()
+    )
+except Exception:
+    LEGENDARY_ALERT_MONITOR_CHANNEL_ID = 1426092926139633765
+try:
+    _legendary_alert_interval_min = int(str(os.getenv("LEGENDARY_ALERT_MONITOR_INTERVAL_MINUTES", "1")).strip())
+except Exception:
+    _legendary_alert_interval_min = 1
+LEGENDARY_ALERT_MONITOR_INTERVAL_MINUTES = max(1, _legendary_alert_interval_min)
+try:
+    LEGENDARY_ALERT_MONITOR_TIMEOUT_SEC = max(
+        3.0,
+        float(str(os.getenv("LEGENDARY_ALERT_MONITOR_TIMEOUT_SEC", "18")).strip()),
+    )
+except Exception:
+    LEGENDARY_ALERT_MONITOR_TIMEOUT_SEC = 18.0
+try:
+    _legendary_startup_lookback_min = int(
+        str(os.getenv("LEGENDARY_ALERT_MONITOR_STARTUP_LOOKBACK_MINUTES", "5")).strip()
+    )
+except Exception:
+    _legendary_startup_lookback_min = 5
+LEGENDARY_ALERT_MONITOR_STARTUP_LOOKBACK_MINUTES = max(0, _legendary_startup_lookback_min)
+LEGENDARY_ALERT_MONITOR_TEST_ON_STARTUP = _env_true("LEGENDARY_ALERT_MONITOR_TEST_ON_STARTUP", False)
+LEGENDARY_ALERT_MONITOR_LOCK: asyncio.Lock | None = None
+LEGENDARY_ALERT_MONITOR_SEEN_IDS: set[str] = set()
+LEGENDARY_ALERT_MONITOR_TEST_SENT = False
 PROFILE_PAGE_LIMIT = max(10, min(100, int(os.getenv("PROFILE_PAGE_LIMIT", "100"))))
 PROFILE_SCAN_MAX_OFFSET = max(PROFILE_PAGE_LIMIT, int(os.getenv("PROFILE_SCAN_MAX_OFFSET", "5000")))
 PROFILE_API_MAX_RETRIES = max(1, int(os.getenv("PROFILE_API_MAX_RETRIES", "4")))
@@ -804,6 +837,273 @@ async def _subpack_monitor_poll_once(trigger: str) -> bool:
             )
             return True
         return False
+
+
+def _legendary_monitor_pack_url(pack_slug: str) -> str:
+    slug = str(pack_slug or "").strip().strip("/")
+    return f"https://www.renaiss.xyz/gacha/{slug}"
+
+
+def _legendary_monitor_fmv_to_usd(value: object) -> Decimal:
+    raw = str(value or "").strip()
+    m = re.fullmatch(r"\$n([0-9]+)", raw)
+    if m:
+        return _to_decimal(m.group(1)) / Decimal("100")
+    return _to_decimal(raw)
+
+
+def _legendary_monitor_fetch_snapshot_sync(pack_slug: str) -> dict[str, object]:
+    slug = str(pack_slug or "").strip().strip("/")
+    if not slug:
+        raise ValueError("LEGENDARY_ALERT_MONITOR_PACK_SLUG is empty")
+
+    url = _legendary_monitor_pack_url(slug)
+    resp = _http_get(url, timeout=LEGENDARY_ALERT_MONITOR_TIMEOUT_SEC)
+    resp.raise_for_status()
+    html_text = str(resp.text or "")
+
+    pack_id_match = re.search(r'\\"packId\\":\\"([0-9a-fA-F-]{36})\\"', html_text)
+    pack_id = str(pack_id_match.group(1) if pack_id_match else "").strip()
+
+    data_match = re.search(
+        r'\\"openedPackActivities\\":(\[.*?\]),\\"fetchContent\\":',
+        html_text,
+        flags=re.S,
+    )
+    if not data_match:
+        raise RuntimeError("openedPackActivities not found in gacha page payload")
+
+    arr_escaped = data_match.group(1)
+    arr_json_text = bytes(arr_escaped, "utf-8").decode("unicode_escape")
+    arr_obj = json.loads(arr_json_text)
+    rows = arr_obj if isinstance(arr_obj, list) else []
+
+    activities: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        token_id = str(row.get("id") or "").strip()
+        if not token_id:
+            continue
+        tier = str(row.get("tier") or "").strip().lower()
+        pulled_ts = _parse_int(row.get("pulledAtTimestamp")) or 0
+        fmv_raw = str(row.get("fmv") or "").strip()
+        fmv_usd = _legendary_monitor_fmv_to_usd(fmv_raw)
+        image_url = str(row.get("frontImageUrl") or "").strip()
+        activities.append(
+            {
+                "id": token_id,
+                "tier": tier,
+                "pulledAtTimestamp": int(pulled_ts),
+                "fmv_raw": fmv_raw,
+                "fmv_usd": format(fmv_usd, "f"),
+                "frontImageUrl": image_url,
+            }
+        )
+
+    legendary_rows = [x for x in activities if str(x.get("tier") or "") == "legendary"]
+    legendary_rows.sort(key=lambda x: int(x.get("pulledAtTimestamp") or 0), reverse=True)
+    return {
+        "pack_slug": slug,
+        "pack_id": pack_id,
+        "fetched_at": int(time.time()),
+        "activities": activities,
+        "legendary_rows": legendary_rows,
+    }
+
+
+def _legendary_monitor_resolve_receiver_sync(token_id: str, pulled_ts: int) -> dict[str, str]:
+    tid = str(token_id or "").strip()
+    if not tid:
+        return {"to": "", "tx_hash": "", "user": ""}
+    target_ts = int(pulled_ts or 0)
+    cursor: str | None = None
+
+    for _ in range(4):
+        page = _trpc_token_activities(tid, cursor=cursor, limit=50)
+        activities = page.get("activities") if isinstance(page.get("activities"), list) else []
+        for row in activities:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("__typename") or "") != "TransferActivity":
+                continue
+            ts = _parse_int(row.get("timestamp")) or 0
+            if target_ts > 0 and ts != target_ts:
+                continue
+            return {
+                "to": str(row.get("to") or "").strip().lower(),
+                "tx_hash": str(row.get("txHash") or "").strip().lower(),
+                "user": str(row.get("user") or "").strip().lower(),
+            }
+        next_cursor = str(page.get("nextCursor") or "").strip()
+        if not next_cursor:
+            break
+        cursor = next_cursor
+
+    return {"to": "", "tx_hash": "", "user": ""}
+
+
+def _legendary_monitor_render_alert_text(
+    row: dict[str, object],
+    snapshot: dict[str, object],
+    *,
+    is_test: bool = False,
+) -> str:
+    pack_slug = str(snapshot.get("pack_slug") or "")
+    tier = str(row.get("tier") or "").lower()
+    pulled_ts = int(_parse_int(row.get("pulledAtTimestamp")) or 0)
+    fmv_raw = str(row.get("fmv_raw") or "")
+    fmv_usd = _to_decimal(row.get("fmv_usd"))
+    fmv_text = f"${fmv_usd:.2f}" if fmv_usd > 0 else fmv_raw
+
+    lines = [
+        "🧪 **Legendary Alert Test**" if is_test else "🚨 **LEGENDARY HIT!**",
+        "━━━━━━━━━━━━━━",
+        f"🎴 Pack: `{pack_slug}`",
+        f"💎 Tier: `{tier or 'unknown'}`",
+        f"💰 FMV: `{fmv_text}`",
+        f"🕒 Pulled: <t:{pulled_ts}:F>" if pulled_ts > 0 else "🕒 Pulled: `N/A`",
+    ]
+    return "\n".join(lines)
+
+
+async def _legendary_monitor_send_message(text: str, image_url: str | None = None) -> bool:
+    channel_id = int(LEGENDARY_ALERT_MONITOR_CHANNEL_ID or 0)
+    if channel_id <= 0:
+        print("⚠️ legendary monitor: notify channel id is invalid")
+        return False
+    channel = client.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(channel_id)
+        except Exception as e:
+            print(f"⚠️ legendary monitor: cannot fetch channel {channel_id}: {e}")
+            return False
+    if channel is None or not hasattr(channel, "send"):
+        print(f"⚠️ legendary monitor: channel {channel_id} is not messageable")
+        return False
+    try:
+        image_text = str(image_url or "").strip()
+        embed = None
+        if image_text:
+            embed = discord.Embed()
+            embed.set_image(url=image_text)
+        await channel.send(content=text, embed=embed)
+        return True
+    except Exception as e:
+        print(f"⚠️ legendary monitor: send failed channel={channel_id} err={e}")
+        return False
+
+
+async def _legendary_alert_monitor_poll_once(trigger: str, *, send_test: bool = False) -> bool:
+    global LEGENDARY_ALERT_MONITOR_LOCK, LEGENDARY_ALERT_MONITOR_TEST_SENT
+
+    if not LEGENDARY_ALERT_MONITOR_ENABLED:
+        return False
+    if not LEGENDARY_ALERT_MONITOR_PACK_SLUG:
+        print("⚠️ legendary monitor: pack slug is empty")
+        return False
+    if LEGENDARY_ALERT_MONITOR_LOCK is None:
+        LEGENDARY_ALERT_MONITOR_LOCK = asyncio.Lock()
+    if LEGENDARY_ALERT_MONITOR_LOCK.locked():
+        return False
+
+    async with LEGENDARY_ALERT_MONITOR_LOCK:
+        loop = asyncio.get_running_loop()
+        try:
+            snapshot = await loop.run_in_executor(
+                None,
+                _legendary_monitor_fetch_snapshot_sync,
+                LEGENDARY_ALERT_MONITOR_PACK_SLUG,
+            )
+        except Exception as e:
+            print(f"⚠️ legendary monitor fetch failed trigger={trigger}: {e}")
+            return False
+
+        legendary_rows_raw = snapshot.get("legendary_rows")
+        legendary_rows = (
+            [x for x in legendary_rows_raw if isinstance(x, dict)]
+            if isinstance(legendary_rows_raw, list)
+            else []
+        )
+        if not LEGENDARY_ALERT_MONITOR_SEEN_IDS:
+            now_ts = int(time.time())
+            cutoff_ts = now_ts - int(LEGENDARY_ALERT_MONITOR_STARTUP_LOOKBACK_MINUTES * 60)
+            baseline_count = 0
+            pending_recent_count = 0
+            for x in legendary_rows:
+                token_id = str(x.get("id") or "").strip()
+                if not token_id:
+                    continue
+                pulled_ts = _parse_int(x.get("pulledAtTimestamp")) or 0
+                # On fresh start, suppress old legendary rows to avoid replay spam.
+                # Keep recent rows (within lookback window) as pending alerts.
+                if pulled_ts > 0 and pulled_ts >= cutoff_ts:
+                    pending_recent_count += 1
+                    continue
+                LEGENDARY_ALERT_MONITOR_SEEN_IDS.add(token_id)
+                baseline_count += 1
+            print(
+                "📦 legendary monitor baseline set "
+                f"pack={LEGENDARY_ALERT_MONITOR_PACK_SLUG} "
+                f"baseline_old={baseline_count} pending_recent={pending_recent_count} "
+                f"lookback_min={LEGENDARY_ALERT_MONITOR_STARTUP_LOOKBACK_MINUTES}"
+            )
+
+        if send_test and not LEGENDARY_ALERT_MONITOR_TEST_SENT and legendary_rows:
+            test_row = dict(legendary_rows[0])
+            pulled_ts = _parse_int(test_row.get("pulledAtTimestamp")) or 0
+            token_id = str(test_row.get("id") or "").strip()
+            try:
+                receiver = await loop.run_in_executor(None, _legendary_monitor_resolve_receiver_sync, token_id, pulled_ts)
+            except Exception:
+                receiver = {"to": "", "tx_hash": "", "user": ""}
+            test_row["winner_wallet"] = str(receiver.get("to") or "")
+            test_row["tx_hash"] = str(receiver.get("tx_hash") or "")
+            test_row["operator_wallet"] = str(receiver.get("user") or "")
+            test_msg = _legendary_monitor_render_alert_text(test_row, snapshot, is_test=True)
+            test_image = str(test_row.get("frontImageUrl") or "").strip()
+            test_sent = await _legendary_monitor_send_message(test_msg, image_url=test_image)
+            if test_sent:
+                LEGENDARY_ALERT_MONITOR_TEST_SENT = True
+                print(
+                    "🧪 legendary monitor test sent "
+                    f"pack={LEGENDARY_ALERT_MONITOR_PACK_SLUG} channel={LEGENDARY_ALERT_MONITOR_CHANNEL_ID}"
+                )
+
+        new_rows: list[dict[str, object]] = []
+        for row in reversed(legendary_rows):
+            token_id = str(row.get("id") or "").strip()
+            if not token_id:
+                continue
+            if token_id in LEGENDARY_ALERT_MONITOR_SEEN_IDS:
+                continue
+            new_rows.append(dict(row))
+
+        if not new_rows:
+            return True
+
+        for row in new_rows:
+            pulled_ts = _parse_int(row.get("pulledAtTimestamp")) or 0
+            token_id = str(row.get("id") or "").strip()
+            try:
+                receiver = await loop.run_in_executor(None, _legendary_monitor_resolve_receiver_sync, token_id, pulled_ts)
+            except Exception:
+                receiver = {"to": "", "tx_hash": "", "user": ""}
+            row["winner_wallet"] = str(receiver.get("to") or "")
+            row["tx_hash"] = str(receiver.get("tx_hash") or "")
+            row["operator_wallet"] = str(receiver.get("user") or "")
+
+            msg = _legendary_monitor_render_alert_text(row, snapshot, is_test=False)
+            image_url = str(row.get("frontImageUrl") or "").strip()
+            sent = await _legendary_monitor_send_message(msg, image_url=image_url)
+            if sent:
+                LEGENDARY_ALERT_MONITOR_SEEN_IDS.add(token_id)
+                print(
+                    "🚨 legendary monitor alert sent "
+                    f"trigger={trigger} token={token_id} channel={LEGENDARY_ALERT_MONITOR_CHANNEL_ID}"
+                )
+        return True
 
 
 def _fmv_disk_cache_path(cache_key: str) -> str:
@@ -5840,6 +6140,16 @@ async def _before_subpack_odds_monitor_job():
     await client.wait_until_ready()
 
 
+@tasks.loop(minutes=LEGENDARY_ALERT_MONITOR_INTERVAL_MINUTES)
+async def legendary_alert_monitor_job():
+    await _legendary_alert_monitor_poll_once("interval", send_test=False)
+
+
+@legendary_alert_monitor_job.before_loop
+async def _before_legendary_alert_monitor_job():
+    await client.wait_until_ready()
+
+
 @client.event
 async def on_ready():
     global NFT_SYNC_STARTUP_DONE, NFT_SYNC_STARTUP_LOCK, RANK_SYNC_STARTUP_DONE, RANK_SYNC_STARTUP_LOCK
@@ -5893,6 +6203,20 @@ async def on_ready():
                 "✅ subpack monitor started "
                 f"packId={SUBPACK_MONITOR_PACK_ID} interval={SUBPACK_MONITOR_INTERVAL_MINUTES}m "
                 f"channel={SUBPACK_MONITOR_NOTIFY_CHANNEL_ID}"
+            )
+    if LEGENDARY_ALERT_MONITOR_ENABLED and LEGENDARY_ALERT_MONITOR_PACK_SLUG:
+        asyncio.create_task(
+            _legendary_alert_monitor_poll_once(
+                "startup",
+                send_test=LEGENDARY_ALERT_MONITOR_TEST_ON_STARTUP,
+            )
+        )
+        if not legendary_alert_monitor_job.is_running():
+            legendary_alert_monitor_job.start()
+            print(
+                "✅ legendary monitor started "
+                f"pack={LEGENDARY_ALERT_MONITOR_PACK_SLUG} interval={LEGENDARY_ALERT_MONITOR_INTERVAL_MINUTES}m "
+                f"channel={LEGENDARY_ALERT_MONITOR_CHANNEL_ID} test_on_startup={1 if LEGENDARY_ALERT_MONITOR_TEST_ON_STARTUP else 0}"
             )
 
 class PCSelect(discord.ui.Select):
