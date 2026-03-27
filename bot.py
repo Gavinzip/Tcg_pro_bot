@@ -135,6 +135,13 @@ MARKET_AUTO_PUSH_ON_NEW = True
 MARKET_AUTO_PUSH_COOLDOWN_SEC = 45.0
 MARKET_AUTO_PUSH_LOCK: asyncio.Lock | None = None
 MARKET_AUTO_PUSH_LAST_TS = 0.0
+try:
+    ASK_FEEDBACK_CHANNEL_ID = int(
+        str(os.getenv("ASK_FEEDBACK_CHANNEL_ID", "1473923458751660063")).strip()
+    )
+except Exception:
+    ASK_FEEDBACK_CHANNEL_ID = 1473923458751660063
+ASK_FEEDBACK_SAVE_ENABLED = _env_true("ASK_FEEDBACK_SAVE_ENABLED", False)
 
 
 def _safe_tzinfo(name: str):
@@ -254,6 +261,7 @@ def _get_user_default_wallet(user_id: str) -> str | None:
 
 
 _USAGE_STATS_LOCK = threading.Lock()
+_ASK_FEEDBACK_LOCK = threading.Lock()
 
 
 def _bot_usage_stats_path() -> str:
@@ -261,6 +269,87 @@ def _bot_usage_stats_path() -> str:
     if raw:
         return raw
     return os.path.join(_user_settings_dir(), "state", "bot_usage_stats.json")
+
+
+def _ask_feedback_path() -> str:
+    raw = str(os.getenv("ASK_FEEDBACK_PATH", "")).strip()
+    if raw:
+        return raw
+    return os.path.join(_user_settings_dir(), "state", "ask_feedback.jsonl")
+
+
+def _append_ask_feedback(entry: dict[str, object]) -> tuple[bool, str]:
+    path = _ask_feedback_path()
+    line = json.dumps(entry, ensure_ascii=False)
+    with _ASK_FEEDBACK_LOCK:
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.write("\n")
+            return True, path
+        except Exception as e:
+            return False, str(e)
+
+
+_ASK_KIND_LABELS = {
+    "bug": "Bug 回報",
+    "feature": "新功能建議",
+    "other": "其他意見",
+}
+
+_ASK_KIND_EMBED_COLORS = {
+    "bug": 0xE67E22,
+    "feature": 0x2ECC71,
+    "other": 0x95A5A6,
+}
+
+
+async def _forward_ask_feedback(entry: dict[str, object]) -> tuple[bool, str]:
+    channel_id = int(ASK_FEEDBACK_CHANNEL_ID or 0)
+    if channel_id <= 0:
+        return True, ""
+
+    try:
+        channel = client.get_channel(channel_id)
+        if channel is None:
+            channel = await client.fetch_channel(channel_id)
+        if channel is None or not hasattr(channel, "send"):
+            return False, f"channel {channel_id} is not sendable"
+
+        kind = str(entry.get("kind") or "other").strip().lower()
+        if kind not in _ASK_KIND_LABELS:
+            kind = "other"
+        kind_label = _ASK_KIND_LABELS.get(kind, _ASK_KIND_LABELS["other"])
+        content = str(entry.get("content") or "").strip()
+        feedback_id = str(entry.get("feedback_id") or "-")
+        display_name = str(entry.get("display_name") or "").strip() or str(entry.get("username") or "unknown")
+        user_id = str(entry.get("user_id") or "unknown")
+        source_guild = str(entry.get("guild_id") or "DM")
+        source_channel = str(entry.get("channel_id") or "DM")
+        jump_url = str(entry.get("jump_url") or "").strip()
+        screenshot_url = str(entry.get("screenshot_url") or "").strip()
+
+        embed = discord.Embed(
+            title=f"📝 /ask 回饋｜{kind_label}",
+            description=content[:3800] if content else "(empty)",
+            color=int(_ASK_KIND_EMBED_COLORS.get(kind, _ASK_KIND_EMBED_COLORS["other"])),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="ID", value=f"`{feedback_id}`", inline=True)
+        embed.add_field(name="User", value=f"{display_name}\n`{user_id}`", inline=True)
+        embed.add_field(name="Source", value=f"guild `{source_guild}`\nchannel `{source_channel}`", inline=True)
+        if jump_url:
+            embed.add_field(name="Jump", value=f"[Open Source]({jump_url})", inline=False)
+        if screenshot_url:
+            embed.set_image(url=screenshot_url)
+
+        await channel.send(embed=embed)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
 
 
 def _record_bot_usage(
@@ -7783,6 +7872,116 @@ async def market_push_backup(interaction: discord.Interaction):
         ),
         ephemeral=True,
     )
+
+
+@tree.command(name="ask", description="提交意見回饋（Bug / 新功能）")
+@app_commands.describe(
+    kind="回饋類型",
+    content="請輸入 bug 描述或功能需求（最多 1200 字）",
+    screenshot="可選：附上圖片截圖",
+)
+@app_commands.choices(
+    kind=[
+        app_commands.Choice(name="🐞 Bug 回報", value="bug"),
+        app_commands.Choice(name="✨ 新功能建議", value="feature"),
+        app_commands.Choice(name="💬 其他意見", value="other"),
+    ]
+)
+async def ask(
+    interaction: discord.Interaction,
+    kind: app_commands.Choice[str],
+    content: str,
+    screenshot: discord.Attachment | None = None,
+):
+    feedback_text = str(content or "").strip()
+    if len(feedback_text) < 3:
+        await interaction.response.send_message(
+            "❌ 內容太短，請至少輸入 3 個字。",
+            ephemeral=True,
+        )
+        return
+    if len(feedback_text) > 1200:
+        await interaction.response.send_message(
+            "❌ 內容太長，請控制在 1200 字以內。",
+            ephemeral=True,
+        )
+        return
+
+    screenshot_url = ""
+    if screenshot is not None:
+        ctype = str(getattr(screenshot, "content_type", "") or "").strip().lower()
+        if ctype and not ctype.startswith("image/"):
+            await interaction.response.send_message(
+                "❌ `screenshot` 只支援圖片檔案。",
+                ephemeral=True,
+            )
+            return
+        screenshot_url = str(getattr(screenshot, "url", "") or "").strip()
+
+    kind_value = str(getattr(kind, "value", "other") or "other").strip().lower()
+    if kind_value not in _ASK_KIND_LABELS:
+        kind_value = "other"
+    kind_label = _ASK_KIND_LABELS.get(kind_value, _ASK_KIND_LABELS["other"])
+
+    now = datetime.now(timezone.utc)
+    feedback_id = f"ask_{now.strftime('%Y%m%d%H%M%S')}_{int(interaction.id)}"
+    guild_id = getattr(interaction, "guild_id", None)
+    channel_id = getattr(interaction, "channel_id", None)
+    jump_url = ""
+    if guild_id and channel_id:
+        jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}"
+
+    entry: dict[str, object] = {
+        "feedback_id": feedback_id,
+        "created_at": now.isoformat(),
+        "kind": kind_value,
+        "content": feedback_text,
+        "screenshot_url": screenshot_url,
+        "user_id": str(getattr(interaction.user, "id", "unknown")),
+        "username": str(getattr(interaction.user, "name", "") or ""),
+        "display_name": str(getattr(interaction.user, "display_name", "") or ""),
+        "guild_id": str(guild_id) if guild_id is not None else "",
+        "channel_id": str(channel_id) if channel_id is not None else "",
+        "jump_url": jump_url,
+    }
+
+    if ASK_FEEDBACK_SAVE_ENABLED:
+        save_ok, save_info = _append_ask_feedback(entry)
+        if not save_ok:
+            await interaction.response.send_message(
+                f"❌ 儲存回饋失敗：`{save_info}`",
+                ephemeral=True,
+            )
+            return
+
+    forward_ok, forward_err = await _forward_ask_feedback(entry)
+    if (
+        not forward_ok
+        and int(ASK_FEEDBACK_CHANNEL_ID or 0) > 0
+        and not ASK_FEEDBACK_SAVE_ENABLED
+    ):
+        await interaction.response.send_message(
+            f"❌ 回饋送出失敗：`{str(forward_err)[:180]}`",
+            ephemeral=True,
+        )
+        return
+
+    lines = [
+        "✅ 已收到你的回饋，感謝幫忙改善 TCG Pro。",
+        f"ID: `{feedback_id}`",
+        f"類型: `{kind_label}`",
+        "儲存: `已關閉`" if not ASK_FEEDBACK_SAVE_ENABLED else f"儲存: `{save_info}`",
+    ]
+    if int(ASK_FEEDBACK_CHANNEL_ID or 0) > 0:
+        if forward_ok:
+            lines.append(f"已同步到頻道：`{ASK_FEEDBACK_CHANNEL_ID}`")
+        else:
+            if ASK_FEEDBACK_SAVE_ENABLED:
+                lines.append(f"⚠️ 已儲存成功，但推送頻道失敗：`{str(forward_err)[:180]}`")
+            else:
+                lines.append(f"⚠️ 推送頻道失敗：`{str(forward_err)[:180]}`")
+
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
 @tree.command(name="settings", description="設定你的預設錢包地址")
