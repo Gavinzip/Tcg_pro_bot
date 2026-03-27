@@ -7967,15 +7967,13 @@ async def ask(
         return
 
     lines = [
-        "✅ 已收到你的回饋，感謝幫忙改善 TCG Pro。",
+        "✅ 已收到你的回饋，感謝幫忙改善 tcg value。",
         f"ID: `{feedback_id}`",
         f"類型: `{kind_label}`",
         "儲存: `已關閉`" if not ASK_FEEDBACK_SAVE_ENABLED else f"儲存: `{save_info}`",
     ]
     if int(ASK_FEEDBACK_CHANNEL_ID or 0) > 0:
-        if forward_ok:
-            lines.append(f"已同步到頻道：`{ASK_FEEDBACK_CHANNEL_ID}`")
-        else:
+        if not forward_ok:
             if ASK_FEEDBACK_SAVE_ENABLED:
                 lines.append(f"⚠️ 已儲存成功，但推送頻道失敗：`{str(forward_err)[:180]}`")
             else:
