@@ -1525,7 +1525,7 @@ def filter_pricecharting_candidates(candidates):
         filtered.append(c)
     return filtered
 
-def search_pricecharting(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name="", mega_name_hint=False):
+def search_pricecharting(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name="", mega_name_hint=False, glossy_hint=False):
     # Basic Name cleaning (strip parentheses and normalize hyphens to spaces)
     name_query = re.sub(r'\(.*?\)', '', name).replace('-', ' ').strip()
     
@@ -1554,6 +1554,18 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
     queries_to_try = []
     final_set_code = set_code if set_code else suffix
     set_name_norm = _normalize_alnum_dash(set_name)
+    name_query_norm = _normalize_alnum_dash(name_query)
+    is_pokemon_celebrations = (
+        category.lower() == "pokemon"
+        and (
+            "pokemon-celebrations" in set_name_norm
+            or ("pokemon" in set_name_norm and "celebrations" in set_name_norm)
+            or "celebrations" in set_name_norm
+            or "pokemon-celebrations" in name_query_norm
+        )
+    )
+    if is_pokemon_celebrations:
+        _debug_log("PriceCharting: 啟用 Pokemon Celebrations 特判（避免誤選 Pokemon Promo）")
     is_pokemon_korean = (
         category.lower() == "pokemon"
         and (
@@ -1562,6 +1574,9 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
             or "korean" in set_name_norm
         )
     )
+    is_pokemon_glossy = (category.lower() == "pokemon" and bool(glossy_hint))
+    if is_pokemon_glossy:
+        _debug_log("PriceCharting: 啟用 Pokemon Glossy 特判（優先 CD Promo Glossy）")
     if is_pokemon_korean:
         _debug_log("PriceCharting: 啟用 Pokemon Korean 特判（韓文卡優先 Korean 系列）")
     
@@ -1573,11 +1588,19 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
     if final_set_code and number_clean != '0':
         queries_to_try.append(f"{name_query} {final_set_code} {number_clean}".replace(" ", "+"))
 
-    # 3. 廣泛搜尋：[卡名] [編號]
+    # 3. Celebrations 特判：在廣泛搜尋前優先帶入系列名
+    if is_pokemon_celebrations and set_name and number_clean != '0':
+        queries_to_try.append(f"{name_query} {set_name} {number_clean}".replace(" ", "+"))
+
+    # 4. Glossy 特判：在廣泛搜尋前優先帶入 Glossy 關鍵字
+    if is_pokemon_glossy and number_clean != '0':
+        queries_to_try.append(f"{name_query} Glossy {number_clean}".replace(" ", "+"))
+
+    # 5. 廣泛搜尋：[卡名] [編號]
     if number_clean != '0':
         queries_to_try.append(f"{name_query} {number_clean}".replace(" ", "+"))
 
-    # 4. 系列備援：[卡名] [系列全名] [編號] (僅在沒找到時，且名稱不包含系列名時嘗試)
+    # 6. 系列備援：[卡名] [系列全名] [編號] (僅在沒找到時，且名稱不包含系列名時嘗試)
     if set_name and number_clean != '0':
         _sn_clean = set_name.lower().strip()
         if _sn_clean not in name_query.lower():
@@ -1766,6 +1789,26 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
                 set_code_slug=set_code_slug,
                 mega_name_hint=mega_name_hint,
             )
+            if is_pokemon_celebrations:
+                set_slug = _extract_pc_set_slug(u)
+                if "celebrations" in set_slug:
+                    sc += 140
+                    why.append("celebrations_set_boost")
+                if "promo" in set_slug and "celebrations" not in set_slug:
+                    sc -= 150
+                    why.append("promo_set_penalty")
+            if is_pokemon_glossy:
+                set_slug = _extract_pc_set_slug(u)
+                card_slug = u.split("/")[-1].lower()
+                if "glossy" in card_slug:
+                    sc += 130
+                    why.append("glossy_name_boost")
+                if "cd-promo" in set_slug:
+                    sc += 120
+                    why.append("cd_promo_set_boost")
+                if "shining" in card_slug and "glossy" not in card_slug:
+                    sc -= 80
+                    why.append("non_glossy_shining_penalty")
             if is_pokemon_korean:
                 set_slug = _extract_pc_set_slug(u)
                 if "korean" in set_slug:
@@ -2703,6 +2746,10 @@ async def process_single_image(
     features_lower = features.lower() if features else ""
     is_flagship = any(kw in features_lower for kw in ["flagship", "旗艦賽", "flagship battle"])
     mega_name_hint = (category.lower() == "pokemon") and _has_pokemon_mega_feature(features)
+    glossy_hint = (
+        category.lower() == "pokemon"
+        and any(kw in features_lower for kw in ["glossy", "光澤面", "光泽面"])
+    )
     features_has_alt_variant = _has_alt_variant_feature(features)
     if features_has_alt_variant:
         is_alt_art = True
@@ -2714,6 +2761,8 @@ async def process_single_image(
         _debug_log("✨ features-based override: is_flagship=True (從 features 偵測到旗艦賽關鍵字)")
     if mega_name_hint:
         _debug_log("✨ features-based override: mega_name_hint=True (從 features 偵測到 Mega 進化卡面)")
+    if glossy_hint:
+        _debug_log("✨ features-based override: glossy_hint=True (從 features 偵測到 Glossy)")
 
     # ── Detect card language and variant hints for SNKRDUNK ──
     is_one_piece_cat = (category.lower() == "one piece")
@@ -2787,11 +2836,12 @@ async def process_single_image(
             pc_set_name_hint,
             jp_name,
             mega_name_hint,
+            glossy_hint,
         )
         snkr_result = None
     else:
         pc_result, snkr_result = await asyncio.gather(
-            loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, False, pc_set_name_hint, jp_name, mega_name_hint),
+            loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, False, pc_set_name_hint, jp_name, mega_name_hint, glossy_hint),
             loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws),
         )
 
@@ -3175,6 +3225,10 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
     features_lower = features.lower() if features else ""
     is_flagship = any(kw in features_lower for kw in ["flagship", "旗艦賽", "flagship battle"])
     mega_name_hint = (category.lower() == "pokemon") and _has_pokemon_mega_feature(features)
+    glossy_hint = (
+        category.lower() == "pokemon"
+        and any(kw in features_lower for kw in ["glossy", "光澤面", "光泽面"])
+    )
     features_has_alt_variant = _has_alt_variant_feature(features)
     if features_has_alt_variant:
         is_alt_art = True
@@ -3229,11 +3283,12 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
             pc_set_name_hint,
             jp_name,
             mega_name_hint,
+            glossy_hint,
         )
         snkr_result = None
     else:
         pc_result, snkr_result = await asyncio.gather(
-            loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, True, pc_set_name_hint, jp_name, mega_name_hint),
+            loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, True, pc_set_name_hint, jp_name, mega_name_hint, glossy_hint),
             loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws, True),
         )
     
