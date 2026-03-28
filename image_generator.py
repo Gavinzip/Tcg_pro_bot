@@ -27,10 +27,21 @@ elif os.path.exists(font_path_mac):
     print("✅ 使用系統字體: Arial Unicode MS")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_JPY_RATE = 150.0
 
 # Global semaphore to prevent OOM when multiple people send images simultaneously
 # 2GB RAM can safe handle 3-4 simultaneous browser tabs while the bot is running
 RENDER_SEMAPHORE = asyncio.Semaphore(3)
+
+
+def _normalize_jpy_rate(jpy_rate):
+    try:
+        rate = float(jpy_rate)
+        if rate > 0:
+            return rate
+    except Exception:
+        pass
+    return DEFAULT_JPY_RATE
 
 def _resolve_template_bundle(template_version):
     version = str(template_version or "v3").strip().lower().replace(" ", "")
@@ -401,7 +412,7 @@ def generate_features_html(features_text, theme="dark", ui_lang="zh"):
 """
     return html
 
-def generate_table_rows(records, is_jpy=False, target_grade=None, theme="dark", ui_lang="zh", max_rows=10):
+def generate_table_rows(records, is_jpy=False, target_grade=None, theme="dark", ui_lang="zh", max_rows=10, jpy_rate=DEFAULT_JPY_RATE):
     lang = _normalize_ui_lang(ui_lang)
     is_light = (theme == "light")
     if is_light:
@@ -440,8 +451,9 @@ def generate_table_rows(records, is_jpy=False, target_grade=None, theme="dark", 
         date = r['date']
         grade = r.get('grade', 'Ungraded')
         if is_jpy:
+            rate = _normalize_jpy_rate(jpy_rate)
             jpy = int(r['price'])
-            usd = int(jpy / 150) # Rough exchange reference
+            usd = int(jpy / rate)
             price_str = f"¥{jpy:,} (~${usd})"
         else:
             price_str = f"${float(r['price']):.2f}"
@@ -572,7 +584,7 @@ def get_badge_html(grade):
 </div>"""
 
 
-def create_premium_matplotlib_chart_b64(records, color_line='#f4d125', target_grade="PSA 10", is_jpy=False, theme="dark"):
+def create_premium_matplotlib_chart_b64(records, color_line='#f4d125', target_grade="PSA 10", is_jpy=False, theme="dark", jpy_rate=DEFAULT_JPY_RATE):
     import re
     from datetime import datetime, timedelta
     import matplotlib.dates as mdates
@@ -581,6 +593,7 @@ def create_premium_matplotlib_chart_b64(records, color_line='#f4d125', target_gr
     import io, base64
 
     if records is None: records = []
+    jpy_rate = _normalize_jpy_rate(jpy_rate)
 
     def parse_d(d_str):
         try:
@@ -615,7 +628,7 @@ def create_premium_matplotlib_chart_b64(records, color_line='#f4d125', target_gr
         d = parse_d(r['date']).date() 
         price_val = float(r['price'])
         if is_jpy:
-            price_val = price_val / 150.0
+            price_val = price_val / jpy_rate
         date_to_prices[d].append(price_val)
         
     sorted_dates = sorted(list(date_to_prices.keys()))
@@ -758,12 +771,12 @@ def create_premium_matplotlib_chart_b64(records, color_line='#f4d125', target_gr
     plt.close(fig)
     return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
 
-def calculate_arbitrage_stats(pc_records, snkr_records):
+def calculate_arbitrage_stats(pc_records, snkr_records, jpy_rate=DEFAULT_JPY_RATE):
     pc_safe = pc_records or []
     snkr_safe = snkr_records or []
 
-    # Use a single conversion baseline in poster stats to keep both markets comparable.
-    jpy_to_usd = 150.0
+    # Keep poster conversion aligned with report-side exchange rate.
+    jpy_to_usd = _normalize_jpy_rate(jpy_rate)
 
     # Calculate bottom-section stats with both markets combined.
     prices_10 = [float(r['price']) for r in pc_safe if '10' in str(r.get('grade', ''))]
@@ -964,10 +977,11 @@ async def generate_box_top10_poster(box_name, prizes, out_dir=None, template_ver
     print(f"🖼️ Box top10 poster generated: {out_path} (template={selected_version})")
     return out_path
 
-async def generate_report(card_data, snkr_records, pc_records, out_dir=None, template_version="v3", ui_lang=None):
+async def generate_report(card_data, snkr_records, pc_records, out_dir=None, template_version="v3", ui_lang=None, jpy_rate=DEFAULT_JPY_RATE):
     if not out_dir:
         out_dir = BASE_DIR
     ui_lang = _normalize_ui_lang(ui_lang or card_data.get("ui_lang", "zh"))
+    jpy_rate = _normalize_jpy_rate(jpy_rate)
 
     selected_version, template_dir, template1_path, template2_path = _resolve_template_bundle(template_version)
     print(f"🖼️ Poster template version: {selected_version} | profile={os.path.basename(template1_path)} | market={os.path.basename(template2_path)}")
@@ -1020,7 +1034,7 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
     total_entries = (len(snkr_records) if snkr_records else 0) + (len(pc_records) if pc_records else 0)
     gemrate_stats = card_data.get("gemrate_stats") or {}
     
-    avg_10, avg_9, avg_raw, profit, max_10 = calculate_arbitrage_stats(pc_records, snkr_records) if pc_records else (0,0,0,0,0)
+    avg_10, avg_9, avg_raw, profit, max_10 = calculate_arbitrage_stats(pc_records, snkr_records, jpy_rate=jpy_rate) if pc_records else (0,0,0,0,0)
     
     market_grade = str(card_data.get('grade', 'Ungraded')).upper()
     if market_grade in ['UNGRADED', 'A']:
@@ -1063,7 +1077,7 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
         else:
             valid_snkr_grades = [target_grade_1, target_grade_1.replace(' ', '')]
             
-        recent_prices.extend([float(r['price']) / 150.0 for r in snkr_records if r.get('grade') in valid_snkr_grades and parse_d(r['date']) >= sixty_days_ago])
+        recent_prices.extend([float(r['price']) / jpy_rate for r in snkr_records if r.get('grade') in valid_snkr_grades and parse_d(r['date']) >= sixty_days_ago])
         
     recent_avg = sum(recent_prices) / len(recent_prices) if recent_prices else 0
     recent_avg_str = f"${recent_avg:.2f}" if recent_avg > 0 else "N/A"
@@ -1120,10 +1134,10 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
 
     if is_raw:
         # Generate 4 Charts (2 per column) with 30-day volume metrics overlaid
-        c_pc_10 = create_premium_matplotlib_chart_b64(pc_records, color_line=chart_line_color, target_grade='PSA 10', is_jpy=False, theme=market_theme)
-        c_pc_raw = create_premium_matplotlib_chart_b64(pc_records, color_line=chart_line_color, target_grade='Ungraded', is_jpy=False, theme=market_theme)
-        c_sk_10 = create_premium_matplotlib_chart_b64(snkr_records, color_line=chart_line_color, target_grade='S', is_jpy=True, theme=market_theme)
-        c_sk_raw = create_premium_matplotlib_chart_b64(snkr_records, color_line=chart_line_color, target_grade='A', is_jpy=True, theme=market_theme)
+        c_pc_10 = create_premium_matplotlib_chart_b64(pc_records, color_line=chart_line_color, target_grade='PSA 10', is_jpy=False, theme=market_theme, jpy_rate=jpy_rate)
+        c_pc_raw = create_premium_matplotlib_chart_b64(pc_records, color_line=chart_line_color, target_grade='Ungraded', is_jpy=False, theme=market_theme, jpy_rate=jpy_rate)
+        c_sk_10 = create_premium_matplotlib_chart_b64(snkr_records, color_line=chart_line_color, target_grade='S', is_jpy=True, theme=market_theme, jpy_rate=jpy_rate)
+        c_sk_raw = create_premium_matplotlib_chart_b64(snkr_records, color_line=chart_line_color, target_grade='A', is_jpy=True, theme=market_theme, jpy_rate=jpy_rate)
         
         v_pc_10 = count_30_days(pc_records, 'PSA 10')
         v_pc_raw_cutoff = datetime.now() - timedelta(days=30)
@@ -1202,8 +1216,8 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
         else:
             snkr_target_records = []
 
-        c_pc = create_premium_matplotlib_chart_b64(pc_records, color_line=chart_line_color, target_grade=target_grade, is_jpy=False, theme=market_theme)
-        c_sk = create_premium_matplotlib_chart_b64(snkr_target_records, color_line=chart_line_color, target_grade=target_grade, is_jpy=True, theme=market_theme)
+        c_pc = create_premium_matplotlib_chart_b64(pc_records, color_line=chart_line_color, target_grade=target_grade, is_jpy=False, theme=market_theme, jpy_rate=jpy_rate)
+        c_sk = create_premium_matplotlib_chart_b64(snkr_target_records, color_line=chart_line_color, target_grade=target_grade, is_jpy=True, theme=market_theme, jpy_rate=jpy_rate)
         
         pc_charts_html = f"""
         <div class="w-full h-[220px] mt-2 mb-1 flex items-end justify-center relative overflow-hidden">
@@ -1247,7 +1261,7 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
                             </tr>
                         </thead>
                         <tbody class="text-sm divide-y {table_body_divider}">
-                            {generate_table_rows(snkr_target_records, is_jpy=True, theme=market_theme, ui_lang=ui_lang, max_rows=6)}
+                            {generate_table_rows(snkr_target_records, is_jpy=True, theme=market_theme, ui_lang=ui_lang, max_rows=6, jpy_rate=jpy_rate)}
                         </tbody>
                     </table>
                 </div>"""
@@ -1267,7 +1281,7 @@ async def generate_report(card_data, snkr_records, pc_records, out_dir=None, tem
         if pc_records:
             tgt_prices.extend([float(r['price']) for r in pc_records if r.get('grade') == target_grade])
         if snkr_target_records:
-            tgt_prices.extend([float(r['price']) / 150.0 for r in snkr_target_records])
+            tgt_prices.extend([float(r['price']) / jpy_rate for r in snkr_target_records])
             
         avg_tgt = sum(tgt_prices)/len(tgt_prices) if tgt_prices else 0
         avg_suffix = _lt(ui_lang, "Avg (均價)", "Avg", "평균", "Avg (均价)")

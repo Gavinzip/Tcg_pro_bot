@@ -3082,6 +3082,7 @@ async def finish_report_after_selection(
                 "pc_records": pc_records if pc_records else [],
                 "out_dir": final_dest_dir,
                 "poster_version": poster_version,
+                "jpy_rate": jpy_rate,
             },
         )
 
@@ -3100,6 +3101,7 @@ async def finish_report_after_selection(
             pc_records if pc_records else [],
             out_dir=final_dest_dir,
             template_version=poster_version,
+            jpy_rate=jpy_rate,
         )
         return (final_report, out_paths)
 
@@ -3129,6 +3131,7 @@ async def generate_posters(poster_data):
         poster_data["pc_records"],
         out_dir=poster_data["out_dir"],
         template_version=poster_data.get("poster_version", "v3"),
+        jpy_rate=poster_data.get("jpy_rate"),
     )
 
 async def process_image_for_candidates(image_path, api_key, lang="zh"):
