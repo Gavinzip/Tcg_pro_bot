@@ -453,7 +453,7 @@ def generate_table_rows(records, is_jpy=False, target_grade=None, theme="dark", 
         if is_jpy:
             rate = _normalize_jpy_rate(jpy_rate)
             jpy = int(r['price'])
-            usd = int(jpy / rate)
+            usd = int(round(jpy / rate))
             price_str = f"¥{jpy:,} (~${usd})"
         else:
             price_str = f"${float(r['price']):.2f}"
