@@ -1876,13 +1876,7 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
     en_name_query = re.sub(r'\(.*?\)', '', en_name).replace('-', ' ').strip()
     jp_name_query = re.sub(r'\(.*?\)', '', jp_name).replace('-', ' ').strip() if jp_name else ""
 
-    set_name_query = re.sub(r'\(.*?\)', '', set_name).replace('-', ' ').strip() if set_name else ""
-    set_name_lower = str(set_name or "").lower()
-    strict_evolving_skies = ("evolving skies" in set_name_lower)
     terms_to_try = []
-
-    if set_name_query and number_padded != "000":
-        terms_to_try.append(f"{en_name_query} {set_name_query} {number_padded}")
     
     # [NEW] 優化搜尋順序：如果有 Set Code，優先使用精確組合，否則才用廣泛搜尋
     if set_code and number_padded != "000":
@@ -1900,25 +1894,12 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
         if jp_name_query:
             terms_to_try.append(f"{jp_name_query} {set_code}")
         terms_to_try.append(f"{en_name_query} {set_code}")
-
-    if set_name_query:
-        terms_to_try.append(f"{en_name_query} {set_name_query}")
             
     # Fallback to just name if no number or set_code combinations yielded results
     if not terms_to_try:
         if jp_name_query:
             terms_to_try.append(jp_name_query)
         terms_to_try.append(en_name_query)
-
-    # Stable de-duplication
-    deduped_terms = []
-    seen_terms = set()
-    for raw_term in terms_to_try:
-        cleaned = " ".join(str(raw_term or "").split()).strip()
-        if cleaned and cleaned not in seen_terms:
-            seen_terms.add(cleaned)
-            deduped_terms.append(cleaned)
-    terms_to_try = deduped_terms
     
     _debug_log(f"SNKRDUNK: 共 {len(terms_to_try)} 種查詢方案: {terms_to_try}")
 
@@ -1964,30 +1945,6 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
                         "NO_RESULTS", reason="搜尋頁面找不到任何商品連結，嘗試下一個查詢")
             time.sleep(1)
             continue
-
-        if strict_evolving_skies:
-            set_filtered = []
-            for title, pid, thumb in unique_matches:
-                title_l = str(title or "").lower()
-                if ("evolving skies" in title_l) and ("eevee heroes" not in title_l):
-                    set_filtered.append((title, pid, thumb))
-                else:
-                    _debug_log(f"  ❌ EvolvingSkies set-filter 排除: [{pid}] {title}")
-            if set_filtered:
-                _debug_log(f"  ✅ EvolvingSkies set-filter 命中 {len(set_filtered)} 筆")
-                unique_matches = set_filtered
-            else:
-                _debug_step(
-                    "SNKRDUNK",
-                    snkr_step,
-                    term,
-                    search_url,
-                    "NO_MATCH",
-                    candidate_urls=[f"https://snkrdunk.com/apparels/{pid} — {t}" for t, pid, _ in unique_matches],
-                    reason="Evolving Skies 特殊過濾後無候選，嘗試下一個查詢",
-                )
-                time.sleep(1)
-                continue
                 
         filtered_by_number = []
         skipped = []
@@ -2660,7 +2617,6 @@ async def process_single_image(
     # 從 AI 回傳的 JSON 提取必備資訊
     name = card_info.get("name", "Unknown")
     set_code = card_info.get("set_code", "")
-    set_name = card_info.get("set_name", "")
     jp_name = card_info.get("jp_name", "")
     number = str(card_info.get("number", "0"))
     grade = card_info.get("grade", "Ungraded")
@@ -2836,7 +2792,7 @@ async def process_single_image(
     else:
         pc_result, snkr_result = await asyncio.gather(
             loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, False, pc_set_name_hint, jp_name, mega_name_hint),
-            loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws, False, set_name),
+            loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws),
         )
 
     pc_records = pc_result[0] if pc_result else None
@@ -3209,7 +3165,6 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
     
     name = card_info.get("name", "Unknown")
     set_code = card_info.get("set_code", "")
-    set_name = card_info.get("set_name", "")
     jp_name = card_info.get("jp_name", "")
     number = str(card_info.get("number", "0"))
     grade = card_info.get("grade", "Ungraded")
@@ -3279,7 +3234,7 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
     else:
         pc_result, snkr_result = await asyncio.gather(
             loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, True, pc_set_name_hint, jp_name, mega_name_hint),
-            loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws, True, set_name),
+            loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws, True),
         )
     
     pc_candidates = (pc_result[0] if pc_result else None) or []
