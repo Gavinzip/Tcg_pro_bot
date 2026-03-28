@@ -14,14 +14,15 @@ import sys
 import json
 import re
 import inspect
+import importlib.util
 import html as html_lib
 import time
 import mimetypes
 import hashlib
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, time as dt_time, timezone, timedelta
-from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, time as dt_time, timezone, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import requests
 import market_report_vision
 import image_generator
@@ -74,6 +75,31 @@ REPORT_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_REPORTS)
 POSTER_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_POSTERS)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_onchain_metrics_runtime():
+    try:
+        from scripts.onchain_metrics import OnchainConfig, analyze_wallet  # type: ignore
+        return OnchainConfig, analyze_wallet, None
+    except Exception:
+        pass
+    try:
+        module_path = os.path.join(BASE_DIR, "scripts", "onchain_metrics.py")
+        spec = importlib.util.spec_from_file_location("onchain_metrics_runtime", module_path)
+        if spec is None or spec.loader is None:
+            return None, None, RuntimeError("onchain_metrics spec unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        OnchainConfig = getattr(module, "OnchainConfig", None)
+        analyze_wallet = getattr(module, "analyze_wallet", None)
+        if OnchainConfig is None or analyze_wallet is None:
+            return None, None, RuntimeError("onchain_metrics missing OnchainConfig/analyze_wallet")
+        return OnchainConfig, analyze_wallet, None
+    except Exception as e:
+        return None, None, e
+
+
+_ONCHAIN_CONFIG_CLS, _ONCHAIN_ANALYZE_WALLET_FN, _ONCHAIN_METRICS_IMPORT_ERROR = _load_onchain_metrics_runtime()
 
 
 def _env_true(name: str, default: bool = False) -> bool:
@@ -162,6 +188,8 @@ RANK_SYNC_TZ = str(os.getenv("RANK_SYNC_TZ", "Asia/Taipei")).strip() or "Asia/Ta
 RANK_SYNC_COMPARE_ON_STARTUP = _env_true("RANK_SYNC_COMPARE_ON_STARTUP", False)
 RANK_SYNC_HOUR = max(0, min(23, int(os.getenv("RANK_SYNC_HOUR", "6"))))
 RANK_SYNC_MINUTE = max(0, min(59, int(os.getenv("RANK_SYNC_MINUTE", "0"))))
+RANK_SYNC_WEEKLY_FULL_ENABLE = _env_true("RANK_SYNC_WEEKLY_FULL_ENABLE", True)
+RANK_SYNC_WEEKLY_FULL_WEEKDAY = max(0, min(6, int(os.getenv("RANK_SYNC_WEEKLY_FULL_WEEKDAY", "6"))))
 RANK_SYNC_RUN_TIME = dt_time(hour=RANK_SYNC_HOUR, minute=RANK_SYNC_MINUTE, tzinfo=_safe_tzinfo(RANK_SYNC_TZ))
 
 
@@ -513,6 +541,7 @@ def _rank_chip_payload(rank_value: object) -> dict[str, str]:
 PROFILE_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile＿beta.html")
 PROFILE_HISTORY_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_history_beta.html")
 PROFILE_EXTREMES_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_extremes_beta.html")
+PROFILE_HOLDINGS_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_holdings_growth.html")
 PROFILE_CARDPACK_PULL_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_cardpack_pull.html")
 PROFILE_LOGO_PATH = os.path.join(BASE_DIR, "templates", "profile", "logo.png")
 PROFILE_BACKGROUND_DIR = os.path.join(BASE_DIR, "templates", "backgorund")
@@ -589,6 +618,7 @@ PROFILE_HTTP_POOL_MAXSIZE = max(8, int(os.getenv("PROFILE_HTTP_POOL_MAXSIZE", "4
 PROFILE_RESOLVE_SCAN_WORKERS = max(1, int(os.getenv("PROFILE_RESOLVE_SCAN_WORKERS", "8")))
 PROFILE_COLLECTION_FETCH_WORKERS = max(1, int(os.getenv("PROFILE_COLLECTION_FETCH_WORKERS", "8")))
 PROFILE_WITHDRAW_VALUE_WORKERS = max(1, int(os.getenv("PROFILE_WITHDRAW_VALUE_WORKERS", "10")))
+PROFILE_HOLDINGS_TOP_GAINERS = max(1, min(8, int(os.getenv("PROFILE_HOLDINGS_TOP_GAINERS", "4"))))
 FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT = max(0, int(os.getenv("FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT", "24")))
 FLEX_PACK_ALLOW_PREVIEW_IMAGE_FALLBACK = _env_true("FLEX_PACK_ALLOW_PREVIEW_IMAGE_FALLBACK", False)
 PROFILE_SBT_BADGE_CACHE_TTL_SEC = max(0, int(os.getenv("PROFILE_SBT_BADGE_CACHE_TTL_SEC", "600")))
@@ -605,6 +635,35 @@ PROFILE_DISK_FMV_CACHE_DIR = (
     str(os.getenv("PROFILE_DISK_FMV_CACHE_DIR", os.path.join(_nft_sync_data_dir(), "cache", "fmv"))).strip()
     or os.path.join(_nft_sync_data_dir(), "cache", "fmv")
 )
+PROFILE_ENABLE_SNKR_TIMELINE = _env_true("PROFILE_ENABLE_SNKR_TIMELINE", True)
+PROFILE_ENABLE_HOLDINGS_POSTER = _env_true("PROFILE_ENABLE_HOLDINGS_POSTER", False)
+PROFILE_SNKR_TIMELINE_STEP_DAYS = max(1, min(30, int(os.getenv("PROFILE_SNKR_TIMELINE_STEP_DAYS", "15"))))
+PROFILE_SNKR_WINDOW_DAYS = max(7, min(60, int(os.getenv("PROFILE_SNKR_WINDOW_DAYS", "30"))))
+PROFILE_SNKR_HISTORY_MAX_PAGES = max(
+    1,
+    int(os.getenv("PROFILE_SNKR_HISTORY_MAX_PAGES", os.getenv("SNKR_HISTORY_MAX_PAGES", "20"))),
+)
+PROFILE_SNKR_CACHE_TTL_SEC = max(0, int(os.getenv("PROFILE_SNKR_CACHE_TTL_SEC", "604800")))
+PROFILE_SNKR_CACHE_DIR = (
+    str(os.getenv("PROFILE_SNKR_CACHE_DIR", os.path.join(_nft_sync_data_dir(), "cache", "snkr_hist"))).strip()
+    or os.path.join(_nft_sync_data_dir(), "cache", "snkr_hist")
+)
+PROFILE_USE_RANKING_METRICS = _env_true("PROFILE_USE_RANKING_METRICS", True)
+PROFILE_REALTIME_RECALC_ON_PROFILE = _env_true("PROFILE_REALTIME_RECALC_ON_PROFILE", True)
+PROFILE_REALTIME_METRICS_SOURCE = str(os.getenv("PROFILE_REALTIME_METRICS_SOURCE", "onchain")).strip().lower() or "onchain"
+if PROFILE_REALTIME_METRICS_SOURCE not in ("onchain", "ranking", "official"):
+    PROFILE_REALTIME_METRICS_SOURCE = "onchain"
+DEFAULT_ONCHAIN_PACK_CONTRACTS = (
+    "0xaab5f5fa75437a6e9e7004c12c9c56cda4b4885a",
+    "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
+    "0xb2891022648c5fad3721c42c05d8d283d4d53080",
+)
+if PROFILE_REALTIME_RECALC_ON_PROFILE and PROFILE_REALTIME_METRICS_SOURCE == "onchain":
+    if _ONCHAIN_ANALYZE_WALLET_FN is None and _ONCHAIN_METRICS_IMPORT_ERROR is not None:
+        print(
+            f"⚠️ onchain metrics module unavailable; /profile live onchain recalc disabled: {_ONCHAIN_METRICS_IMPORT_ERROR}",
+            file=sys.stderr,
+        )
 PROFILE_CARD_WITHDRAW_ADDRESS = str(
     os.getenv("PROFILE_CARD_WITHDRAW_ADDRESS", "0x341Edb3EdC1E45612E5704F29eC8d26fBb4072b4")
 ).strip().lower()
@@ -625,6 +684,9 @@ _CARD_COLLECTIBLE_CACHE: dict[str, dict] = {}
 _PROFILE_SBT_BADGE_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _PREPARED_CARD_IMAGE_CACHE: dict[str, str] = {}
 _PROFILE_FMV_DISK_LOCK = threading.Lock()
+_PROFILE_SNKR_CACHE_LOCK = threading.Lock()
+_CARD_SNKR_CACHE: dict[str, dict] = {}
+_CARD_PC_CACHE: dict[str, dict] = {}
 PROFILE_PREPARED_CARD_CACHE_DIR = os.path.join(BASE_DIR, "templates", "profile", "cache_cards")
 PACK_PRICE_MAP_PATH = (
     str(os.getenv("PACK_PRICE_MAP_PATH", os.path.join(BASE_DIR, "data", "pack_price_map.json"))).strip()
@@ -706,6 +768,16 @@ def _format_fmv_usd(value: int | None) -> str:
     return f"${(value / 100):,.0f}"
 
 
+def _format_pct_decimal(value: Decimal | None, signed: bool = True, digits: int = 1) -> str:
+    val = _to_decimal(value)
+    quant = Decimal("1").scaleb(-max(0, int(digits)))
+    val = val.quantize(quant, rounding=ROUND_HALF_UP)
+    sign = ""
+    if signed and val > 0:
+        sign = "+"
+    return f"{sign}{val}%" if signed else f"{val}%"
+
+
 def _to_decimal(value) -> Decimal:
     if value is None or isinstance(value, bool):
         return Decimal("0")
@@ -722,6 +794,87 @@ def _to_decimal(value) -> Decimal:
         return Decimal(text)
     except (InvalidOperation, ValueError):
         return Decimal("0")
+
+
+def _parse_address_csv(raw: str | None, *, default_values: tuple[str, ...] = ()) -> tuple[str, ...]:
+    values: list[str] = []
+    seen: set[str] = set()
+    source = str(raw or "").strip()
+    if not source:
+        source = ",".join(default_values)
+    for token in source.replace("\n", ",").split(","):
+        addr = str(token or "").strip().lower()
+        if not addr.startswith("0x") or len(addr) != 42:
+            continue
+        if addr in seen:
+            continue
+        seen.add(addr)
+        values.append(addr)
+    return tuple(values)
+
+
+def _build_profile_onchain_cfg():
+    if not PROFILE_REALTIME_RECALC_ON_PROFILE:
+        return None
+    if PROFILE_REALTIME_METRICS_SOURCE != "onchain":
+        return None
+    if _ONCHAIN_CONFIG_CLS is None or _ONCHAIN_ANALYZE_WALLET_FN is None:
+        return None
+    api_key = str(os.getenv("BSCSCAN_API_KEY", "")).strip()
+    if not api_key:
+        return None
+    api_url = str(os.getenv("BSCSCAN_API_URL", "https://api.etherscan.io/v2/api")).strip() or "https://api.etherscan.io/v2/api"
+    chain_id = max(1, int(os.getenv("BSCSCAN_CHAIN_ID", "56")))
+    usdt_contract = str(
+        os.getenv("ONCHAIN_USDT_CONTRACT", "0x55d398326f99059ff775485246999027b3197955")
+    ).strip().lower()
+    pack_contracts = _parse_address_csv(
+        os.getenv("ONCHAIN_PACK_CONTRACTS"),
+        default_values=DEFAULT_ONCHAIN_PACK_CONTRACTS,
+    )
+    marketplace_contract = str(
+        os.getenv("ONCHAIN_MARKETPLACE_CONTRACT", "0xae3e7268ef5a062946216a44f58a8f685ffd11d0")
+    ).strip().lower()
+    page_size = max(100, min(10000, int(os.getenv("ONCHAIN_PAGE_SIZE", "10000"))))
+    retries = max(1, int(os.getenv("PROFILE_ONCHAIN_RETRIES", os.getenv("PROFILE_API_MAX_RETRIES", "4"))))
+    backoff_sec = max(0.2, float(os.getenv("PROFILE_ONCHAIN_BACKOFF_SEC", os.getenv("PROFILE_API_RETRY_BACKOFF_SEC", "0.8"))))
+    if not pack_contracts:
+        return None
+    return _ONCHAIN_CONFIG_CLS(
+        api_url=api_url,
+        chain_id=chain_id,
+        api_key=api_key,
+        usdt_contract=usdt_contract,
+        pack_contracts=pack_contracts,
+        marketplace_contract=marketplace_contract,
+        page_size=page_size,
+        retries=retries,
+        backoff_sec=backoff_sec,
+    )
+
+
+def _profile_compute_onchain_metrics(wallet_address: str) -> dict[str, Decimal] | None:
+    wallet_norm = _normalize_wallet_address(wallet_address or "")
+    if not wallet_norm:
+        return None
+    cfg = _build_profile_onchain_cfg()
+    if cfg is None:
+        return None
+    if _ONCHAIN_ANALYZE_WALLET_FN is None:
+        return None
+    metrics = _ONCHAIN_ANALYZE_WALLET_FN(cfg, wallet_norm)
+    if not isinstance(metrics, dict):
+        return None
+    return {
+        "pack_spent_usdt": _to_decimal(metrics.get("pack_spent_usdt")),
+        "trade_volume_usdt": _to_decimal(metrics.get("trade_volume_usdt")),
+        "trade_spent_usdt": _to_decimal(metrics.get("trade_spent_usdt")),
+        "trade_earned_usdt": _to_decimal(metrics.get("trade_earned_usdt")),
+        "buyback_earned_usdt": _to_decimal(metrics.get("buyback_earned_usdt")),
+        "total_spent_usdt": _to_decimal(metrics.get("total_spent_usdt")),
+        "total_earned_usdt": _to_decimal(metrics.get("total_earned_usdt")),
+        "cash_net_usdt": _to_decimal(metrics.get("cash_net_usdt")),
+    }
 
 
 def _subpack_monitor_tier_sort_key(tier: str) -> tuple[int, str]:
@@ -1241,6 +1394,358 @@ def _save_fmv_to_disk_cache(cache_key: str, value: Decimal) -> None:
         return
 
 
+def _snkr_cache_path(search_key: str) -> str:
+    digest = hashlib.sha1(str(search_key or "").encode("utf-8")).hexdigest()
+    return os.path.join(PROFILE_SNKR_CACHE_DIR, f"{digest}.json")
+
+
+def _load_snkr_records_from_disk_cache(search_key: str) -> list[dict] | None:
+    path = _snkr_cache_path(search_key)
+    try:
+        with _PROFILE_SNKR_CACHE_LOCK:
+            if not os.path.exists(path):
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                row = json.load(f)
+        if not isinstance(row, dict):
+            return None
+        updated_at = _parse_int(row.get("updated_at")) or 0
+        if PROFILE_SNKR_CACHE_TTL_SEC > 0 and updated_at > 0:
+            if (int(time.time()) - updated_at) > PROFILE_SNKR_CACHE_TTL_SEC:
+                return None
+        records = row.get("records")
+        if not isinstance(records, list):
+            return None
+        return [x for x in records if isinstance(x, dict)]
+    except Exception:
+        return None
+
+
+def _save_snkr_records_to_disk_cache(search_key: str, records: list[dict]) -> None:
+    path = _snkr_cache_path(search_key)
+    payload = {
+        "search_key": str(search_key),
+        "updated_at": int(time.time()),
+        "records": [x for x in records if isinstance(x, dict)],
+    }
+    try:
+        with _PROFILE_SNKR_CACHE_LOCK:
+            os.makedirs(PROFILE_SNKR_CACHE_DIR, exist_ok=True)
+            tmp_path = f"{path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp_path, path)
+    except Exception:
+        return
+
+
+def _parse_market_record_date(date_str: str) -> datetime | None:
+    text = str(date_str or "").strip()
+    if not text:
+        return None
+    try:
+        if re.match(r"^\d{4}/\d{2}/\d{2}$", text):
+            return datetime.strptime(text, "%Y/%m/%d")
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", text):
+            return datetime.strptime(text, "%Y-%m-%d")
+        if re.match(r"^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}$", text):
+            return datetime.strptime(text, "%b %d, %Y")
+    except Exception:
+        return None
+    return None
+
+
+def _market_grade_matches(record_grade: str, target_grade: str) -> bool:
+    rg = str(record_grade or "").strip()
+    tg = str(target_grade or "").strip() or "Unknown"
+    if rg == tg:
+        return True
+    if tg == "Unknown" and rg in ("Ungraded", "裸卡", "A"):
+        return True
+    return bool(rg and rg.replace(" ", "") == tg.replace(" ", ""))
+
+
+def _calculate_market_average_window(
+    records: list[dict],
+    target_grade: str,
+    end_at: datetime,
+    window_days: int = 30,
+) -> tuple[Decimal | None, int]:
+    if not isinstance(records, list) or not records:
+        return None, 0
+    start_dt = end_at - timedelta(days=max(1, int(window_days)))
+    prices: list[Decimal] = []
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        if not _market_grade_matches(str(row.get("grade") or ""), target_grade):
+            continue
+        date_obj = _parse_market_record_date(str(row.get("date") or ""))
+        if date_obj is None:
+            continue
+        if date_obj < start_dt or date_obj > end_at:
+            continue
+        price = _to_decimal(row.get("price"))
+        if price > 0:
+            prices.append(price)
+    if not prices:
+        return None, 0
+    count_raw = len(prices)
+    values = sorted(prices)
+    if len(values) >= 4:
+        n = len(values)
+        q1 = values[n // 4]
+        q3 = values[(n * 3) // 4]
+        iqr = q3 - q1
+        lower = q1 - (iqr * Decimal("1.5"))
+        upper = q3 + (iqr * Decimal("1.5"))
+        filtered = [p for p in values if lower <= p <= upper]
+        if filtered:
+            values = filtered
+    avg = sum(values, Decimal("0")) / Decimal(len(values))
+    return avg, count_raw
+
+
+def _extract_set_code_from_name(full_name: str) -> str:
+    text = str(full_name or "")
+    m = re.search(r"\b(SV-P|S-P|SM-P|XY-P|BW-P|DP-P|L-P|ADV-P|SV-G|S8a-G)\b", text, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    m = re.search(r"\b(SV|S|SM|XY|BW|DP|L|ADV)\s+Promo\b", text, re.IGNORECASE)
+    if m:
+        return f"{m.group(1).upper()}-P"
+    m = re.search(r"\b(OP\d+|ST\d+|EB\d+)\b", text, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    m = re.search(r"\b(SV\d+[A-Za-z]*)\b", text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r"\b(S\d+[A-Za-z]?)\b", text)
+    if m and re.match(r"^S\d", m.group(1)):
+        return m.group(1)
+    return ""
+
+
+def _parse_renaiss_name_for_market(full_name: str) -> tuple[str, str, str, str, str]:
+    text = str(full_name or "").strip()
+    grade_m = re.search(r"(PSA|BGS|CGC|SGC)\s+(\d+(?:\.\d+)?)", text)
+    grade_tag = f"{grade_m.group(1)} {grade_m.group(2)}" if grade_m else "Unknown"
+    set_code = _extract_set_code_from_name(text)
+
+    number = "0"
+    set_name_candidate = text
+    card_name_candidate = text
+    num_m = re.search(r"#([A-Za-z0-9]+(?:/[A-Za-z0-9-]+)?)", text)
+    if num_m:
+        number = num_m.group(1)
+        set_name_candidate = text[: num_m.start()]
+        card_name_candidate = text[num_m.end() :]
+
+    if grade_m:
+        set_name_candidate = set_name_candidate.replace(grade_m.group(0), "")
+    if set_code:
+        set_name_candidate = re.sub(re.escape(set_code) + r"[^\s]*", "", set_name_candidate, flags=re.IGNORECASE).strip()
+    set_name_candidate = re.sub(r"\b20\d{2}\b", "", set_name_candidate).strip()
+    for kw in ("Pokemon", "Japanese", "English", "Korean", "Gem Mint", "Mint", "One Piece"):
+        set_name_candidate = re.sub(rf"\b{re.escape(kw)}\b", "", set_name_candidate, flags=re.IGNORECASE).strip()
+    set_name = " ".join(set_name_candidate.split())
+
+    if grade_m:
+        card_name_candidate = card_name_candidate.replace(grade_m.group(0), "")
+    if set_code:
+        card_name_candidate = re.sub(re.escape(set_code) + r"[^\s]*", "", card_name_candidate, flags=re.IGNORECASE).strip()
+    card_name_candidate = re.sub(r"\b20\d{2}\b", "", card_name_candidate).strip()
+    for kw in ("Pokemon", "Japanese", "English", "Korean", "One Piece"):
+        card_name_candidate = re.sub(rf"\b{re.escape(kw)}\b", "", card_name_candidate, flags=re.IGNORECASE).strip()
+    card_name = " ".join(card_name_candidate.split()) or text
+    return card_name, number, set_code, set_name, grade_tag
+
+
+def _normalize_market_card_language(raw_value: str, full_name: str = "") -> str:
+    value = str(raw_value or "").strip().lower()
+    if value in ("jp", "ja", "jpn", "japanese", "日文", "日語", "日本語", "日版"):
+        return "JP"
+    if value in ("en", "eng", "english", "英文", "英語", "usa", "us"):
+        return "EN"
+    if value in ("kr", "ko", "kor", "korean", "韓文", "韓語"):
+        return "KR"
+    name_lower = str(full_name or "").lower()
+    if "japanese" in name_lower:
+        return "JP"
+    if "korean" in name_lower:
+        return "KR"
+    if "english" in name_lower:
+        return "EN"
+    return "UNKNOWN"
+
+
+def _build_snkr_search_spec_from_collectible(raw: dict) -> dict:
+    full_name = str((raw or {}).get("name") or "").strip()
+    card_name, number, set_code, set_name, grade_tag = _parse_renaiss_name_for_market(full_name)
+    attributes = (raw or {}).get("attributes")
+    attr_number = ""
+    attr_set_name = ""
+    attr_language = ""
+    attr_category = ""
+    if isinstance(attributes, list):
+        for attr in attributes:
+            if not isinstance(attr, dict):
+                continue
+            trait = str(attr.get("trait") or "").strip().lower()
+            value = str(attr.get("value") or "").strip()
+            if not value:
+                continue
+            if trait == "card number":
+                attr_number = value.replace("#", "").strip()
+            elif trait == "set":
+                attr_set_name = value
+            elif trait == "language":
+                attr_language = value
+            elif trait == "category":
+                attr_category = value
+    if attr_number:
+        number = attr_number
+    if attr_set_name:
+        set_name = attr_set_name
+        if not set_code:
+            set_code = _extract_set_code_from_name(attr_set_name)
+
+    category = "One Piece" if re.match(r"^(OP|ST|EB)\d", set_code or "", re.IGNORECASE) else "Pokemon"
+    if attr_category:
+        category = attr_category
+    elif any(x in full_name for x in ("One Piece", "WANTED")):
+        category = "One Piece"
+
+    company = str((raw or {}).get("gradingCompany") or "").strip().upper()
+    grade_text = str((raw or {}).get("grade") or "").strip()
+    if company:
+        grade_num_m = re.search(r"(\d+(?:\.\d+)?)", grade_text)
+        if grade_num_m:
+            grade_tag = f"{company} {grade_num_m.group(1)}"
+
+    lang_code = _normalize_market_card_language(attr_language, full_name)
+    variant_map = {
+        "manga": ["コミパラ", "manga"],
+        "parallel": ["パラレル"],
+        "wanted": ["wanted"],
+        "-sp": ["sp", "-sp"],
+        "l-p": ["l-p"],
+        "sr-p": ["sr-p"],
+        "flagship": ["flagship", "フラッグシップ", "フラシ"],
+    }
+    name_lower = full_name.lower()
+    snkr_variant_kws: list[str] = []
+    for kws in variant_map.values():
+        if any(kw in name_lower for kw in kws):
+            snkr_variant_kws.append(kws[0])
+    is_alt_art = bool(snkr_variant_kws) or any(x in name_lower for x in ("special card", "alt art", "alternative"))
+
+    return {
+        "name": card_name or full_name or "Unknown",
+        "number": number or "0",
+        "set_code": set_code or "",
+        "set_name": set_name or str((raw or {}).get("setName") or ""),
+        "target_grade": grade_tag or "Unknown",
+        "is_alt_art": bool(is_alt_art),
+        "category": category,
+        "card_language": lang_code,
+        "snkr_variant_kws": snkr_variant_kws,
+    }
+
+
+def _fetch_snkr_records_by_spec(search_spec: dict, required_start_date: date | None = None) -> list[dict]:
+    spec = dict(search_spec or {})
+    req_start_text = required_start_date.isoformat() if isinstance(required_start_date, date) else ""
+    cache_scope = {"spec": spec, "required_start_date": req_start_text}
+    cache_key = json.dumps(cache_scope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if PROFILE_ENABLE_RUNTIME_CACHE:
+        cached = _CARD_SNKR_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            updated_at = _parse_int(cached.get("updated_at")) or 0
+            if PROFILE_SNKR_CACHE_TTL_SEC <= 0 or updated_at <= 0 or (int(time.time()) - updated_at) <= PROFILE_SNKR_CACHE_TTL_SEC:
+                records = cached.get("records")
+                if isinstance(records, list):
+                    return [x for x in records if isinstance(x, dict)]
+
+    disk_cached = _load_snkr_records_from_disk_cache(cache_key)
+    if isinstance(disk_cached, list):
+        if PROFILE_ENABLE_RUNTIME_CACHE:
+            _CARD_SNKR_CACHE[cache_key] = {"updated_at": int(time.time()), "records": disk_cached}
+        return disk_cached
+
+    records: list[dict] = []
+    try:
+        result = market_report_vision.search_snkrdunk(
+            en_name=str(spec.get("name") or ""),
+            jp_name="",
+            number=str(spec.get("number") or ""),
+            set_code=str(spec.get("set_code") or ""),
+            target_grade=str(spec.get("target_grade") or "Unknown"),
+            is_alt_art=bool(spec.get("is_alt_art")),
+            card_language=str(spec.get("card_language") or "UNKNOWN"),
+            snkr_variant_kws=list(spec.get("snkr_variant_kws") or []),
+            set_name=str(spec.get("set_name") or ""),
+            history_start_date=req_start_text,
+            history_max_pages=PROFILE_SNKR_HISTORY_MAX_PAGES if req_start_text else 1,
+        )
+        if isinstance(result, tuple) and len(result) >= 1 and isinstance(result[0], list):
+            records = [x for x in result[0] if isinstance(x, dict)]
+    except Exception:
+        records = []
+
+    if PROFILE_ENABLE_RUNTIME_CACHE:
+        _CARD_SNKR_CACHE[cache_key] = {"updated_at": int(time.time()), "records": records}
+    _save_snkr_records_to_disk_cache(cache_key, records)
+    return records
+
+
+def _fetch_pc_records_by_spec(search_spec: dict, required_start_date: date | None = None) -> list[dict]:
+    spec = dict(search_spec or {})
+    req_start_text = required_start_date.isoformat() if isinstance(required_start_date, date) else ""
+    cache_scope = {"spec": spec, "required_start_date": req_start_text}
+    cache_key = json.dumps(cache_scope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if PROFILE_ENABLE_RUNTIME_CACHE:
+        cached = _CARD_PC_CACHE.get(cache_key)
+        if isinstance(cached, dict):
+            updated_at = _parse_int(cached.get("updated_at")) or 0
+            if PROFILE_SNKR_CACHE_TTL_SEC <= 0 or updated_at <= 0 or (int(time.time()) - updated_at) <= PROFILE_SNKR_CACHE_TTL_SEC:
+                records = cached.get("records")
+                if isinstance(records, list):
+                    return [x for x in records if isinstance(x, dict)]
+
+    records: list[dict] = []
+    try:
+        result = market_report_vision.search_pricecharting(
+            name=str(spec.get("name") or ""),
+            number=str(spec.get("number") or ""),
+            set_code=str(spec.get("set_code") or ""),
+            target_grade=str(spec.get("target_grade") or "Unknown"),
+            is_alt_art=bool(spec.get("is_alt_art")),
+            category=str(spec.get("category") or "Pokemon"),
+            set_name=str(spec.get("set_name") or ""),
+            jp_name="",
+            is_flagship=any(
+                "flagship" in str(x).lower()
+                for x in (spec.get("snkr_variant_kws") or [])
+            ),
+        )
+        if isinstance(result, tuple) and len(result) >= 1 and isinstance(result[0], list):
+            records = [x for x in result[0] if isinstance(x, dict)]
+    except Exception:
+        records = []
+
+    if PROFILE_ENABLE_RUNTIME_CACHE:
+        _CARD_PC_CACHE[cache_key] = {"updated_at": int(time.time()), "records": records}
+    return records
+
+
+def _select_snkr_average_usd(records: list[dict], target_grade: str, end_at: datetime, jpy_rate: Decimal) -> Decimal:
+    avg_jpy, _ = _calculate_market_average_window(records, target_grade, end_at=end_at, window_days=PROFILE_SNKR_WINDOW_DAYS)
+    if avg_jpy is None or avg_jpy <= 0 or jpy_rate <= 0:
+        return Decimal("0")
+    return avg_jpy / jpy_rate
+
+
 def _wei_to_usdt(value) -> Decimal:
     wei = _to_decimal(value)
     if wei == 0:
@@ -1614,6 +2119,72 @@ def _profile_extreme_labels(lang: str) -> dict[str, str]:
         "items_count_label": "Historical Pulls",
         "assets_unit": "Cards",
         "sbt_badges_label": "History Samples",
+    }
+
+
+def _profile_holdings_labels(lang: str) -> dict[str, str]:
+    if lang == "zh":
+        return {
+            "title": "持倉資產時間軸",
+            "subtitle": "依卡片取得時間累積目前 FMV 資產",
+            "total_current": "目前持倉總值",
+            "total_change": "期間增長",
+            "holdings_count": "持倉張數",
+            "timeline_title": "資產累積曲線",
+            "timeline_empty": "目前沒有足夠資料可生成時間軸",
+            "timeline_min": "最低",
+            "timeline_max": "最高",
+            "event_title": "近期資產增加事件",
+            "event_empty": "尚無可顯示的資產增加事件",
+            "event_cards": "張卡片",
+            "note": "以目前持倉卡片 FMV 計算，按取得時間做累積曲線。",
+        }
+    if lang == "zhs":
+        return {
+            "title": "持仓资产时间轴",
+            "subtitle": "按卡片获取时间累积当前 FMV 资产",
+            "total_current": "当前持仓总值",
+            "total_change": "期间增长",
+            "holdings_count": "持仓张数",
+            "timeline_title": "资产累积曲线",
+            "timeline_empty": "当前没有足够数据可生成时间轴",
+            "timeline_min": "最低",
+            "timeline_max": "最高",
+            "event_title": "近期资产增加事件",
+            "event_empty": "暂无可显示的资产增加事件",
+            "event_cards": "张卡片",
+            "note": "以当前持仓卡片 FMV 计算，并按获取时间生成累积曲线。",
+        }
+    if lang == "ko":
+        return {
+            "title": "보유 자산 타임라인",
+            "subtitle": "카드 획득 시점 기준 현재 FMV 누적",
+            "total_current": "현재 보유 총가치",
+            "total_change": "기간 증가",
+            "holdings_count": "보유 카드 수",
+            "timeline_title": "자산 누적 곡선",
+            "timeline_empty": "타임라인을 만들 데이터가 부족합니다",
+            "timeline_min": "최저",
+            "timeline_max": "최고",
+            "event_title": "최근 자산 증가 이벤트",
+            "event_empty": "표시할 자산 증가 이벤트가 없습니다",
+            "event_cards": "장",
+            "note": "현재 보유 카드 FMV를 획득 시점 순서로 누적해 표시합니다.",
+        }
+    return {
+        "title": "Holdings Timeline",
+        "subtitle": "Cumulative current FMV by acquired time",
+        "total_current": "Current Holdings Value",
+        "total_change": "Period Growth",
+        "holdings_count": "Holdings Count",
+        "timeline_title": "Asset Accumulation Curve",
+        "timeline_empty": "Not enough data to generate timeline",
+        "timeline_min": "Low",
+        "timeline_max": "High",
+        "event_title": "Recent Asset Increase Events",
+        "event_empty": "No asset increase events available",
+        "event_cards": "cards",
+        "note": "Calculated from current holdings FMV and accumulated by acquired time.",
     }
 
 
@@ -2661,6 +3232,8 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
     withdraw_token_ids: set[str] = set()
     release_cards_by_token: dict[str, dict] = {}
     token_latest_values: dict[str, tuple[int, Decimal]] = {}
+    token_buy_cost_by_ts: dict[str, tuple[int, Decimal]] = {}
+    token_pull_cost_by_ts: dict[str, tuple[int, Decimal]] = {}
     pack_price_map = _load_pack_price_map()
     pack_price_map_dirty = False
 
@@ -2668,9 +3241,19 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         tid = str(token_id or "").strip()
         if not tid or value <= 0:
             return
+        ts_norm = int(_parse_int(ts_value) or 0)
         prev = token_latest_values.get(tid)
-        if prev is None or ts_value >= prev[0]:
-            token_latest_values[tid] = (ts_value, value)
+        if prev is None or ts_norm >= prev[0]:
+            token_latest_values[tid] = (ts_norm, value)
+
+    def _remember_token_cost(cost_map: dict[str, tuple[int, Decimal]], token_id: str, value: Decimal, ts_value: int):
+        tid = str(token_id or "").strip()
+        if not tid or value <= 0:
+            return
+        ts_norm = int(_parse_int(ts_value) or 0)
+        prev = cost_map.get(tid)
+        if prev is None or ts_norm >= prev[0]:
+            cost_map[tid] = (ts_norm, value)
 
     for row in activities:
         row_type = str(row.get("__typename") or "").strip()
@@ -2711,6 +3294,8 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
             if contract and price > 0:
                 contract_pull_price_counter[contract][price] += 1
                 pull_spent_total += price
+            if token_hint and price > 0:
+                _remember_token_cost(token_pull_cost_by_ts, token_hint, price, ts)
             if contract:
                 pack_label = _pack_label_from_pull_item(row.get("item") if isinstance(row.get("item"), dict) else None)
                 contract_pack_counter[contract][pack_label] += 1
@@ -2750,6 +3335,8 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
                 direct_price_count += 1
                 contract_direct_count[legacy_key] += 1
                 contract_spent_total[legacy_key] += price
+                if token_hint:
+                    _remember_token_cost(token_pull_cost_by_ts, token_hint, price, ts)
             else:
                 legacy_missing_price_keys.append(legacy_key)
         elif row_type in ("PerpetualBuybackActivity", "BuybackActivity"):
@@ -2787,6 +3374,8 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
             asker = str(row.get("asker") or "").strip().lower()
             if bidder == wallet_norm:
                 trade_spent_total += amount
+                if token_hint:
+                    _remember_token_cost(token_buy_cost_by_ts, token_hint, amount, ts)
             if asker == wallet_norm:
                 divisor = PROFILE_MARKET_SELL_GROSS_DIVISOR if PROFILE_MARKET_SELL_GROSS_DIVISOR > 0 else Decimal("1")
                 trade_earned_total += (amount / divisor)
@@ -3095,6 +3684,35 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
             continue
         pack_spent_map[norm_key] = _format_usdt_decimal(_to_decimal(value))
 
+    for card in release_cards_source:
+        if not isinstance(card, dict):
+            continue
+        token_id = str(card.get("token_id") or "").strip()
+        checkout_id = str(card.get("checkout_id") or "").strip()
+        ts_raw = int(_parse_int(card.get("timestamp_raw")) or 0)
+        if not token_id or not checkout_id:
+            continue
+        pull_price = _to_decimal(pull_price_by_checkout.get(checkout_id))
+        if pull_price > 0:
+            _remember_token_cost(token_pull_cost_by_ts, token_id, pull_price, ts_raw)
+
+    token_acquire_cost_hints: dict[str, dict[str, object]] = {}
+    for token_id, row in token_pull_cost_by_ts.items():
+        token_acquire_cost_hints[token_id] = {
+            "cost": _to_decimal(row[1]),
+            "timestamp": int(row[0]),
+            "source": "pull",
+        }
+    for token_id, row in token_buy_cost_by_ts.items():
+        prev = token_acquire_cost_hints.get(token_id)
+        ts_raw = int(row[0])
+        if prev is None or ts_raw >= int(_parse_int(prev.get("timestamp")) or 0):
+            token_acquire_cost_hints[token_id] = {
+                "cost": _to_decimal(row[1]),
+                "timestamp": ts_raw,
+                "source": "buy",
+            }
+
     token_value_hints = {k: v[1] for k, v in token_latest_values.items()}
 
     return {
@@ -3122,6 +3740,7 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         "pack_options": pack_options,
         "pack_spent_map": pack_spent_map,
         "token_value_hints": token_value_hints,
+        "token_acquire_cost_hints": token_acquire_cost_hints,
     }
 
 
@@ -3337,6 +3956,448 @@ def _build_wallet_extremes_template_context(
         "background_image": _profile_background_data_uri("classic"),
         "_meta_wallet_short": short_wallet,
         "_meta_subtitle": labels.get("subtitle", "Highest / Lowest value among historical pulls"),
+    }
+
+
+def _build_wallet_holdings_growth_template_context(
+    history_data: dict,
+    parsed_sorted: list[dict],
+    profile_name: str,
+    short_wallet: str,
+    profile_lang: str = "en",
+) -> dict:
+    lang = _profile_lang_from_locale(profile_lang)
+    labels = _profile_holdings_labels(lang)
+    ui_labels = _profile_ui_labels(lang)
+    token_cost_hints = (history_data or {}).get("token_acquire_cost_hints") or {}
+    if not isinstance(token_cost_hints, dict):
+        token_cost_hints = {}
+    release_rows = (history_data or {}).get("release_cards") or []
+    token_acquire_ts: dict[str, int] = {}
+
+    for token_id, info in token_cost_hints.items():
+        tid = str(token_id or "").strip()
+        if not tid or not isinstance(info, dict):
+            continue
+        ts = int(_parse_int(info.get("timestamp")) or 0)
+        if ts > 0 and (tid not in token_acquire_ts or ts < token_acquire_ts[tid]):
+            token_acquire_ts[tid] = ts
+
+    for row in release_rows:
+        if not isinstance(row, dict):
+            continue
+        tid = str(row.get("token_id") or "").strip()
+        if not tid:
+            continue
+        ts = int(_parse_int(row.get("timestamp")) or _parse_int(row.get("timestamp_raw")) or 0)
+        if ts > 0 and (tid not in token_acquire_ts or ts < token_acquire_ts[tid]):
+            token_acquire_ts[tid] = ts
+
+    holdings_rows: list[dict] = []
+    now_ts = int(time.time())
+    for row in parsed_sorted:
+        if not isinstance(row, dict):
+            continue
+        raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+        token_id = str(raw.get("tokenId") or "").strip()
+        if not token_id:
+            continue
+        current_value = _to_decimal(row.get("fmv")) / Decimal("100")
+        acquire_ts = int(token_acquire_ts.get(token_id) or 0)
+        if acquire_ts <= 0:
+            acquire_ts = int(
+                _parse_int(raw.get("mintDate"))
+                or _parse_int(raw.get("mintedAt"))
+                or _parse_int(raw.get("createdAt"))
+                or _parse_int(raw.get("timestamp"))
+                or now_ts
+            )
+        acquire_date = datetime.utcfromtimestamp(acquire_ts).date()
+        holdings_rows.append(
+            {
+                "token_id": token_id,
+                "raw": raw,
+                "name": str(raw.get("name") or "Unknown Collectible"),
+                "image": _prepare_collectible_image_for_poster(raw.get("frontImageUrl") or ""),
+                "current_value_raw": current_value,
+                "acquire_ts": acquire_ts,
+                "acquire_date": acquire_date,
+            }
+        )
+
+    holdings_rows.sort(key=lambda x: (int(x.get("acquire_ts") or 0), str(x.get("token_id") or "")))
+    holdings_count = len(holdings_rows)
+
+    cumulative_points: list[dict] = []
+    total_current = Decimal("0")
+    rising_count = holdings_count
+    baseline_total_for_pct = Decimal("0")
+
+    if PROFILE_ENABLE_SNKR_TIMELINE and holdings_rows:
+        jpy_rate = _to_decimal(market_report_vision.get_exchange_rate())
+        if jpy_rate <= 0:
+            jpy_rate = Decimal("150")
+        start_day = min((x.get("acquire_date") for x in holdings_rows if isinstance(x.get("acquire_date"), date)), default=None)
+        required_start_date = None
+        if isinstance(start_day, date):
+            required_start_date = start_day - timedelta(days=PROFILE_SNKR_WINDOW_DAYS)
+
+        spec_cache: dict[str, tuple[dict, list[dict]]] = {}
+        for row in holdings_rows:
+            raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+            spec = _build_snkr_search_spec_from_collectible(raw)
+            spec_key = json.dumps(spec, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if spec_key not in spec_cache:
+                spec_cache[spec_key] = (spec, [])
+            row["spec_key"] = spec_key
+            row["target_grade"] = str(spec.get("target_grade") or "Unknown")
+
+        keys = list(spec_cache.keys())
+        if keys:
+            workers = min(8, len(keys))
+            if workers > 1:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    future_map = {
+                        pool.submit(
+                            _fetch_snkr_records_by_spec,
+                            dict(spec_cache[k][0]),
+                            required_start_date,
+                        ): k
+                        for k in keys
+                    }
+                    for future in as_completed(future_map):
+                        key = future_map[future]
+                        try:
+                            records = future.result()
+                        except Exception:
+                            records = []
+                        spec_cache[key] = (spec_cache[key][0], [x for x in records if isinstance(x, dict)])
+            else:
+                for key in keys:
+                    records = _fetch_snkr_records_by_spec(dict(spec_cache[key][0]), required_start_date=required_start_date)
+                    spec_cache[key] = (spec_cache[key][0], [x for x in records if isinstance(x, dict)])
+
+        pc_records_cache: dict[str, list[dict]] = {}
+
+        def _resolve_market_value_for_day(row_obj: dict, end_dt: datetime) -> Decimal:
+            spec_key = str(row_obj.get("spec_key") or "")
+            target_grade = str(row_obj.get("target_grade") or "Unknown")
+            snkr_records = spec_cache.get(spec_key, ({}, []))[1] if spec_key else []
+            v = _select_snkr_average_usd(snkr_records, target_grade=target_grade, end_at=end_dt, jpy_rate=jpy_rate)
+            if v > 0:
+                return v
+            # SNKR has no usable price at this checkpoint -> fallback to PriceCharting history.
+            pc_records = pc_records_cache.get(spec_key)
+            if pc_records is None:
+                spec_obj = dict(spec_cache.get(spec_key, ({}, []))[0] or {})
+                fetched_pc = _fetch_pc_records_by_spec(spec_obj, required_start_date=required_start_date)
+                pc_records = [x for x in fetched_pc if isinstance(x, dict)]
+                pc_records_cache[spec_key] = pc_records
+            v = _select_snkr_average_usd(pc_records, target_grade=target_grade, end_at=end_dt, jpy_rate=jpy_rate)
+            if v > 0:
+                return v
+            return _to_decimal(row_obj.get("current_value_raw"))
+
+        end_day = datetime.utcnow().date()
+        if isinstance(start_day, date):
+            baseline_total = Decimal("0")
+            for row in holdings_rows:
+                acquire_date = row.get("acquire_date")
+                if not isinstance(acquire_date, date):
+                    continue
+                base_end_dt = datetime.combine(acquire_date, dt_time(23, 59, 59))
+                base_val = _resolve_market_value_for_day(row, base_end_dt)
+                row["base_value_raw"] = base_val
+                row["last_checkpoint_value_raw"] = base_val
+                row["ever_up"] = False
+                baseline_total += base_val
+
+            checkpoints: list[date] = []
+            cursor = start_day
+            step_days = max(1, PROFILE_SNKR_TIMELINE_STEP_DAYS)
+            while cursor <= end_day:
+                checkpoints.append(cursor)
+                cursor = cursor + timedelta(days=step_days)
+            if checkpoints[-1] != end_day:
+                checkpoints.append(end_day)
+
+            prev_total_val = Decimal("0")
+            for day in checkpoints:
+                end_dt = datetime.combine(day, dt_time(23, 59, 59))
+                total_val = Decimal("0")
+                active_count = 0
+                for row in holdings_rows:
+                    acquire_date = row.get("acquire_date")
+                    if not isinstance(acquire_date, date) or acquire_date > day:
+                        continue
+                    active_count += 1
+                    snkr_val = _resolve_market_value_for_day(row, end_dt)
+                    prev_checkpoint_val = _to_decimal(row.get("last_checkpoint_value_raw"))
+                    if snkr_val > prev_checkpoint_val:
+                        row["ever_up"] = True
+                    row["last_checkpoint_value_raw"] = snkr_val
+                    total_val += snkr_val
+                delta = total_val - prev_total_val
+                cumulative_points.append(
+                    {
+                        "date": day.strftime("%Y-%m-%d"),
+                        "delta": delta,
+                        "count": active_count,
+                        "cumulative": total_val,
+                    }
+                )
+                prev_total_val = total_val
+
+            end_dt = datetime.combine(end_day, dt_time(23, 59, 59))
+            current_total = Decimal("0")
+            rising_count = 0
+            for row in holdings_rows:
+                acquire_date = row.get("acquire_date")
+                if not isinstance(acquire_date, date) or acquire_date > end_day:
+                    continue
+                snkr_val = _resolve_market_value_for_day(row, end_dt)
+                current_total += snkr_val
+                if bool(row.get("ever_up")):
+                    rising_count += 1
+            total_current = current_total
+            baseline_total_for_pct = baseline_total
+
+    if not cumulative_points:
+        total_current = sum((_to_decimal(x.get("current_value_raw")) for x in holdings_rows), Decimal("0"))
+        daily_events: dict[str, dict] = {}
+        for row in holdings_rows:
+            acquire_date = row.get("acquire_date")
+            if not isinstance(acquire_date, date):
+                continue
+            d = acquire_date.strftime("%Y-%m-%d")
+            slot = daily_events.get(d)
+            if slot is None:
+                slot = {"date": d, "delta": Decimal("0"), "count": 0}
+                daily_events[d] = slot
+            slot["delta"] = _to_decimal(slot.get("delta")) + _to_decimal(row.get("current_value_raw"))
+            slot["count"] = int(slot.get("count") or 0) + 1
+
+        ordered_days = sorted(daily_events.keys())
+        running = Decimal("0")
+        for day in ordered_days:
+            slot = daily_events.get(day) or {}
+            delta = _to_decimal(slot.get("delta"))
+            running += delta
+            cumulative_points.append(
+                {
+                    "date": day,
+                    "delta": delta,
+                    "count": int(slot.get("count") or 0),
+                    "cumulative": running,
+                }
+            )
+        today_key = datetime.utcnow().strftime("%Y-%m-%d")
+        if cumulative_points and cumulative_points[-1]["date"] != today_key:
+            cumulative_points.append(
+                {
+                    "date": today_key,
+                    "delta": Decimal("0"),
+                    "count": holdings_count,
+                    "cumulative": running,
+                }
+            )
+        if not cumulative_points:
+            cumulative_points.append(
+                {
+                    "date": today_key,
+                    "delta": Decimal("0"),
+                    "count": 0,
+                    "cumulative": Decimal("0"),
+                }
+            )
+
+    values = [_to_decimal(x.get("cumulative")) for x in cumulative_points]
+    val_min_raw = min(values) if values else Decimal("0")
+    val_max_raw = max(values) if values else Decimal("0")
+    spread = val_max_raw - val_min_raw
+    pad = spread * Decimal("0.12")
+    if spread <= 0:
+        pad = Decimal("1")
+    chart_min = val_min_raw - pad
+    chart_max = val_max_raw + pad
+    if chart_max <= chart_min:
+        chart_max = chart_min + Decimal("1")
+
+    view_width = Decimal("1040")
+    view_height = Decimal("360")
+    chart_left = Decimal("74")
+    chart_top = Decimal("14")
+    chart_width = Decimal("948")
+    chart_height = Decimal("318")
+    denom = chart_max - chart_min
+
+    def _x_of(idx: int) -> Decimal:
+        n = len(cumulative_points)
+        if n <= 1:
+            return chart_left
+        return chart_left + (chart_width * Decimal(idx) / Decimal(n - 1))
+
+    def _y_of(v: Decimal) -> Decimal:
+        ratio = (_to_decimal(v) - chart_min) / denom
+        return chart_top + (Decimal("1") - ratio) * chart_height
+
+    svg_points: list[tuple[Decimal, Decimal]] = []
+    for i, point in enumerate(cumulative_points):
+        svg_points.append((_x_of(i), _y_of(_to_decimal(point.get("cumulative")))))
+
+    if not svg_points:
+        svg_points = [(chart_left, chart_top + chart_height)]
+
+    def _build_smooth_path(points: list[tuple[Decimal, Decimal]]) -> str:
+        if len(points) <= 2:
+            return " ".join(
+                [f"M {points[0][0]:.2f} {points[0][1]:.2f}"]
+                + [f"L {x:.2f} {y:.2f}" for x, y in points[1:]]
+            )
+        path_parts = [f"M {points[0][0]:.2f} {points[0][1]:.2f}"]
+        for i in range(len(points) - 1):
+            p0 = points[i - 1] if i > 0 else points[i]
+            p1 = points[i]
+            p2 = points[i + 1]
+            p3 = points[i + 2] if (i + 2) < len(points) else p2
+            c1x = p1[0] + (p2[0] - p0[0]) / Decimal("6")
+            c1y = p1[1] + (p2[1] - p0[1]) / Decimal("6")
+            c2x = p2[0] - (p3[0] - p1[0]) / Decimal("6")
+            c2y = p2[1] - (p3[1] - p1[1]) / Decimal("6")
+            path_parts.append(
+                f"C {c1x:.2f} {c1y:.2f}, {c2x:.2f} {c2y:.2f}, {p2[0]:.2f} {p2[1]:.2f}"
+            )
+        return " ".join(path_parts)
+
+    line_path = _build_smooth_path(svg_points)
+    baseline_y = chart_top + chart_height
+    area_path = (
+        f"{line_path} "
+        f"L {svg_points[-1][0]:.2f} {baseline_y:.2f} "
+        f"L {svg_points[0][0]:.2f} {baseline_y:.2f} Z"
+    )
+    latest_x, latest_y = svg_points[-1]
+
+    axis_labels = []
+    seen_idx: set[int] = set()
+    n_points = len(cumulative_points)
+    tick_count = max(6, min(10, n_points))
+    if n_points <= 1:
+        tick_indices = [0]
+    else:
+        tick_indices = sorted(
+            {
+                max(0, min(n_points - 1, int(round(i * (n_points - 1) / max(1, tick_count - 1)))))
+                for i in range(tick_count)
+            }
+        )
+
+    start_date_obj = None
+    end_date_obj = None
+    try:
+        start_date_obj = datetime.strptime(str(cumulative_points[0].get("date") or ""), "%Y-%m-%d").date()
+        end_date_obj = datetime.strptime(str(cumulative_points[-1].get("date") or ""), "%Y-%m-%d").date()
+    except Exception:
+        start_date_obj = None
+        end_date_obj = None
+    total_days = (end_date_obj - start_date_obj).days if (start_date_obj and end_date_obj) else 0
+    if total_days >= 365:
+        label_fmt = "%Y/%m"
+    else:
+        label_fmt = "%m/%d"
+
+    for idx in tick_indices:
+        if idx in seen_idx:
+            continue
+        seen_idx.add(idx)
+        point = cumulative_points[idx]
+        raw_day = str(point.get("date") or "")
+        label_text = raw_day[5:] if raw_day else "-"
+        try:
+            day_obj = datetime.strptime(raw_day, "%Y-%m-%d").date()
+            if idx == 0 or idx == (n_points - 1):
+                label_text = day_obj.strftime("%Y/%m/%d")
+            else:
+                label_text = day_obj.strftime(label_fmt)
+        except Exception:
+            pass
+        axis_labels.append(
+            {
+                "left_pct": f"{(float(_x_of(idx) / view_width) * 100):.2f}%",
+                "label": label_text,
+                "row": len(axis_labels) % 2,
+            }
+        )
+
+    y_grid_lines = []
+    y_steps = 6
+    for i in range(y_steps):
+        ratio = Decimal(i) / Decimal(max(1, y_steps - 1))
+        val = chart_max - ((chart_max - chart_min) * ratio)
+        y = _y_of(_to_decimal(val))
+        y_grid_lines.append(
+            {
+                "y": f"{y:.2f}",
+                "label": _format_usdt_decimal(val),
+            }
+        )
+
+    first_val = _to_decimal(values[0] if values else Decimal("0"))
+    last_val = _to_decimal(values[-1] if values else Decimal("0"))
+    total_change = last_val - first_val
+    if PROFILE_ENABLE_SNKR_TIMELINE and baseline_total_for_pct > 0:
+        total_change = last_val - baseline_total_for_pct
+        total_change_pct = (total_change / baseline_total_for_pct) * Decimal("100")
+    else:
+        total_change_pct = (total_change / first_val * Decimal("100")) if first_val > 0 else Decimal("0")
+
+    if PROFILE_ENABLE_SNKR_TIMELINE:
+        if lang == "zh":
+            count_label = "價格上漲張數"
+        elif lang == "zhs":
+            count_label = "价格上涨张数"
+        elif lang == "ko":
+            count_label = "가격 상승 카드 수"
+        else:
+            count_label = "Rising Cards"
+        count_value = _format_number(rising_count)
+    else:
+        count_label = labels.get("holdings_count", "Holdings Count")
+        count_value = _format_number(holdings_count)
+
+    return {
+        "collection_name": f"{profile_name} Collection",
+        "brand_name": ui_labels.get("brand_name", "Renaiss"),
+        "brand_site": ui_labels.get("brand_site", "renaiss.xyz"),
+        "wallet_short": short_wallet,
+        "update_date": datetime.now().strftime("%Y-%m-%d"),
+        "title": labels.get("title", "Holdings Timeline"),
+        "subtitle": labels.get("subtitle", "Cumulative current FMV by acquired time"),
+        "history_range": str((history_data or {}).get("history_range") or "-"),
+        "total_current_label": labels.get("total_current", "Current Holdings Value"),
+        "total_current_value": _format_usdt_decimal(total_current),
+        "total_change_label": labels.get("total_change", "Period Growth"),
+        "total_change_value": _format_usdt_currency(total_change, signed=True),
+        "total_change_pct": _format_pct_decimal(total_change_pct, signed=True, digits=2),
+        "holdings_count_label": count_label,
+        "holdings_count_value": count_value,
+        "timeline_title": labels.get("timeline_title", "Asset Accumulation Curve"),
+        "timeline_empty": labels.get("timeline_empty", "Not enough data to generate timeline"),
+        "view_width": f"{view_width:.0f}",
+        "view_height": f"{view_height:.0f}",
+        "chart_left": f"{chart_left:.2f}",
+        "chart_right": f"{(chart_left + chart_width):.2f}",
+        "chart_line_path": line_path,
+        "chart_area_path": area_path,
+        "chart_latest_x": f"{latest_x:.2f}",
+        "chart_latest_y": f"{latest_y:.2f}",
+        "axis_labels": axis_labels,
+        "y_grid_lines": y_grid_lines,
+        "calc_note": (
+            f"SNKR {PROFILE_SNKR_WINDOW_DAYS}D Avg · 每 {PROFILE_SNKR_TIMELINE_STEP_DAYS} 天估值一次"
+            if PROFILE_ENABLE_SNKR_TIMELINE
+            else labels.get("note", "")
+        ),
     }
 
 
@@ -4116,9 +5177,11 @@ def _build_wallet_profile_context(
     ui_labels = _profile_ui_labels(profile_lang)
     background_key = _normalize_profile_background_key(background_style)
     background_image = _profile_background_data_uri(background_key)
+    wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
 
     # Start history build in background so collection/sbt/image preparation can run in parallel.
     history_holder: dict[str, object] = {"data": None, "error": None}
+    live_onchain_holder: dict[str, object] = {"data": None, "error": None}
 
     def _history_worker():
         try:
@@ -4128,12 +5191,24 @@ def _build_wallet_profile_context(
 
     history_thread = threading.Thread(target=_history_worker, name="profile-history-worker", daemon=True)
     history_thread.start()
+    live_onchain_thread: threading.Thread | None = None
+    if PROFILE_REALTIME_RECALC_ON_PROFILE and PROFILE_REALTIME_METRICS_SOURCE == "onchain" and wallet_norm:
+        def _live_onchain_worker():
+            try:
+                live_onchain_holder["data"] = _profile_compute_onchain_metrics(wallet_norm)
+            except Exception as e:
+                live_onchain_holder["error"] = e
+        live_onchain_thread = threading.Thread(
+            target=_live_onchain_worker,
+            name="profile-live-onchain-worker",
+            daemon=True,
+        )
+        live_onchain_thread.start()
 
     try:
         user_id, username = _resolve_user_from_wallet(wallet_address)
     except Exception:
         user_id, username = None, None
-    wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
     if not username:
         username = _username_from_rankings_wallet(wallet_norm)
     short_wallet = f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm
@@ -4266,8 +5341,12 @@ def _build_wallet_profile_context(
         )
 
     history_thread.join()
+    if live_onchain_thread is not None:
+        live_onchain_thread.join()
     history_error = history_holder.get("error")
     history_data = history_holder.get("data") if isinstance(history_holder.get("data"), dict) else None
+    live_onchain_error = live_onchain_holder.get("error")
+    live_onchain_metrics = live_onchain_holder.get("data") if isinstance(live_onchain_holder.get("data"), dict) else None
     if history_error is not None or not isinstance(history_data, dict):
         if history_error is not None:
             print(f"⚠️ activity history build failed: {history_error}", file=sys.stderr)
@@ -4294,13 +5373,79 @@ def _build_wallet_profile_context(
             "activity_rows": [],
             "release_cards": [],
             "token_value_hints": {},
+            "token_acquire_cost_hints": {},
         }
+    if live_onchain_error is not None:
+        print(f"⚠️ onchain profile recalc failed for {wallet_norm}: {live_onchain_error}", file=sys.stderr)
     history_labels = history_data.get("labels") or _profile_history_labels(profile_lang)
     history_activity_rows = history_data.get("activity_rows") or []
     history_contract_rows = history_data.get("contract_rows") or []
-    holdings_value = _to_decimal(total_fmv) / Decimal("100")
-    cash_net = _to_decimal(history_data.get("net_total"))
-    net_with_holdings = cash_net + holdings_value
+    rank_metrics_ready = bool(ranking_row) and any(
+        k in ranking_row
+        for k in (
+            "pack_spent_usdt",
+            "total_spent_usdt",
+            "total_earned_usdt",
+            "trade_volume_usdt",
+            "cash_net_usdt",
+            "total_pnl_usdt",
+        )
+    )
+    use_rank_metrics = bool(PROFILE_USE_RANKING_METRICS and rank_metrics_ready)
+    use_live_onchain_metrics = bool(
+        PROFILE_REALTIME_RECALC_ON_PROFILE
+        and PROFILE_REALTIME_METRICS_SOURCE == "onchain"
+        and isinstance(live_onchain_metrics, dict)
+        and live_onchain_metrics
+    )
+
+    if use_live_onchain_metrics:
+        metric_pack_spent = _to_decimal(live_onchain_metrics.get("pack_spent_usdt"))
+        metric_total_spent = _to_decimal(live_onchain_metrics.get("total_spent_usdt"))
+        metric_total_earned = _to_decimal(live_onchain_metrics.get("total_earned_usdt"))
+        metric_trade_volume = _to_decimal(live_onchain_metrics.get("trade_volume_usdt"))
+        metric_buyback_total = _to_decimal(live_onchain_metrics.get("buyback_earned_usdt"))
+        metric_market_buy_total = _to_decimal(live_onchain_metrics.get("trade_spent_usdt"))
+        metric_market_sell_total = _to_decimal(live_onchain_metrics.get("trade_earned_usdt"))
+        metric_card_withdraw_total = _to_decimal(history_data.get("card_withdraw_total"))
+        holdings_from_ranking = _to_decimal(ranking_row.get("holdings_value_usdt"))
+        holdings_value = holdings_from_ranking if holdings_from_ranking > 0 else (_to_decimal(total_fmv) / Decimal("100"))
+        # Net follows profile definition: cash flow + withdraw-card value.
+        cash_net = _to_decimal(live_onchain_metrics.get("cash_net_usdt")) + metric_card_withdraw_total
+        net_with_holdings = cash_net + holdings_value
+        metric_active_days_count = (
+            _parse_int(history_data.get("active_days_count"))
+            or _parse_int(ranking_row.get("participation_days_count"))
+            or 0
+        )
+    elif use_rank_metrics:
+        metric_pack_spent = _to_decimal(ranking_row.get("pack_spent_usdt"))
+        metric_total_spent = _to_decimal(ranking_row.get("total_spent_usdt"))
+        metric_total_earned = _to_decimal(ranking_row.get("total_earned_usdt"))
+        metric_trade_volume = _to_decimal(ranking_row.get("trade_volume_usdt"))
+        metric_buyback_total = _to_decimal(ranking_row.get("buyback_earned_usdt"))
+        metric_market_buy_total = _to_decimal(ranking_row.get("trade_spent_usdt"))
+        metric_market_sell_total = _to_decimal(ranking_row.get("trade_earned_usdt"))
+        metric_card_withdraw_total = _to_decimal(ranking_row.get("card_withdraw_total_usdt"))
+        holdings_value = _to_decimal(ranking_row.get("holdings_value_usdt"))
+        cash_net = _to_decimal(ranking_row.get("cash_net_usdt"))
+        net_with_holdings = _to_decimal(ranking_row.get("total_pnl_usdt"))
+        metric_active_days_count = _parse_int(ranking_row.get("participation_days_count")) or (
+            _parse_int(history_data.get("active_days_count")) or 0
+        )
+    else:
+        metric_pack_spent = _to_decimal(history_data.get("pack_spent_total"))
+        metric_total_spent = _to_decimal(history_data.get("total_spent"))
+        metric_total_earned = _to_decimal(history_data.get("total_earned"))
+        metric_trade_volume = _to_decimal(history_data.get("trade_volume"))
+        metric_buyback_total = _to_decimal(history_data.get("buyback_total"))
+        metric_market_buy_total = _to_decimal(history_data.get("market_buy_total"))
+        metric_market_sell_total = _to_decimal(history_data.get("market_sell_total"))
+        metric_card_withdraw_total = _to_decimal(history_data.get("card_withdraw_total"))
+        holdings_value = _to_decimal(total_fmv) / Decimal("100")
+        cash_net = _to_decimal(history_data.get("net_total"))
+        net_with_holdings = cash_net + holdings_value
+        metric_active_days_count = _parse_int(history_data.get("active_days_count")) or 0
 
     history_template_context = {
         "collection_name": f"{profile_name} Collection",
@@ -4325,24 +5470,24 @@ def _build_wallet_profile_context(
         "metric_opened_label": history_labels.get("kpi_opened", "Packs Opened"),
         "metric_opened_value": _format_number(history_data.get("opened_packs_count")),
         "metric_pack_spent_label": history_labels.get("kpi_pack_spent", "Pack Spend"),
-        "metric_pack_spent_value": _format_usdt_decimal(history_data.get("pack_spent_total")),
+        "metric_pack_spent_value": _format_usdt_decimal(metric_pack_spent),
         "metric_card_withdraw_label": history_labels.get("kpi_card_withdraw", "Card Withdrawal Value"),
-        "metric_card_withdraw_value": _format_usdt_decimal(history_data.get("card_withdraw_total")),
+        "metric_card_withdraw_value": _format_usdt_decimal(metric_card_withdraw_total),
         "metric_total_spent_label": history_labels.get("kpi_total_spent", "Total Spent"),
         "metric_total_spent_note": history_labels.get("kpi_total_spent_note", ""),
-        "metric_total_spent_value": _format_usdt_decimal(history_data.get("total_spent")),
+        "metric_total_spent_value": _format_usdt_decimal(metric_total_spent),
         "metric_total_spent_rank": total_spent_rank_chip["text"],
         "metric_total_spent_rank_tier": total_spent_rank_chip["tier"],
         "metric_total_earned_label": history_labels.get("kpi_total_earned", "Total Earned"),
         "metric_total_earned_note": history_labels.get("kpi_total_earned_note", ""),
-        "metric_total_earned_value": _format_usdt_decimal(history_data.get("total_earned")),
+        "metric_total_earned_value": _format_usdt_decimal(metric_total_earned),
         "metric_net_label": history_labels.get("kpi_net", "Net PnL"),
         "metric_net_note": history_labels.get("kpi_net_note", ""),
         "metric_net_value": _format_usdt_currency(net_with_holdings, signed=True),
         "metric_net_rank": pnl_rank_chip["text"],
         "metric_net_rank_tier": pnl_rank_chip["tier"],
         "metric_trade_volume_label": history_labels.get("kpi_trade_volume", "Trade Volume"),
-        "metric_trade_volume_value": _format_usdt_decimal(history_data.get("trade_volume")),
+        "metric_trade_volume_value": _format_usdt_decimal(metric_trade_volume),
         "metric_trade_volume_rank": volume_rank_chip["text"],
         "metric_trade_volume_rank_tier": volume_rank_chip["tier"],
         "metric_assets_value_label": history_labels.get("kpi_assets_value", "Holdings Value"),
@@ -4355,13 +5500,13 @@ def _build_wallet_profile_context(
         "metric_sbt_rank": sbt_rank_chip["text"],
         "metric_sbt_rank_tier": sbt_rank_chip["tier"],
         "metric_buyback_label": history_labels.get("kpi_buyback", "Buyback Total"),
-        "metric_buyback_value": _format_usdt_decimal(history_data.get("buyback_total")),
+        "metric_buyback_value": _format_usdt_decimal(metric_buyback_total),
         "metric_market_buy_label": history_labels.get("kpi_market_buy", "Market Buy Total"),
-        "metric_market_buy_value": _format_usdt_decimal(history_data.get("market_buy_total")),
+        "metric_market_buy_value": _format_usdt_decimal(metric_market_buy_total),
         "metric_market_sell_label": history_labels.get("kpi_market_sell", "Market Sell Total"),
-        "metric_market_sell_value": _format_usdt_decimal(history_data.get("market_sell_total")),
+        "metric_market_sell_value": _format_usdt_decimal(metric_market_sell_total),
         "active_days_label": history_labels.get("kpi_active_days", "Active Days"),
-        "active_days_value": _format_number(history_data.get("active_days_count")),
+        "active_days_value": _format_number(metric_active_days_count),
         "active_days_rank": participation_rank_chip["text"],
         "active_days_rank_tier": participation_rank_chip["tier"],
         "activity_total_label": history_labels.get("activity_total", "Total Activities"),
@@ -4384,6 +5529,15 @@ def _build_wallet_profile_context(
         short_wallet=(history_data.get("wallet_short") or short_wallet),
         profile_lang=profile_lang,
     )
+    holdings_template_context = {}
+    if PROFILE_ENABLE_HOLDINGS_POSTER:
+        holdings_template_context = _build_wallet_holdings_growth_template_context(
+            history_data=history_data,
+            parsed_sorted=parsed_sorted,
+            profile_name=profile_name,
+            short_wallet=(history_data.get("wallet_short") or short_wallet),
+            profile_lang=profile_lang,
+        )
 
     return {
         "username": profile_name,
@@ -4416,17 +5570,18 @@ def _build_wallet_profile_context(
         },
         "history_template_context": history_template_context,
         "extreme_template_context": extremes_template_context,
+        "holdings_template_context": holdings_template_context,
         "history_summary": {
             "opened_packs": history_data.get("opened_packs_count", 0),
-            "total_spent": history_data.get("total_spent", Decimal("0")),
-            "total_earned": history_data.get("total_earned", Decimal("0")),
+            "total_spent": metric_total_spent,
+            "total_earned": metric_total_earned,
             "net_total": net_with_holdings,
             "cash_net": cash_net,
             "holdings_value": holdings_value,
-            "buyback_total": history_data.get("buyback_total", Decimal("0")),
-            "market_buy_total": history_data.get("market_buy_total", Decimal("0")),
-            "market_sell_total": history_data.get("market_sell_total", Decimal("0")),
-            "card_withdraw_total": history_data.get("card_withdraw_total", Decimal("0")),
+            "buyback_total": metric_buyback_total,
+            "market_buy_total": metric_market_buy_total,
+            "market_sell_total": metric_market_sell_total,
+            "card_withdraw_total": metric_card_withdraw_total,
         },
         "replacements": {
             "{{ card_name }}": html_lib.escape(f"{profile_name} Vault"),
@@ -4534,6 +5689,33 @@ async def _render_wallet_profile_extreme_poster(template_payload: dict, out_dir:
     return out_path
 
 
+async def _render_wallet_profile_holdings_poster(template_payload: dict, out_dir: str, safe_name: str = "wallet_profile") -> str:
+    if isinstance(template_payload, dict):
+        template_context = template_payload.get("holdings_template_context") or {}
+        replacements = template_payload.get("holdings_replacements") or {}
+    else:
+        template_context = {}
+        replacements = {}
+
+    html_doc = _render_wallet_template_html(
+        PROFILE_HOLDINGS_TEMPLATE_PATH,
+        template_context=template_context,
+        replacements=replacements,
+    )
+
+    os.makedirs(out_dir, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_]+", "_", safe_name).strip("_") or "wallet_profile"
+    out_path = os.path.join(out_dir, f"{safe}_profile_holdings.png")
+    await image_generator._render_single_html_poster(
+        html_doc,
+        out_path,
+        width=1200,
+        height=900,
+        device_scale_factor=2,
+    )
+    return out_path
+
+
 async def _render_wallet_profile_cardpack_pull_poster(
     template_payload: dict,
     out_dir: str,
@@ -4598,6 +5780,7 @@ async def _render_wallet_profile_posters_bundle(
     out_dir: str,
     safe_name: str = "wallet_profile",
     render_profile: bool = True,
+    render_holdings: bool = False,
 ) -> dict:
     if isinstance(template_payload, dict):
         profile_template_context = template_payload.get("template_context") or {}
@@ -4606,6 +5789,8 @@ async def _render_wallet_profile_posters_bundle(
         history_replacements = template_payload.get("history_replacements") or {}
         extreme_template_context = template_payload.get("extreme_template_context") or {}
         extreme_replacements = template_payload.get("extreme_replacements") or {}
+        holdings_template_context = template_payload.get("holdings_template_context") or {}
+        holdings_replacements = template_payload.get("holdings_replacements") or {}
     else:
         profile_template_context = {}
         profile_replacements = template_payload or {}
@@ -4613,12 +5798,15 @@ async def _render_wallet_profile_posters_bundle(
         history_replacements = {}
         extreme_template_context = {}
         extreme_replacements = {}
+        holdings_template_context = {}
+        holdings_replacements = {}
 
     os.makedirs(out_dir, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_]+", "_", safe_name).strip("_") or "wallet_profile"
     profile_out = os.path.join(out_dir, f"{safe}_profile.png") if render_profile else None
     history_out = os.path.join(out_dir, f"{safe}_profile_history.png")
     extremes_out = os.path.join(out_dir, f"{safe}_profile_extremes.png")
+    holdings_out = os.path.join(out_dir, f"{safe}_profile_holdings.png") if render_holdings else None
 
     jobs: list[tuple[str, str]] = []
     if render_profile:
@@ -4652,6 +5840,17 @@ async def _render_wallet_profile_posters_bundle(
             extremes_out,
         )
     )
+    if render_holdings:
+        jobs.append(
+            (
+                _render_wallet_template_html(
+                    PROFILE_HOLDINGS_TEMPLATE_PATH,
+                    template_context=holdings_template_context,
+                    replacements=holdings_replacements,
+                ),
+                holdings_out,
+            )
+        )
 
     async with image_generator.RENDER_SEMAPHORE:
         context = await image_generator._new_browser_context(
@@ -4671,6 +5870,7 @@ async def _render_wallet_profile_posters_bundle(
         "profile": profile_out,
         "history": history_out,
         "extremes": extremes_out,
+        "holdings": holdings_out,
     }
 
 
@@ -6178,6 +7378,13 @@ async def _run_ranking_sync_script(
     return True
 
 
+def _rank_sync_should_weekly_full_rebuild_today() -> bool:
+    if not RANK_SYNC_WEEKLY_FULL_ENABLE:
+        return False
+    now_local = datetime.now(_safe_tzinfo(RANK_SYNC_TZ))
+    return int(now_local.weekday()) == int(RANK_SYNC_WEEKLY_FULL_WEEKDAY)
+
+
 async def _market_auto_push_market_cache(reason: str, force: bool = False) -> bool:
     if not MARKET_AUTO_PUSH_ON_NEW:
         return False
@@ -6211,7 +7418,9 @@ async def _market_auto_push_market_cache(reason: str, force: bool = False) -> bo
 
 @tasks.loop(time=RANK_SYNC_RUN_TIME)
 async def ranking_daily_sync_job():
-    await _run_ranking_sync_script("daily", bootstrap_only=False, full_rebuild=True)
+    full_rebuild_today = _rank_sync_should_weekly_full_rebuild_today()
+    trigger = "weekly_full" if full_rebuild_today else "daily"
+    await _run_ranking_sync_script(trigger, bootstrap_only=False, full_rebuild=full_rebuild_today)
 
 
 @ranking_daily_sync_job.before_loop
@@ -6676,16 +7885,19 @@ class ProfileConfigView(discord.ui.View):
             poster_path = None
             extremes_path = None
             history_path = None
+            holdings_path = None
             async with POSTER_SEMAPHORE:
                 rendered = await _render_wallet_profile_posters_bundle(
                     profile_ctx,
                     out_dir,
                     safe_name=safe_name,
                     render_profile=poster_enabled,
+                    render_holdings=PROFILE_ENABLE_HOLDINGS_POSTER,
                 )
                 poster_path = rendered.get("profile")
                 history_path = rendered.get("history")
                 extremes_path = rendered.get("extremes")
+                holdings_path = rendered.get("holdings")
             history_summary = profile_ctx.get("history_summary") or {}
             history_only_hint = ""
             if not poster_enabled:
@@ -6706,6 +7918,8 @@ class ProfileConfigView(discord.ui.View):
                 f"Net: **{_format_usdt_currency(history_summary.get('net_total'), signed=True)}**"
             )
             files = [discord.File(history_path)]
+            if holdings_path and os.path.exists(holdings_path):
+                files.append(discord.File(holdings_path))
             if extremes_path and os.path.exists(extremes_path):
                 files.append(discord.File(extremes_path))
             if poster_path and os.path.exists(poster_path):
@@ -8266,7 +9480,7 @@ async def ranking(interaction: discord.Interaction):
         ("sbt", "SBT", "sbt_owned_total", "sbt_rank", "int"),
     ]
 
-    lines: list[str] = []
+    blocks: list[str] = []
     for top_key, title, value_field, rank_field, value_type in sections:
         top_rows_raw = top_map.get(top_key) if isinstance(top_map, dict) else None
         if isinstance(top_rows_raw, list) and top_rows_raw:
@@ -8274,10 +9488,10 @@ async def ranking(interaction: discord.Interaction):
         else:
             rows = _fallback_top(value_field, numeric_type=("int" if value_type == "int" else "decimal"))
 
-        lines.append(f"**{title} Top 10**")
+        section_lines: list[str] = [f"**{title} Top 10**"]
         if not rows:
-            lines.append("無資料")
-            lines.append("")
+            section_lines.append("無資料")
+            blocks.append("\n".join(section_lines))
             continue
 
         for idx, row in enumerate(rows, start=1):
@@ -8287,20 +9501,38 @@ async def ranking(interaction: discord.Interaction):
                 value_txt = _money_text(row, value_field, signed=True)
             else:
                 value_txt = _int_text(row, value_field)
-            lines.append(f"{idx}. `{_rank_text(row, rank_field)}` {_label(row)} | {value_txt}")
-        lines.append("")
+            section_lines.append(f"{idx}. `{_rank_text(row, rank_field)}` {_label(row)} | {value_txt}")
+        blocks.append("\n".join(section_lines))
 
     updated_at = "-"
     meta = payload.get("meta")
     if isinstance(meta, dict):
         updated_at = str(meta.get("updated_at") or "-")
-    lines.append(f"Updated: `{updated_at}`")
+    blocks.append(f"Updated: `{updated_at}`")
 
-    text = "\n".join(lines).strip()
-    if len(text) > 1900:
-        text = text[:1890] + "\n...(truncated)"
+    if not blocks:
+        blocks = ["無資料"]
+
+    # Keep each outgoing message safely below Discord message limit.
+    normalized_blocks: list[str] = []
+    for block in blocks:
+        text = str(block or "").strip()
+        if not text:
+            continue
+        if len(text) <= 1900:
+            normalized_blocks.append(text)
+            continue
+        start = 0
+        while start < len(text):
+            normalized_blocks.append(text[start : start + 1800])
+            start += 1800
+    if not normalized_blocks:
+        normalized_blocks = ["無資料"]
+
     if isinstance(interaction.channel, discord.Thread):
-        await interaction.response.send_message(text, ephemeral=False)
+        await interaction.response.send_message(normalized_blocks[0], ephemeral=False)
+        for block in normalized_blocks[1:]:
+            await interaction.followup.send(block, ephemeral=False)
         return
 
     try:
@@ -8325,7 +9557,8 @@ async def ranking(interaction: discord.Interaction):
         await thread.add_user(interaction.user)
     except Exception:
         pass
-    await thread.send(text)
+    for block in normalized_blocks:
+        await thread.send(block)
 
 
 @tree.command(name="bot_usage", description="查看機器人使用次數（總次數 + 各指令）")
