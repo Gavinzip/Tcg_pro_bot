@@ -6128,7 +6128,8 @@ async def _render_wallet_profile_posters_bundle(
     profile_out = os.path.join(out_dir, f"{safe}_profile.png") if render_profile else None
     history_out = os.path.join(out_dir, f"{safe}_profile_history.png")
     extremes_out = os.path.join(out_dir, f"{safe}_profile_extremes.png")
-    sbt_rank_out = os.path.join(out_dir, f"{safe}_profile_sbt_rank.png")
+    sbt_rank_template_exists = os.path.exists(PROFILE_SBT_RANK_TEMPLATE_PATH)
+    sbt_rank_out = os.path.join(out_dir, f"{safe}_profile_sbt_rank.png") if sbt_rank_template_exists else None
     holdings_out = os.path.join(out_dir, f"{safe}_profile_holdings.png") if render_holdings else None
 
     jobs: list[tuple[str, str]] = []
@@ -6163,16 +6164,17 @@ async def _render_wallet_profile_posters_bundle(
             extremes_out,
         )
     )
-    jobs.append(
-        (
-            _render_wallet_template_html(
-                PROFILE_SBT_RANK_TEMPLATE_PATH,
-                template_context=sbt_rank_template_context,
-                replacements=sbt_rank_replacements,
-            ),
-            sbt_rank_out,
+    if sbt_rank_template_exists and sbt_rank_out:
+        jobs.append(
+            (
+                _render_wallet_template_html(
+                    PROFILE_SBT_RANK_TEMPLATE_PATH,
+                    template_context=sbt_rank_template_context,
+                    replacements=sbt_rank_replacements,
+                ),
+                sbt_rank_out,
+            )
         )
-    )
     if render_holdings:
         jobs.append(
             (
