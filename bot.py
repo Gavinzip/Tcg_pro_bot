@@ -79,27 +79,33 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _load_onchain_metrics_runtime():
     try:
-        from scripts.onchain_metrics import OnchainConfig, analyze_wallet  # type: ignore
-        return OnchainConfig, analyze_wallet, None
+        from scripts.onchain_metrics import OnchainConfig, analyze_wallet, analyze_sbt_wallet  # type: ignore
+        return OnchainConfig, analyze_wallet, analyze_sbt_wallet, None
     except Exception:
         pass
     try:
         module_path = os.path.join(BASE_DIR, "scripts", "onchain_metrics.py")
         spec = importlib.util.spec_from_file_location("onchain_metrics_runtime", module_path)
         if spec is None or spec.loader is None:
-            return None, None, RuntimeError("onchain_metrics spec unavailable")
+            return None, None, None, RuntimeError("onchain_metrics spec unavailable")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         OnchainConfig = getattr(module, "OnchainConfig", None)
         analyze_wallet = getattr(module, "analyze_wallet", None)
+        analyze_sbt_wallet = getattr(module, "analyze_sbt_wallet", None)
         if OnchainConfig is None or analyze_wallet is None:
-            return None, None, RuntimeError("onchain_metrics missing OnchainConfig/analyze_wallet")
-        return OnchainConfig, analyze_wallet, None
+            return None, None, None, RuntimeError("onchain_metrics missing OnchainConfig/analyze_wallet")
+        return OnchainConfig, analyze_wallet, analyze_sbt_wallet, None
     except Exception as e:
-        return None, None, e
+        return None, None, None, e
 
 
-_ONCHAIN_CONFIG_CLS, _ONCHAIN_ANALYZE_WALLET_FN, _ONCHAIN_METRICS_IMPORT_ERROR = _load_onchain_metrics_runtime()
+(
+    _ONCHAIN_CONFIG_CLS,
+    _ONCHAIN_ANALYZE_WALLET_FN,
+    _ONCHAIN_ANALYZE_SBT_WALLET_FN,
+    _ONCHAIN_METRICS_IMPORT_ERROR,
+) = _load_onchain_metrics_runtime()
 
 
 def _env_true(name: str, default: bool = False) -> bool:
@@ -542,9 +548,14 @@ PROFILE_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_p
 PROFILE_HISTORY_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_history_beta.html")
 PROFILE_EXTREMES_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_extremes_beta.html")
 PROFILE_HOLDINGS_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_holdings_growth.html")
+PROFILE_SBT_RANK_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_sbt_rank.html")
 PROFILE_CARDPACK_PULL_TEMPLATE_PATH = os.path.join(BASE_DIR, "templates", "profile", "wallet_profile_cardpack_pull.html")
 PROFILE_LOGO_PATH = os.path.join(BASE_DIR, "templates", "profile", "logo.png")
 PROFILE_BACKGROUND_DIR = os.path.join(BASE_DIR, "templates", "backgorund")
+PROFILE_SBT_WREATH_IMAGE_DIR = os.path.abspath(
+    os.path.join(BASE_DIR, "..", "..", "other", "bsc_scan", "images")
+)
+RENAISS_MAIN_URL = "https://www.renaiss.xyz"
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
 RENAISS_COLLECTIBLE_BY_TOKEN_URL = "https://www.renaiss.xyz/api/trpc/collectible.getCollectibleByTokenId"
 RENAISS_SBT_BADGES_URL = "https://www.renaiss.xyz/api/trpc/sbt.getUserBadges"
@@ -622,6 +633,13 @@ PROFILE_HOLDINGS_TOP_GAINERS = max(1, min(8, int(os.getenv("PROFILE_HOLDINGS_TOP
 FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT = max(0, int(os.getenv("FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT", "24")))
 FLEX_PACK_ALLOW_PREVIEW_IMAGE_FALLBACK = _env_true("FLEX_PACK_ALLOW_PREVIEW_IMAGE_FALLBACK", False)
 PROFILE_SBT_BADGE_CACHE_TTL_SEC = max(0, int(os.getenv("PROFILE_SBT_BADGE_CACHE_TTL_SEC", "600")))
+PROFILE_SBT_METADATA_CACHE_TTL_SEC = max(300, int(os.getenv("PROFILE_SBT_METADATA_CACHE_TTL_SEC", "21600")))
+PROFILE_SBT_BADGE_SOURCE = str(os.getenv("PROFILE_SBT_BADGE_SOURCE", "onchain")).strip().lower() or "onchain"
+if PROFILE_SBT_BADGE_SOURCE not in ("onchain", "official", "auto"):
+    PROFILE_SBT_BADGE_SOURCE = "onchain"
+ONCHAIN_SBT_CONTRACT = str(
+    os.getenv("ONCHAIN_SBT_CONTRACT", "0x7d1b7db704d722295fbaa284008f526634673dbf")
+).strip().lower()
 PROFILE_ENABLE_RUNTIME_CACHE = str(os.getenv("PROFILE_ENABLE_RUNTIME_CACHE", "0")).strip().lower() in ("1", "true", "yes", "on")
 PROFILE_ENABLE_DISK_IMAGE_CACHE = str(os.getenv("PROFILE_ENABLE_DISK_IMAGE_CACHE", "0")).strip().lower() in (
     "1",
@@ -637,6 +655,10 @@ PROFILE_DISK_FMV_CACHE_DIR = (
 )
 PROFILE_ENABLE_SNKR_TIMELINE = _env_true("PROFILE_ENABLE_SNKR_TIMELINE", True)
 PROFILE_ENABLE_HOLDINGS_POSTER = _env_true("PROFILE_ENABLE_HOLDINGS_POSTER", False)
+try:
+    PROFILE_POSTER_DEVICE_SCALE = max(2.0, float(str(os.getenv("PROFILE_POSTER_DEVICE_SCALE", "3")).strip()))
+except Exception:
+    PROFILE_POSTER_DEVICE_SCALE = 3.0
 PROFILE_SNKR_TIMELINE_STEP_DAYS = max(1, min(30, int(os.getenv("PROFILE_SNKR_TIMELINE_STEP_DAYS", "15"))))
 PROFILE_SNKR_WINDOW_DAYS = max(7, min(60, int(os.getenv("PROFILE_SNKR_WINDOW_DAYS", "30"))))
 PROFILE_SNKR_HISTORY_MAX_PAGES = max(
@@ -664,6 +686,12 @@ if PROFILE_REALTIME_RECALC_ON_PROFILE and PROFILE_REALTIME_METRICS_SOURCE == "on
             f"⚠️ onchain metrics module unavailable; /profile live onchain recalc disabled: {_ONCHAIN_METRICS_IMPORT_ERROR}",
             file=sys.stderr,
         )
+if PROFILE_SBT_BADGE_SOURCE in ("onchain", "auto"):
+    if _ONCHAIN_ANALYZE_SBT_WALLET_FN is None:
+        print(
+            "⚠️ onchain SBT metrics unavailable; /profile SBT will fallback to official username path.",
+            file=sys.stderr,
+        )
 PROFILE_CARD_WITHDRAW_ADDRESS = str(
     os.getenv("PROFILE_CARD_WITHDRAW_ADDRESS", "0x341Edb3EdC1E45612E5704F29eC8d26fBb4072b4")
 ).strip().lower()
@@ -682,6 +710,8 @@ _CARD_FMV_CACHE: dict[str, Decimal] = {}
 _CARD_IMAGE_CACHE: dict[str, str] = {}
 _CARD_COLLECTIBLE_CACHE: dict[str, dict] = {}
 _PROFILE_SBT_BADGE_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_PROFILE_SBT_METADATA_CACHE: dict[str, object] = {"ts": 0.0, "data": {}}
+_PROFILE_SBT_METADATA_LOCK = threading.Lock()
 _PREPARED_CARD_IMAGE_CACHE: dict[str, str] = {}
 _PROFILE_FMV_DISK_LOCK = threading.Lock()
 _PROFILE_SNKR_CACHE_LOCK = threading.Lock()
@@ -698,6 +728,12 @@ _PROFILE_BACKGROUND_FILES = {
     "1": "1.jpg",
     "2": "2.png",
     "3": "3.jpg",
+}
+_PROFILE_SBT_WREATH_FILES = {
+    "gold": "gold.jpg",
+    "silver": "silver.jpg",
+    "bronze": "copper.jpg",
+    "none": "black.jpg",
 }
 
 
@@ -1837,19 +1873,32 @@ def _profile_background_data_uri(background_key: str | None) -> str:
     if not filename:
         return ""
     img_path = os.path.join(PROFILE_BACKGROUND_DIR, filename)
-    if not os.path.exists(img_path):
+    return _file_to_data_uri(img_path)
+
+
+def _file_to_data_uri(file_path: str | None) -> str:
+    path = str(file_path or "").strip()
+    if not path or not os.path.exists(path):
         return ""
     try:
-        with open(img_path, "rb") as f:
+        with open(path, "rb") as f:
             raw = f.read()
-        mime, _ = mimetypes.guess_type(img_path)
+        mime, _ = mimetypes.guess_type(path)
         if not mime:
-            ext = os.path.splitext(img_path)[1].lower()
+            ext = os.path.splitext(path)[1].lower()
             mime = "image/png" if ext == ".png" else "image/jpeg"
         b64 = base64.b64encode(raw).decode("utf-8")
         return f"data:{mime};base64,{b64}"
     except Exception:
         return ""
+
+
+def _profile_sbt_rank_background_data_uri(rank_tier: str | None) -> str:
+    tier = str(rank_tier or "").strip().lower()
+    if tier not in ("gold", "silver", "bronze"):
+        tier = "none"
+    filename = _PROFILE_SBT_WREATH_FILES.get(tier) or _PROFILE_SBT_WREATH_FILES["none"]
+    return _file_to_data_uri(os.path.join(PROFILE_SBT_WREATH_IMAGE_DIR, filename))
 
 
 def _profile_lang_from_locale(locale_like) -> str:
@@ -4847,11 +4896,11 @@ def _build_wallet_flex_pack_template_context(
     }
 
 
-def _fetch_user_sbt_badges(username: str | None) -> list[dict]:
+def _fetch_user_sbt_badges_official(username: str | None) -> list[dict]:
     uname = str(username or "").strip()
     if not uname:
         return []
-    cache_key = uname.lower()
+    cache_key = f"official:{uname.lower()}"
     now_ts = time.time()
     cached = _PROFILE_SBT_BADGE_CACHE.get(cache_key)
     if cached and PROFILE_SBT_BADGE_CACHE_TTL_SEC > 0 and (now_ts - cached[0]) <= PROFILE_SBT_BADGE_CACHE_TTL_SEC:
@@ -4910,6 +4959,127 @@ def _fetch_user_sbt_badges(username: str | None) -> list[dict]:
     if cached:
         print(f"⚠️ sbt.getUserBadges failed for {uname}, fallback stale cache: {last_err}", file=sys.stderr)
         return [dict(x) for x in cached[1]]
+    return []
+
+
+def _fetch_sbt_metadata_map() -> dict[str, dict[str, str]]:
+    now_ts = time.time()
+    with _PROFILE_SBT_METADATA_LOCK:
+        cached_ts = float(_PROFILE_SBT_METADATA_CACHE.get("ts") or 0.0)
+        cached_data = _PROFILE_SBT_METADATA_CACHE.get("data")
+        if (
+            isinstance(cached_data, dict)
+            and PROFILE_SBT_METADATA_CACHE_TTL_SEC > 0
+            and (now_ts - cached_ts) <= PROFILE_SBT_METADATA_CACHE_TTL_SEC
+        ):
+            return {str(k): dict(v) for k, v in cached_data.items() if isinstance(v, dict)}
+
+    sbt_blob = "SBT/minified/"
+    chunk_name_re = re.compile(r"([a-f0-9]{16})\.js")
+    entry_re = re.compile(
+        r'\{id:(\d+),name:"([^"]+)"[^}]*?imageUrl:"(https://[^"]*' + re.escape(sbt_blob) + r'[^"]+)"'
+    )
+
+    def _get_chunk_names(url: str) -> set[str]:
+        try:
+            resp = _http_get(url, timeout=15)
+            resp.raise_for_status()
+            return {str(x) for x in chunk_name_re.findall(str(resp.text or ""))}
+        except Exception:
+            return set()
+
+    chunk_names = _get_chunk_names(RENAISS_MAIN_URL) | _get_chunk_names(f"{RENAISS_MAIN_URL}/profile/achievements")
+    out: dict[str, dict[str, str]] = {}
+    for chunk_name in sorted(chunk_names):
+        try:
+            js_resp = _http_get(f"{RENAISS_MAIN_URL}/_next/static/chunks/{chunk_name}.js", timeout=15)
+            js_resp.raise_for_status()
+            js_text = str(js_resp.text or "")
+        except Exception:
+            continue
+        if sbt_blob not in js_text:
+            continue
+        for m in entry_re.finditer(js_text):
+            token_id = str(m.group(1) or "").strip()
+            if not token_id:
+                continue
+            if token_id in out:
+                continue
+            out[token_id] = {
+                "name": str(m.group(2) or "").strip(),
+                "image_url": str(m.group(3) or "").strip(),
+            }
+
+    with _PROFILE_SBT_METADATA_LOCK:
+        _PROFILE_SBT_METADATA_CACHE["ts"] = time.time()
+        _PROFILE_SBT_METADATA_CACHE["data"] = {str(k): dict(v) for k, v in out.items()}
+    return out
+
+
+def _fetch_wallet_sbt_badges_onchain(wallet_address: str | None) -> list[dict]:
+    wallet_norm = _normalize_wallet_address(wallet_address or "")
+    if not wallet_norm:
+        return []
+    cache_key = f"onchain:{wallet_norm}"
+    now_ts = time.time()
+    cached = _PROFILE_SBT_BADGE_CACHE.get(cache_key)
+    if cached and PROFILE_SBT_BADGE_CACHE_TTL_SEC > 0 and (now_ts - cached[0]) <= PROFILE_SBT_BADGE_CACHE_TTL_SEC:
+        return [dict(x) for x in cached[1]]
+    if _ONCHAIN_ANALYZE_SBT_WALLET_FN is None:
+        return []
+    cfg = _build_profile_onchain_cfg()
+    if cfg is None:
+        return []
+    if not ONCHAIN_SBT_CONTRACT.startswith("0x") or len(ONCHAIN_SBT_CONTRACT) != 42:
+        return []
+
+    try:
+        balances = _ONCHAIN_ANALYZE_SBT_WALLET_FN(cfg, wallet_norm, ONCHAIN_SBT_CONTRACT)
+    except Exception as e:
+        if cached:
+            print(f"⚠️ onchain sbt failed for {wallet_norm}, fallback stale cache: {e}", file=sys.stderr)
+            return [dict(x) for x in cached[1]]
+        return []
+    if not isinstance(balances, dict):
+        return []
+
+    metadata = _fetch_sbt_metadata_map()
+    out: list[dict] = []
+    for token_id_raw, amount_raw in balances.items():
+        token_id = str(token_id_raw or "").strip()
+        amount = _parse_int(amount_raw) or 0
+        if not token_id or amount <= 0:
+            continue
+        meta = metadata.get(token_id) or {}
+        name = str(meta.get("name") or "").strip() or f"SBT #{token_id}"
+        image_url = str(meta.get("image_url") or "").strip()
+        out.append(
+            {
+                "name": name,
+                "balance": amount,
+                "is_owned": True,
+                "sbt_id": token_id,
+                "image_url": image_url,
+            }
+        )
+    out.sort(key=lambda x: (_parse_int(x.get("balance")) or 0, str(x.get("sbt_id") or "")), reverse=True)
+    _PROFILE_SBT_BADGE_CACHE[cache_key] = (time.time(), [dict(x) for x in out])
+    return out
+
+
+def _fetch_user_sbt_badges(username: str | None, wallet_address: str | None = None) -> list[dict]:
+    source = PROFILE_SBT_BADGE_SOURCE
+    badges_onchain: list[dict] = []
+    if source in ("onchain", "auto"):
+        badges_onchain = _fetch_wallet_sbt_badges_onchain(wallet_address)
+        if badges_onchain or source == "onchain":
+            return badges_onchain
+    if source in ("official", "auto"):
+        badges_official = _fetch_user_sbt_badges_official(username)
+        if badges_official or source == "official":
+            return badges_official
+        if badges_onchain:
+            return badges_onchain
     return []
 
 
@@ -5098,7 +5268,7 @@ def _build_wallet_profile_picker_data(wallet_address: str) -> dict:
     if not username:
         username = _username_from_rankings_wallet(wallet_norm)
     if not user_id:
-        sbt_badges = _fetch_user_sbt_badges(username)
+        sbt_badges = _fetch_user_sbt_badges(username, wallet_norm)
         owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
         sbt_options = []
         for b in owned_badges[:25]:
@@ -5130,7 +5300,7 @@ def _build_wallet_profile_picker_data(wallet_address: str) -> dict:
     except Exception:
         collection = []
     if not collection:
-        sbt_badges = _fetch_user_sbt_badges(username)
+        sbt_badges = _fetch_user_sbt_badges(username, wallet_norm)
         owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
         sbt_options = []
         for b in owned_badges[:25]:
@@ -5186,7 +5356,7 @@ def _build_wallet_profile_picker_data(wallet_address: str) -> dict:
             }
         )
 
-    sbt_badges = _fetch_user_sbt_badges(username)
+    sbt_badges = _fetch_user_sbt_badges(username, wallet_norm)
     owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
     sbt_options = []
     for b in owned_badges[:25]:
@@ -5336,7 +5506,7 @@ def _build_wallet_profile_context(
 
     hero_name = str(hero.get("name") or "Collection Overview")
     profile_name = str(username or short_wallet or "Unknown User")
-    sbt_badges = _fetch_user_sbt_badges(username)
+    sbt_badges = _fetch_user_sbt_badges(username, wallet_norm)
     sbt_total = sum((b.get("balance") or 0) for b in sbt_badges)
     sbt_live_total = int(sbt_total)
     volume_rank_chip = _rank_chip_payload((ranking_row or {}).get("volume_rank"))
@@ -5621,6 +5791,70 @@ def _build_wallet_profile_context(
             short_wallet=(history_data.get("wallet_short") or short_wallet),
             profile_lang=profile_lang,
         )
+    sbt_rank_tier = sbt_rank_chip["tier"] if sbt_rank_chip["tier"] in ("gold", "silver", "bronze") else "none"
+    sbt_rank_value = sbt_rank_chip["text"]
+    sbt_owned_total_snapshot = _parse_int((ranking_row or {}).get("sbt_owned_total")) or 0
+    sbt_owned_badge_snapshot = _parse_int((ranking_row or {}).get("sbt_owned_badge_count")) or 0
+    sbt_owned_badge_live = len(owned_badges)
+    sbt_total_display = sbt_live_total if sbt_live_total > 0 else sbt_owned_total_snapshot
+    sbt_badge_count_display = sbt_owned_badge_live if sbt_owned_badge_live > 0 else sbt_owned_badge_snapshot
+    sbt_badges_sorted = sorted(
+        owned_badges,
+        key=lambda x: (_parse_int(x.get("balance")) or 0),
+        reverse=True,
+    )
+    sbt_badges_for_rank: list[dict[str, object]] = []
+    for b in sbt_badges_sorted:
+        name = str(b.get("name") or "").strip()
+        if not name:
+            continue
+        sbt_badges_for_rank.append(
+            {
+                "name": _compact_sbt_label(name),
+                "balance": _parse_int(b.get("balance")) or 0,
+                "image": _prepare_sbt_badge_image_for_poster(str(b.get("image_url") or "").strip()),
+            }
+        )
+    if not sbt_badges_for_rank:
+        for b in display_badges:
+            sbt_badges_for_rank.append(
+                {
+                    "name": str(b.get("label") or b.get("name") or "").strip(),
+                    "balance": _parse_int(b.get("balance")) or 0,
+                    "image": str(b.get("image") or _TRANSPARENT_CARD_IMAGE),
+                }
+            )
+    sbt_rank_template_context = {
+        "collection_name": f"{profile_name} Collection",
+        "brand_name": ui_labels["brand_name"],
+        "brand_site": ui_labels["brand_site"],
+        "update_date": datetime.now().strftime("%Y-%m-%d"),
+        "title": _t(profile_lang, "SBT 排名", "SBT Ranking", "SBT 랭킹", "SBT 排名"),
+        "subtitle": _t(
+            profile_lang,
+            "鏈上持有徽章統計",
+            "On-chain badge leaderboard snapshot",
+            "온체인 배지 리더보드 스냅샷",
+            "链上徽章排行榜快照",
+        ),
+        "wallet_label": _t(profile_lang, "錢包", "Wallet", "지갑", "钱包"),
+        "holders_label": _t(profile_lang, "總持有人", "Total Holders", "총 보유자", "总持有人"),
+        "sbt_total_label": _t(profile_lang, "SBT 總數", "Total SBT", "총 SBT", "SBT 总数"),
+        "sbt_badge_label": _t(profile_lang, "持有徽章數", "Owned Badge Types", "보유 배지 수", "持有徽章数"),
+        "badges_title": _t(profile_lang, "持有徽章", "Owned Badges", "보유 배지", "持有徽章"),
+        "badges_empty": _t(profile_lang, "目前無可顯示 SBT", "No SBT badges found", "표시할 SBT 없음", "暂无可显示 SBT"),
+        "rank_label": "SBT Rank",
+        "holders_suffix": _t(profile_lang, "位", "holders", "명", "位"),
+        "wallet_short": history_data.get("wallet_short") or short_wallet or wallet_norm,
+        "username": profile_name,
+        "sbt_total": _format_number(sbt_total_display),
+        "sbt_badge_count": _format_number(sbt_badge_count_display),
+        "sbt_rank": sbt_rank_value,
+        "sbt_rank_tier": sbt_rank_tier,
+        "holders_total": _format_number(len(_load_rankings_wallet_map())),
+        "background_image": _profile_sbt_rank_background_data_uri(sbt_rank_tier),
+        "sbt_badges": sbt_badges_for_rank,
+    }
 
     return {
         "username": profile_name,
@@ -5654,6 +5888,7 @@ def _build_wallet_profile_context(
         "history_template_context": history_template_context,
         "extreme_template_context": extremes_template_context,
         "holdings_template_context": holdings_template_context,
+        "sbt_rank_template_context": sbt_rank_template_context,
         "history_summary": {
             "opened_packs": history_data.get("opened_packs_count", 0),
             "total_spent": metric_total_spent,
@@ -5874,6 +6109,8 @@ async def _render_wallet_profile_posters_bundle(
         extreme_replacements = template_payload.get("extreme_replacements") or {}
         holdings_template_context = template_payload.get("holdings_template_context") or {}
         holdings_replacements = template_payload.get("holdings_replacements") or {}
+        sbt_rank_template_context = template_payload.get("sbt_rank_template_context") or {}
+        sbt_rank_replacements = template_payload.get("sbt_rank_replacements") or {}
     else:
         profile_template_context = {}
         profile_replacements = template_payload or {}
@@ -5883,12 +6120,15 @@ async def _render_wallet_profile_posters_bundle(
         extreme_replacements = {}
         holdings_template_context = {}
         holdings_replacements = {}
+        sbt_rank_template_context = {}
+        sbt_rank_replacements = {}
 
     os.makedirs(out_dir, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_]+", "_", safe_name).strip("_") or "wallet_profile"
     profile_out = os.path.join(out_dir, f"{safe}_profile.png") if render_profile else None
     history_out = os.path.join(out_dir, f"{safe}_profile_history.png")
     extremes_out = os.path.join(out_dir, f"{safe}_profile_extremes.png")
+    sbt_rank_out = os.path.join(out_dir, f"{safe}_profile_sbt_rank.png")
     holdings_out = os.path.join(out_dir, f"{safe}_profile_holdings.png") if render_holdings else None
 
     jobs: list[tuple[str, str]] = []
@@ -5923,6 +6163,16 @@ async def _render_wallet_profile_posters_bundle(
             extremes_out,
         )
     )
+    jobs.append(
+        (
+            _render_wallet_template_html(
+                PROFILE_SBT_RANK_TEMPLATE_PATH,
+                template_context=sbt_rank_template_context,
+                replacements=sbt_rank_replacements,
+            ),
+            sbt_rank_out,
+        )
+    )
     if render_holdings:
         jobs.append(
             (
@@ -5938,7 +6188,7 @@ async def _render_wallet_profile_posters_bundle(
     async with image_generator.RENDER_SEMAPHORE:
         context = await image_generator._new_browser_context(
             viewport={"width": 1200, "height": 900},
-            device_scale_factor=2,
+            device_scale_factor=PROFILE_POSTER_DEVICE_SCALE,
         )
         try:
             for html_doc, out_path in jobs:
@@ -5953,6 +6203,7 @@ async def _render_wallet_profile_posters_bundle(
         "profile": profile_out,
         "history": history_out,
         "extremes": extremes_out,
+        "sbt_rank": sbt_rank_out,
         "holdings": holdings_out,
     }
 
@@ -7969,6 +8220,7 @@ class ProfileConfigView(discord.ui.View):
             extremes_path = None
             history_path = None
             holdings_path = None
+            sbt_rank_path = None
             async with POSTER_SEMAPHORE:
                 rendered = await _render_wallet_profile_posters_bundle(
                     profile_ctx,
@@ -7981,6 +8233,7 @@ class ProfileConfigView(discord.ui.View):
                 history_path = rendered.get("history")
                 extremes_path = rendered.get("extremes")
                 holdings_path = rendered.get("holdings")
+                sbt_rank_path = rendered.get("sbt_rank")
             history_summary = profile_ctx.get("history_summary") or {}
             history_only_hint = ""
             if not poster_enabled:
@@ -8005,6 +8258,8 @@ class ProfileConfigView(discord.ui.View):
                 files.append(discord.File(holdings_path))
             if extremes_path and os.path.exists(extremes_path):
                 files.append(discord.File(extremes_path))
+            if sbt_rank_path and os.path.exists(sbt_rank_path):
+                files.append(discord.File(sbt_rank_path))
             if poster_path and os.path.exists(poster_path):
                 files.insert(0, discord.File(poster_path))
             await interaction.followup.send(

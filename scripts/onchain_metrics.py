@@ -97,6 +97,62 @@ def _fetch_tokentx_page(cfg: OnchainConfig, wallet: str, *, page: int, sort: str
     raise RuntimeError(f"bscscan tokentx request failed: {last_err}")
 
 
+def _fetch_token1155tx_page(
+    cfg: OnchainConfig,
+    wallet: str,
+    contract: str,
+    *,
+    page: int,
+    sort: str,
+) -> list[dict[str, Any]]:
+    params = {
+        "chainid": int(cfg.chain_id),
+        "module": "account",
+        "action": "token1155tx",
+        "address": str(wallet or "").strip().lower(),
+        "contractaddress": str(contract or "").strip().lower(),
+        "page": int(page),
+        "offset": int(max(1, min(10000, cfg.page_size))),
+        "sort": sort,
+        "apikey": cfg.api_key,
+    }
+
+    last_err: Exception | None = None
+    for attempt in range(1, max(1, cfg.retries) + 1):
+        try:
+            resp = requests.get(cfg.api_url, params=params, timeout=30)
+            status_code = int(resp.status_code or 0)
+            if status_code >= 500 or status_code == 429:
+                raise requests.HTTPError(f"HTTP {status_code}", response=resp)
+            resp.raise_for_status()
+
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("bscscan token1155tx invalid response")
+
+            message = str(data.get("message") or "").strip()
+            result = data.get("result")
+
+            if message == "No transactions found":
+                return []
+            if isinstance(result, list):
+                return [x for x in result if isinstance(x, dict)]
+            if isinstance(result, str):
+                lowered = result.lower()
+                if "max rate limit" in lowered or "query timeout" in lowered:
+                    raise RuntimeError(result)
+                if "no transactions found" in lowered:
+                    return []
+            raise RuntimeError(f"bscscan token1155tx error: {message or result}")
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt < max(1, cfg.retries):
+                time.sleep(max(0.2, cfg.backoff_sec) * (2 ** (attempt - 1)))
+                continue
+            break
+    raise RuntimeError(f"bscscan token1155tx request failed: {last_err}")
+
+
 def fetch_latest_usdt_tx_hash(cfg: OnchainConfig, wallet: str) -> str:
     rows = _fetch_tokentx_page(cfg, wallet, page=1, sort="desc")
     if not rows:
@@ -119,6 +175,21 @@ def fetch_all_usdt_transfers(cfg: OnchainConfig, wallet: str) -> list[dict[str, 
     return out
 
 
+def fetch_all_erc1155_transfers(cfg: OnchainConfig, wallet: str, contract: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    page = 1
+    limit = int(max(1, min(10000, cfg.page_size)))
+    while True:
+        rows = _fetch_token1155tx_page(cfg, wallet, contract, page=page, sort="asc")
+        if not rows:
+            break
+        out.extend(rows)
+        if len(rows) < limit:
+            break
+        page += 1
+    return out
+
+
 def _classify_transfer(row: dict[str, Any], wallet: str, cfg: OnchainConfig) -> str:
     frm = str(row.get("from") or "").strip().lower()
     to = str(row.get("to") or "").strip().lower()
@@ -131,6 +202,34 @@ def _classify_transfer(row: dict[str, Any], wallet: str, cfg: OnchainConfig) -> 
     if frm == cfg.marketplace_contract and to == wallet:
         return "mp_sell"
     return "other"
+
+
+def analyze_sbt_wallet(cfg: OnchainConfig, wallet: str, sbt_contract: str) -> dict[str, int]:
+    wallet_norm = str(wallet or "").strip().lower()
+    contract_norm = str(sbt_contract or "").strip().lower()
+    if not wallet_norm:
+        return {}
+    if not contract_norm.startswith("0x") or len(contract_norm) != 42:
+        return {}
+
+    transfers = fetch_all_erc1155_transfers(cfg, wallet_norm, contract_norm)
+    balances: dict[str, int] = {}
+    for row in transfers:
+        token_id = str(row.get("tokenID") or row.get("tokenId") or "").strip()
+        if not token_id:
+            continue
+        amount = int(_to_decimal(row.get("tokenValue")))
+        if amount <= 0:
+            continue
+
+        from_addr = str(row.get("from") or "").strip().lower()
+        to_addr = str(row.get("to") or "").strip().lower()
+        if from_addr == wallet_norm:
+            balances[token_id] = balances.get(token_id, 0) - amount
+        if to_addr == wallet_norm:
+            balances[token_id] = balances.get(token_id, 0) + amount
+
+    return {token_id: amount for token_id, amount in balances.items() if int(amount) > 0}
 
 
 def analyze_wallet(cfg: OnchainConfig, wallet: str) -> dict[str, Decimal]:
