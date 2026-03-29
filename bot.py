@@ -9537,39 +9537,58 @@ async def ranking(interaction: discord.Interaction):
         val = _parse_int(row.get(field))
         return str(val) if (val is not None and val > 0) else "-"
 
-    def _fallback_top(metric_field: str, *, numeric_type: str) -> list[dict]:
+    def _fallback_top(
+        metric_field: str,
+        *,
+        numeric_type: str,
+        descending: bool = True,
+        require_negative: bool = False,
+    ) -> list[dict]:
         rows: list[dict] = []
         for w in wallets:
             if isinstance(w, dict):
+                if require_negative:
+                    if numeric_type == "int":
+                        if (_parse_int(w.get(metric_field)) or 0) >= 0:
+                            continue
+                    else:
+                        if _to_decimal(w.get(metric_field)) >= 0:
+                            continue
                 rows.append(w)
         if numeric_type == "int":
             rows.sort(
                 key=lambda x: (_parse_int(x.get(metric_field)) or 0, str(x.get("address") or "").lower()),
-                reverse=True,
+                reverse=descending,
             )
         else:
             rows.sort(
                 key=lambda x: (_to_decimal(x.get(metric_field)), str(x.get("address") or "").lower()),
-                reverse=True,
+                reverse=descending,
             )
         return rows[:10]
 
     sections = [
-        ("volume", "交易量", "trade_volume_usdt", "volume_rank", "money"),
-        ("total_spent", "總花費", "total_spent_usdt", "total_spent_rank", "money"),
-        ("holdings", "持有價值", "holdings_value_usdt", "holdings_rank", "money"),
-        ("pnl", "總盈虧", "total_pnl_usdt", "pnl_rank", "money_signed"),
-        ("participation_days", "參與天數", "participation_days_count", "participation_days_rank", "int"),
-        ("sbt", "SBT", "sbt_owned_total", "sbt_rank", "int"),
+        ("volume", "交易量", "trade_volume_usdt", "volume_rank", "money", True, False),
+        ("total_spent", "總花費", "total_spent_usdt", "total_spent_rank", "money", True, False),
+        ("holdings", "持有價值", "holdings_value_usdt", "holdings_rank", "money", True, False),
+        ("pnl", "總盈虧", "total_pnl_usdt", "pnl_rank", "money_signed", True, False),
+        ("loss", "總虧損", "total_pnl_usdt", "", "money_signed", False, True),
+        ("participation_days", "參與天數", "participation_days_count", "participation_days_rank", "int", True, False),
+        ("sbt", "SBT", "sbt_owned_total", "sbt_rank", "int", True, False),
     ]
 
     blocks: list[str] = []
-    for top_key, title, value_field, rank_field, value_type in sections:
+    for top_key, title, value_field, rank_field, value_type, descending, require_negative in sections:
         top_rows_raw = top_map.get(top_key) if isinstance(top_map, dict) else None
         if isinstance(top_rows_raw, list) and top_rows_raw:
             rows = [x for x in top_rows_raw if isinstance(x, dict)][:10]
         else:
-            rows = _fallback_top(value_field, numeric_type=("int" if value_type == "int" else "decimal"))
+            rows = _fallback_top(
+                value_field,
+                numeric_type=("int" if value_type == "int" else "decimal"),
+                descending=descending,
+                require_negative=require_negative,
+            )
 
         section_lines: list[str] = [f"**{title} Top 10**"]
         if not rows:
