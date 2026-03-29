@@ -5602,18 +5602,6 @@ def _build_wallet_profile_context(
     history_activity_rows = list(history_data.get("activity_rows") or [])
     history_contract_rows = history_data.get("contract_rows") or []
     metric_opened_count = _parse_int(history_data.get("opened_packs_count")) or 0
-    rank_metrics_ready = bool(ranking_row) and any(
-        k in ranking_row
-        for k in (
-            "pack_spent_usdt",
-            "total_spent_usdt",
-            "total_earned_usdt",
-            "trade_volume_usdt",
-            "cash_net_usdt",
-            "total_pnl_usdt",
-        )
-    )
-    use_rank_metrics = bool(PROFILE_USE_RANKING_METRICS and rank_metrics_ready)
     use_live_onchain_metrics = bool(
         PROFILE_REALTIME_RECALC_ON_PROFILE
         and PROFILE_REALTIME_METRICS_SOURCE == "onchain"
@@ -5630,16 +5618,11 @@ def _build_wallet_profile_context(
         metric_market_buy_total = _to_decimal(live_onchain_metrics.get("trade_spent_usdt"))
         metric_market_sell_total = _to_decimal(live_onchain_metrics.get("trade_earned_usdt"))
         metric_card_withdraw_total = _to_decimal(history_data.get("card_withdraw_total"))
-        holdings_from_ranking = _to_decimal(ranking_row.get("holdings_value_usdt"))
-        holdings_value = holdings_from_ranking if holdings_from_ranking > 0 else (_to_decimal(total_fmv) / Decimal("100"))
+        holdings_value = _to_decimal(total_fmv) / Decimal("100")
         # Net follows profile definition: cash flow + withdraw-card value.
         cash_net = _to_decimal(live_onchain_metrics.get("cash_net_usdt")) + metric_card_withdraw_total
         net_with_holdings = cash_net + holdings_value
-        metric_active_days_count = (
-            _parse_int(history_data.get("active_days_count"))
-            or _parse_int(ranking_row.get("participation_days_count"))
-            or 0
-        )
+        metric_active_days_count = _parse_int(history_data.get("active_days_count")) or 0
         onchain_opened_count = _parse_int(live_onchain_metrics.get("open_pack_tx_count")) or 0
         onchain_buyback_count = _parse_int(live_onchain_metrics.get("buyback_tx_count")) or 0
         onchain_trade_buy_count = _parse_int(live_onchain_metrics.get("trade_buy_tx_count")) or 0
@@ -5670,21 +5653,6 @@ def _build_wallet_profile_context(
             row_types=("SellActivity",),
             count=onchain_trade_sell_count,
             lang=profile_lang,
-        )
-    elif use_rank_metrics:
-        metric_pack_spent = _to_decimal(ranking_row.get("pack_spent_usdt"))
-        metric_total_spent = _to_decimal(ranking_row.get("total_spent_usdt"))
-        metric_total_earned = _to_decimal(ranking_row.get("total_earned_usdt"))
-        metric_trade_volume = _to_decimal(ranking_row.get("trade_volume_usdt"))
-        metric_buyback_total = _to_decimal(ranking_row.get("buyback_earned_usdt"))
-        metric_market_buy_total = _to_decimal(ranking_row.get("trade_spent_usdt"))
-        metric_market_sell_total = _to_decimal(ranking_row.get("trade_earned_usdt"))
-        metric_card_withdraw_total = _to_decimal(ranking_row.get("card_withdraw_total_usdt"))
-        holdings_value = _to_decimal(ranking_row.get("holdings_value_usdt"))
-        cash_net = _to_decimal(ranking_row.get("cash_net_usdt"))
-        net_with_holdings = _to_decimal(ranking_row.get("total_pnl_usdt"))
-        metric_active_days_count = _parse_int(ranking_row.get("participation_days_count")) or (
-            _parse_int(history_data.get("active_days_count")) or 0
         )
     else:
         metric_pack_spent = _to_decimal(history_data.get("pack_spent_total"))
@@ -5793,11 +5761,9 @@ def _build_wallet_profile_context(
         )
     sbt_rank_tier = sbt_rank_chip["tier"] if sbt_rank_chip["tier"] in ("gold", "silver", "bronze") else "none"
     sbt_rank_value = sbt_rank_chip["text"]
-    sbt_owned_total_snapshot = _parse_int((ranking_row or {}).get("sbt_owned_total")) or 0
-    sbt_owned_badge_snapshot = _parse_int((ranking_row or {}).get("sbt_owned_badge_count")) or 0
     sbt_owned_badge_live = len(owned_badges)
-    sbt_total_display = sbt_live_total if sbt_live_total > 0 else sbt_owned_total_snapshot
-    sbt_badge_count_display = sbt_owned_badge_live if sbt_owned_badge_live > 0 else sbt_owned_badge_snapshot
+    sbt_total_display = sbt_live_total
+    sbt_badge_count_display = sbt_owned_badge_live
     sbt_badges_sorted = sorted(
         owned_badges,
         key=lambda x: (_parse_int(x.get("balance")) or 0),
