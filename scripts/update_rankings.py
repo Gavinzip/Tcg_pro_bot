@@ -23,6 +23,7 @@ except Exception:  # pragma: no cover
 
 import requests
 from dotenv import load_dotenv
+from onchain_metrics import OnchainConfig, analyze_wallet as analyze_wallet_onchain, fetch_latest_usdt_tx_hash
 
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
 RENAISS_COLLECTIBLE_BY_TOKEN_URL = "https://www.renaiss.xyz/api/trpc/collectible.getCollectibleByTokenId"
@@ -42,6 +43,11 @@ TOKEN_ACTIVITY_PAGE_LIMIT = max(1, min(50, int(os.getenv("PROFILE_TOKEN_ACTIVITY
 TOKEN_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_TOKEN_ACTIVITY_MAX_PAGES", "20")))
 DEFAULT_HOLDERS_FILE_SERVER = Path("/data/renaiss_sync/snapshots/nft_13_holders.latest.json")
 DEFAULT_HOLDERS_FILE_LOCAL = Path("/Users/gavin/renaiss_project/renaiss_sync_data/snapshots/nft_13_holders.latest.json")
+DEFAULT_ONCHAIN_PACK_CONTRACTS = (
+    "0xaab5f5fa75437a6e9e7004c12c9c56cda4b4885a",
+    "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
+    "0xb2891022648c5fad3721c42c05d8d283d4d53080",
+)
 
 _HTTP_SESSION_LOCAL = threading.local()
 _WITHDRAW_VALUE_CACHE: dict[str, Decimal] = {}
@@ -53,6 +59,23 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if val is None:
         return default
     return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _parse_address_csv(raw: str | None, *, default_values: tuple[str, ...] = ()) -> tuple[str, ...]:
+    values: list[str] = []
+    seen: set[str] = set()
+    source = str(raw or "").strip()
+    if not source:
+        source = ",".join(default_values)
+    for token in source.replace("\n", ",").split(","):
+        addr = str(token or "").strip().lower()
+        if not addr.startswith("0x") or len(addr) != 42:
+            continue
+        if addr in seen:
+            continue
+        seen.add(addr)
+        values.append(addr)
+    return tuple(values)
 
 
 def _safe_tzinfo(name: str):
@@ -172,6 +195,20 @@ def _day_key_from_ts(ts: int) -> str:
         return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
     except Exception:
         return ""
+
+
+def _participation_days_since_join(day_keys: set[str], now_dt: datetime) -> int:
+    normalized = sorted({str(x or "").strip() for x in (day_keys or set()) if str(x or "").strip()})
+    if not normalized:
+        return 0
+    try:
+        first_day = datetime.strptime(normalized[0], "%Y-%m-%d").date()
+    except Exception:
+        return len(normalized)
+    today = now_dt.date()
+    if today < first_day:
+        return 1
+    return int((today - first_day).days) + 1
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -573,6 +610,15 @@ class RankingConfig:
     tz_name: str
     tzinfo: Any
     full_rebuild_days: int
+    full_rebuild_active_only: bool
+    metrics_source: str
+    onchain_api_url: str
+    onchain_chain_id: int
+    onchain_api_key: str
+    onchain_usdt_contract: str
+    onchain_pack_contracts: tuple[str, ...]
+    onchain_marketplace_contract: str
+    onchain_page_size: int
     bootstrap_from_git: bool
     backup_git_enabled: bool
     backup_git_repo: str
@@ -658,6 +704,24 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
     wallet_source = str(os.getenv("RANK_SYNC_WALLET_SOURCE", "auto")).strip().lower() or "auto"
     if wallet_source not in ("holders_file", "collectible", "auto"):
         raise RuntimeError("RANK_SYNC_WALLET_SOURCE must be holders_file, collectible, or auto")
+    metrics_source = str(os.getenv("RANK_METRICS_SOURCE", "hybrid")).strip().lower() or "hybrid"
+    if metrics_source not in ("official", "onchain", "hybrid"):
+        raise RuntimeError("RANK_METRICS_SOURCE must be official, onchain, or hybrid")
+
+    onchain_api_url = str(os.getenv("BSCSCAN_API_URL", "https://api.etherscan.io/v2/api")).strip() or "https://api.etherscan.io/v2/api"
+    onchain_chain_id = max(1, int(os.getenv("BSCSCAN_CHAIN_ID", "56")))
+    onchain_api_key = str(os.getenv("BSCSCAN_API_KEY", "")).strip()
+    onchain_usdt_contract = str(
+        os.getenv("ONCHAIN_USDT_CONTRACT", "0x55d398326f99059ff775485246999027b3197955")
+    ).strip().lower()
+    onchain_pack_contracts = _parse_address_csv(
+        os.getenv("ONCHAIN_PACK_CONTRACTS"),
+        default_values=DEFAULT_ONCHAIN_PACK_CONTRACTS,
+    )
+    onchain_marketplace_contract = str(
+        os.getenv("ONCHAIN_MARKETPLACE_CONTRACT", "0xae3e7268ef5a062946216a44f58a8f685ffd11d0")
+    ).strip().lower()
+    onchain_page_size = max(100, min(10000, int(os.getenv("ONCHAIN_PAGE_SIZE", "10000"))))
 
     selected_holders_file: Path | None
     if wallet_source == "collectible":
@@ -689,6 +753,15 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
         tz_name=tz_name,
         tzinfo=tzinfo,
         full_rebuild_days=max(1, int(os.getenv("RANK_SYNC_FULL_REBUILD_DAYS", "7"))),
+        full_rebuild_active_only=_env_bool("RANK_SYNC_FULL_REBUILD_ACTIVE_ONLY", True),
+        metrics_source=metrics_source,
+        onchain_api_url=onchain_api_url,
+        onchain_chain_id=onchain_chain_id,
+        onchain_api_key=onchain_api_key,
+        onchain_usdt_contract=onchain_usdt_contract,
+        onchain_pack_contracts=onchain_pack_contracts,
+        onchain_marketplace_contract=onchain_marketplace_contract,
+        onchain_page_size=onchain_page_size,
         bootstrap_from_git=bootstrap_from_git,
         backup_git_enabled=backup_git_enabled,
         backup_git_repo=str(os.getenv("BACKUP_GIT_REPO", "")).strip(),
@@ -711,6 +784,11 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
 def validate_config(cfg: RankingConfig) -> None:
     if cfg.backup_git_enabled and not cfg.backup_git_repo:
         raise RuntimeError("BACKUP_GIT_REPO is required when BACKUP_GIT_ENABLED=1")
+    if cfg.metrics_source in ("onchain", "hybrid"):
+        if not cfg.onchain_api_key:
+            raise RuntimeError("BSCSCAN_API_KEY is required when RANK_METRICS_SOURCE is onchain/hybrid")
+        if not cfg.onchain_pack_contracts:
+            raise RuntimeError("ONCHAIN_PACK_CONTRACTS is empty")
 
 
 def send_webhook(cfg: RankingConfig, message: str, success: bool = True) -> None:
@@ -955,8 +1033,9 @@ def load_activity_checkpoints(cfg: RankingConfig) -> dict[str, dict[str, Any]]:
         if not isinstance(row, dict):
             continue
         cp = str(row.get("last_seen_activity_id") or "").strip()
+        usdt_tx_hash = str(row.get("last_seen_usdt_tx_hash") or "").strip().lower()
         updated_at = str(row.get("updated_at") or "").strip()
-        if not cp:
+        if not cp and not usdt_tx_hash:
             continue
         day_keys_raw = row.get("activity_day_keys")
         day_keys: list[str] = []
@@ -967,6 +1046,7 @@ def load_activity_checkpoints(cfg: RankingConfig) -> dict[str, dict[str, Any]]:
                     day_keys.append(s)
         out[address] = {
             "last_seen_activity_id": cp,
+            "last_seen_usdt_tx_hash": usdt_tx_hash,
             "updated_at": updated_at,
             "activity_day_keys": sorted(set(day_keys)),
         }
@@ -982,7 +1062,8 @@ def build_checkpoint_dump(
     for addr in sorted(current_addrs):
         row = checkpoint_next.get(addr) or {}
         cp = str(row.get("last_seen_activity_id") or "").strip()
-        if not cp:
+        usdt_tx_hash = str(row.get("last_seen_usdt_tx_hash") or "").strip().lower()
+        if not cp and not usdt_tx_hash:
             continue
         keys_raw = row.get("activity_day_keys")
         day_keys = (
@@ -992,6 +1073,7 @@ def build_checkpoint_dump(
         )
         checkpoint_dump[addr] = {
             "last_seen_activity_id": cp,
+            "last_seen_usdt_tx_hash": usdt_tx_hash,
             "updated_at": checkpoint_time,
             "activity_day_keys": day_keys,
         }
@@ -1045,6 +1127,30 @@ def fetch_latest_activity_id_for_wallet(address: str) -> tuple[str | None, bool]
             return "", True
         first = rows[0] if isinstance(rows[0], dict) else {}
         return str(first.get("id") or "").strip(), True
+    except Exception:
+        return None, False
+
+
+def _build_onchain_cfg(cfg: RankingConfig) -> OnchainConfig:
+    return OnchainConfig(
+        api_url=cfg.onchain_api_url,
+        chain_id=cfg.onchain_chain_id,
+        api_key=cfg.onchain_api_key,
+        usdt_contract=cfg.onchain_usdt_contract,
+        pack_contracts=cfg.onchain_pack_contracts,
+        marketplace_contract=cfg.onchain_marketplace_contract,
+        page_size=cfg.onchain_page_size,
+        retries=API_MAX_RETRIES,
+        backoff_sec=API_RETRY_BACKOFF_SEC,
+    )
+
+
+def fetch_latest_usdt_tx_hash_for_wallet(onchain_cfg: OnchainConfig, address: str) -> tuple[str | None, bool]:
+    wallet_norm = str(address or "").strip().lower()
+    if not wallet_norm:
+        return "", True
+    try:
+        return fetch_latest_usdt_tx_hash(onchain_cfg, wallet_norm), True
     except Exception:
         return None, False
 
@@ -1355,6 +1461,24 @@ def _wallet_changed(prev: WalletRecord | None, curr: WalletRecord) -> bool:
     return _quantize_2(prev.holdings_value_usdt) != _quantize_2(curr.holdings_value_usdt)
 
 
+def _wallet_has_activity_history(rec: WalletRecord | None) -> bool:
+    if rec is None:
+        return False
+    return any(
+        _to_decimal(v) > 0
+        for v in (
+            rec.trade_volume_usdt,
+            rec.pack_spent_usdt,
+            rec.trade_spent_usdt,
+            rec.trade_earned_usdt,
+            rec.buyback_earned_usdt,
+            rec.card_withdraw_total_usdt,
+            rec.total_spent_usdt,
+            rec.total_earned_usdt,
+        )
+    )
+
+
 def _parse_iso_dt(text: str | None) -> datetime | None:
     t = str(text or "").strip()
     if not t:
@@ -1501,16 +1625,23 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             username_changed_addrs.add(rec.address)
     workers = max(1, min(cfg.workers, len(records))) if records else 1
 
+    use_onchain_metrics = cfg.metrics_source in ("onchain", "hybrid")
+    onchain_cfg = _build_onchain_cfg(cfg) if use_onchain_metrics else None
     latest_activity_map: dict[str, str] = {}
+    latest_usdt_tx_map: dict[str, str] = {}
     changed_by_activity: set[str] = set()
     probe_failed_addrs: set[str] = set()
     activity_probe_failed = 0
     if not full_rebuild and current_addrs:
-        probe_total = len(current_addrs)
+        # Participation-day updates always follow the original activity API semantics
+        # (not on-chain tx-hash probing), so change detection for activity is unified.
+        probe_addrs = set(current_addrs)
+
+        probe_total = len(probe_addrs)
         probe_completed = 0
-        _print_progress("latest_activity", 0, probe_total)
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(current_addrs)))) as pool:
-            future_map = {pool.submit(fetch_latest_activity_id_for_wallet, addr): addr for addr in current_addrs}
+        _print_progress("latest_activity", 0, probe_total if probe_total > 0 else 1)
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(probe_addrs) if probe_addrs else 1))) as pool:
+            future_map = {pool.submit(fetch_latest_activity_id_for_wallet, addr): addr for addr in probe_addrs}
             for future in as_completed(future_map):
                 addr = future_map[future]
                 try:
@@ -1557,7 +1688,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
 
         activity_probe_failed = len(unresolved_probe)
 
-        for addr in current_addrs:
+        for addr in probe_addrs:
             if addr not in prev_wallets:
                 changed_by_activity.add(addr)
                 continue
@@ -1570,7 +1701,19 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
 
     changed_addrs = changed_by_collection | changed_by_activity
     if full_rebuild:
-        refresh_addrs = set(current_addrs)
+        if cfg.full_rebuild_active_only:
+            refresh_addrs = {
+                a
+                for a in current_addrs
+                if (a not in prev_wallets) or _wallet_has_activity_history(prev_wallets.get(a))
+            }
+            print(
+                "[INFO] full rebuild active-only enabled "
+                f"refresh_addrs={len(refresh_addrs)} wallet_count={len(current_addrs)}",
+                flush=True,
+            )
+        else:
+            refresh_addrs = set(current_addrs)
     else:
         refresh_addrs = {a for a in current_addrs if (a not in prev_wallets) or (a in changed_by_activity)}
     sbt_refresh_addrs = set(refresh_addrs)
@@ -1589,9 +1732,11 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         else:
             prev_day_keys_map[addr] = set()
         cp = str(prev_row.get("last_seen_activity_id") or "").strip()
-        if cp:
+        usdt_tx_hash = str(prev_row.get("last_seen_usdt_tx_hash") or "").strip().lower()
+        if cp or usdt_tx_hash:
             checkpoint_next[addr] = {
                 "last_seen_activity_id": cp,
+                "last_seen_usdt_tx_hash": usdt_tx_hash,
                 "updated_at": str(prev_row.get("updated_at") or ""),
                 "activity_day_keys": sorted(prev_day_keys_map.get(addr) or set()),
             }
@@ -1599,9 +1744,19 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         if latest_id:
             checkpoint_next[addr] = {
                 "last_seen_activity_id": latest_id,
+                "last_seen_usdt_tx_hash": usdt_tx_hash,
                 "updated_at": str(prev_row.get("updated_at") or ""),
                 "activity_day_keys": sorted(prev_day_keys_map.get(addr) or set()),
             }
+        latest_tx_hash = str(latest_usdt_tx_map.get(addr) or "").strip().lower()
+        if latest_tx_hash:
+            checkpoint_row = checkpoint_next.get(addr) or {
+                "last_seen_activity_id": cp,
+                "updated_at": str(prev_row.get("updated_at") or ""),
+                "activity_day_keys": sorted(prev_day_keys_map.get(addr) or set()),
+            }
+            checkpoint_row["last_seen_usdt_tx_hash"] = latest_tx_hash
+            checkpoint_next[addr] = checkpoint_row
 
     refresh_cnt = 0
     pending_checkpoint_updates = 0
@@ -1674,14 +1829,25 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             )
             base_day_keys = set(prev_day_keys_map.get(rec.address) or set())
             merged_day_keys = (base_day_keys | new_day_keys) if (delta_mode and prev is not None) else new_day_keys
+            prev_hash = str((checkpoint_next.get(rec.address) or {}).get("last_seen_usdt_tx_hash") or "").strip().lower()
             if latest_id:
                 checkpoint_next[rec.address] = {
                     "last_seen_activity_id": latest_id,
+                    "last_seen_usdt_tx_hash": prev_hash,
                     "updated_at": str((prev_checkpoints.get(rec.address) or {}).get("updated_at") or ""),
                     "activity_day_keys": sorted(merged_day_keys),
                 }
             elif rec.address in checkpoint_next:
                 checkpoint_next[rec.address]["activity_day_keys"] = sorted(merged_day_keys)
+            latest_tx_hash = str(metrics.get("last_seen_usdt_tx_hash") or "").strip().lower()
+            if latest_tx_hash:
+                checkpoint_row = checkpoint_next.get(rec.address) or {
+                    "last_seen_activity_id": latest_id,
+                    "updated_at": str((prev_checkpoints.get(rec.address) or {}).get("updated_at") or ""),
+                    "activity_day_keys": sorted(merged_day_keys),
+                }
+                checkpoint_row["last_seen_usdt_tx_hash"] = latest_tx_hash
+                checkpoint_next[rec.address] = checkpoint_row
             prev_day_keys_map[rec.address] = set(merged_day_keys)
             rec.participation_days_count = len(merged_day_keys)
 
@@ -1712,6 +1878,73 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             prev = prev_wallets.get(rec.address)
             prev_cp = str((prev_checkpoints.get(rec.address) or {}).get("last_seen_activity_id") or "")
             try:
+                if use_onchain_metrics:
+                    assert onchain_cfg is not None
+                    chain_metrics = analyze_wallet_onchain(onchain_cfg, rec.address)
+                    prev_day_keys = sorted(prev_day_keys_map.get(rec.address) or set()) if prev is not None else []
+                    activity_day_keys = list(prev_day_keys)
+                    latest_activity_id = prev_cp
+                    stop_reached = True
+                    should_refresh_activity_days = bool(
+                        (prev is None) or full_rebuild or (rec.address in changed_by_activity)
+                    )
+                    if should_refresh_activity_days:
+                        if (not full_rebuild) and (prev is not None) and prev_cp:
+                            activity_metrics = compute_activity_metrics_for_wallet(
+                                rec.address,
+                                cfg.activity_page_limit,
+                                cfg.activity_max_pages,
+                                stop_activity_id=prev_cp,
+                            )
+                            latest_activity_id = str(activity_metrics.get("latest_activity_id") or prev_cp)
+                            stop_reached = bool(activity_metrics.get("stop_reached"))
+                            new_day_keys = {
+                                str(x or "").strip()
+                                for x in (activity_metrics.get("activity_day_keys") or [])
+                                if str(x or "").strip()
+                            }
+                            activity_day_keys = sorted(set(prev_day_keys) | new_day_keys)
+                        else:
+                            activity_metrics = compute_activity_metrics_for_wallet(
+                                rec.address,
+                                cfg.activity_page_limit,
+                                cfg.activity_max_pages,
+                                stop_activity_id=None,
+                            )
+                            latest_activity_id = str(activity_metrics.get("latest_activity_id") or prev_cp)
+                            stop_reached = bool(activity_metrics.get("stop_reached"))
+                            activity_day_keys = sorted(
+                                {
+                                    str(x or "").strip()
+                                    for x in (activity_metrics.get("activity_day_keys") or [])
+                                    if str(x or "").strip()
+                                }
+                            )
+                    return (
+                        rec.address,
+                        {
+                            "pack_spent_usdt": chain_metrics.get("pack_spent_usdt", Decimal("0")),
+                            "trade_volume_usdt": chain_metrics.get("trade_volume_usdt", Decimal("0")),
+                            "trade_spent_usdt": chain_metrics.get("trade_spent_usdt", Decimal("0")),
+                            "trade_earned_usdt": chain_metrics.get("trade_earned_usdt", Decimal("0")),
+                            "buyback_earned_usdt": chain_metrics.get("buyback_earned_usdt", Decimal("0")),
+                            "card_withdraw_total_usdt": (
+                                prev.card_withdraw_total_usdt if prev is not None else Decimal("0")
+                            ),
+                            "total_spent_usdt": chain_metrics.get("total_spent_usdt", Decimal("0")),
+                            "total_earned_usdt": chain_metrics.get("total_earned_usdt", Decimal("0")),
+                            "cash_net_usdt": (
+                                _to_decimal(chain_metrics.get("cash_net_usdt"))
+                                + (prev.card_withdraw_total_usdt if prev is not None else Decimal("0"))
+                            ),
+                            "latest_activity_id": latest_activity_id,
+                            "stop_reached": stop_reached,
+                            "activity_day_keys": activity_day_keys,
+                            "last_seen_usdt_tx_hash": str(latest_usdt_tx_map.get(rec.address) or "").strip().lower(),
+                        },
+                        False,
+                        None,
+                    )
                 if (not full_rebuild) and (prev is not None) and (rec.address in changed_by_activity) and prev_cp:
                     delta = compute_activity_metrics_for_wallet(
                         rec.address,
@@ -1823,10 +2056,16 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                 rec.sbt_owned_total = sbt_owned_total
                 rec.sbt_owned_badge_count = sbt_badge_count
 
+    finished_at = datetime.now(tz=cfg.tzinfo)
     for rec in records:
+        day_keys = set(prev_day_keys_map.get(rec.address) or set())
+        if day_keys:
+            rec.participation_days_count = _participation_days_since_join(day_keys, finished_at)
+        else:
+            prev = prev_wallets.get(rec.address)
+            rec.participation_days_count = prev.participation_days_count if prev is not None else 0
         rec.total_pnl_usdt = rec.cash_net_usdt + rec.holdings_value_usdt
 
-    finished_at = datetime.now(tz=cfg.tzinfo)
     checkpoint_time = finished_at.isoformat()
     checkpoint_dump = build_checkpoint_dump(current_addrs, checkpoint_next, checkpoint_time)
 
@@ -1845,6 +2084,8 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     )
     if isinstance(payload.get("meta"), dict):
         payload["meta"]["trigger"] = cfg.trigger
+        payload["meta"]["metrics_source"] = cfg.metrics_source
+        payload["meta"]["full_rebuild_active_only"] = bool(cfg.full_rebuild_active_only)
 
     _atomic_write_json(cfg.latest_path, payload)
     _atomic_write_json(cfg.history_path(finished_at), payload)
@@ -1855,10 +2096,12 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     state_payload = {
         "updated_at": finished_at.isoformat(),
         "trigger": cfg.trigger,
+        "metrics_source": cfg.metrics_source,
         "wallet_count": len(records),
         "collectible_pages": collectible_pages,
         "full_rebuild": full_rebuild,
         "full_rebuild_reason": full_reason,
+        "full_rebuild_active_only": bool(cfg.full_rebuild_active_only),
         "last_full_rebuild_at": next_last_full,
         "full_rebuild_interval_days": cfg.full_rebuild_days,
         "changed_wallets": len(changed_addrs),
@@ -1878,6 +2121,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     return {
         "started_at": started_at,
         "finished_at": finished_at,
+        "metrics_source": cfg.metrics_source,
         "wallet_count": len(records),
         "collectible_pages": collectible_pages,
         "changed_wallets": len(changed_addrs),
@@ -1992,7 +2236,8 @@ def main() -> int:
             backup_status = "no-change"
 
     msg = (
-        f"trigger={cfg.trigger} wallets={result['wallet_count']} collectible_pages={result['collectible_pages']} "
+        f"trigger={cfg.trigger} metrics_source={result['metrics_source']} "
+        f"wallets={result['wallet_count']} collectible_pages={result['collectible_pages']} "
         f"changed_wallets={result['changed_wallets']} changed_by_activity={result['changed_by_activity']} "
         f"refreshed_wallets={result['refreshed_wallets']} "
         f"removed_wallets={result['removed_wallets']} full_rebuild={result['full_rebuild']} "
@@ -2007,6 +2252,7 @@ def main() -> int:
         success=True,
         message=msg,
         extra={
+            "metrics_source": result["metrics_source"],
             "wallet_count": result["wallet_count"],
             "collectible_pages": result["collectible_pages"],
             "changed_wallets": result["changed_wallets"],

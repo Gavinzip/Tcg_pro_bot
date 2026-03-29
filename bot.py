@@ -874,6 +874,10 @@ def _profile_compute_onchain_metrics(wallet_address: str) -> dict[str, Decimal] 
         "total_spent_usdt": _to_decimal(metrics.get("total_spent_usdt")),
         "total_earned_usdt": _to_decimal(metrics.get("total_earned_usdt")),
         "cash_net_usdt": _to_decimal(metrics.get("cash_net_usdt")),
+        "open_pack_tx_count": _to_decimal(metrics.get("open_pack_tx_count")),
+        "buyback_tx_count": _to_decimal(metrics.get("buyback_tx_count")),
+        "trade_buy_tx_count": _to_decimal(metrics.get("trade_buy_tx_count")),
+        "trade_sell_tx_count": _to_decimal(metrics.get("trade_sell_tx_count")),
     }
 
 
@@ -2229,6 +2233,52 @@ def _profile_activity_display_name(activity_type: str, lang: str) -> str:
     }
     entry = mappings.get(activity_type) or {}
     return entry.get(lang) or entry.get("en") or activity_type
+
+
+def _upsert_activity_count_row(
+    rows: list[dict],
+    *,
+    row_types: tuple[str, ...],
+    count: int,
+    lang: str,
+    highlight: bool = False,
+) -> list[dict]:
+    if not isinstance(rows, list):
+        rows = []
+    normalized_types = tuple(str(t or "").strip() for t in row_types if str(t or "").strip())
+    if not normalized_types:
+        return list(rows)
+
+    out: list[dict] = []
+    replaced = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_type = str(row.get("type") or "").strip()
+        if row_type in normalized_types:
+            if replaced:
+                continue
+            if count > 0:
+                new_row = dict(row)
+                new_row["count"] = int(count)
+                new_row["highlight"] = bool(highlight)
+                new_row["name"] = _profile_activity_display_name(normalized_types[0], lang)
+                new_row["type"] = normalized_types[0]
+                out.append(new_row)
+            replaced = True
+            continue
+        out.append(row)
+
+    if not replaced and count > 0:
+        out.append(
+            {
+                "name": _profile_activity_display_name(normalized_types[0], lang),
+                "count": int(count),
+                "type": normalized_types[0],
+                "highlight": bool(highlight),
+            }
+        )
+    return out
 
 
 def _profile_wizard_texts(lang: str) -> dict[str, str]:
@@ -3589,7 +3639,8 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         dt_min = datetime.utcfromtimestamp(ts_min).strftime("%Y-%m-%d")
         dt_max = datetime.utcfromtimestamp(ts_max).strftime("%Y-%m-%d")
         history_range = dt_min if dt_min == dt_max else f"{dt_min} ~ {dt_max}"
-        active_days_count = max(1, int((ts_max - ts_min) // 86400) + 1)
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        active_days_count = max(1, int((max(now_ts, ts_min) - ts_min) // 86400) + 1)
 
     legacy_release_cards: list[dict] = []
     for pull in legacy_pull_by_checkout.values():
@@ -5378,8 +5429,9 @@ def _build_wallet_profile_context(
     if live_onchain_error is not None:
         print(f"⚠️ onchain profile recalc failed for {wallet_norm}: {live_onchain_error}", file=sys.stderr)
     history_labels = history_data.get("labels") or _profile_history_labels(profile_lang)
-    history_activity_rows = history_data.get("activity_rows") or []
+    history_activity_rows = list(history_data.get("activity_rows") or [])
     history_contract_rows = history_data.get("contract_rows") or []
+    metric_opened_count = _parse_int(history_data.get("opened_packs_count")) or 0
     rank_metrics_ready = bool(ranking_row) and any(
         k in ranking_row
         for k in (
@@ -5417,6 +5469,37 @@ def _build_wallet_profile_context(
             _parse_int(history_data.get("active_days_count"))
             or _parse_int(ranking_row.get("participation_days_count"))
             or 0
+        )
+        onchain_opened_count = _parse_int(live_onchain_metrics.get("open_pack_tx_count")) or 0
+        onchain_buyback_count = _parse_int(live_onchain_metrics.get("buyback_tx_count")) or 0
+        onchain_trade_buy_count = _parse_int(live_onchain_metrics.get("trade_buy_tx_count")) or 0
+        onchain_trade_sell_count = _parse_int(live_onchain_metrics.get("trade_sell_tx_count")) or 0
+        if onchain_opened_count > 0:
+            metric_opened_count = onchain_opened_count
+        history_activity_rows = _upsert_activity_count_row(
+            history_activity_rows,
+            row_types=("PerpetualReleaseTokenActivity",),
+            count=onchain_opened_count,
+            lang=profile_lang,
+            highlight=True,
+        )
+        history_activity_rows = _upsert_activity_count_row(
+            history_activity_rows,
+            row_types=("PerpetualBuybackActivity", "BuybackActivity"),
+            count=onchain_buyback_count,
+            lang=profile_lang,
+        )
+        history_activity_rows = _upsert_activity_count_row(
+            history_activity_rows,
+            row_types=("BuyActivity",),
+            count=onchain_trade_buy_count,
+            lang=profile_lang,
+        )
+        history_activity_rows = _upsert_activity_count_row(
+            history_activity_rows,
+            row_types=("SellActivity",),
+            count=onchain_trade_sell_count,
+            lang=profile_lang,
         )
     elif use_rank_metrics:
         metric_pack_spent = _to_decimal(ranking_row.get("pack_spent_usdt"))
@@ -5468,7 +5551,7 @@ def _build_wallet_profile_context(
         "head_spent_total": history_labels.get("head_spent_total", "Total (USDT)"),
         "empty_contract": history_labels.get("empty_contract", "No pack-open data available"),
         "metric_opened_label": history_labels.get("kpi_opened", "Packs Opened"),
-        "metric_opened_value": _format_number(history_data.get("opened_packs_count")),
+        "metric_opened_value": _format_number(metric_opened_count),
         "metric_pack_spent_label": history_labels.get("kpi_pack_spent", "Pack Spend"),
         "metric_pack_spent_value": _format_usdt_decimal(metric_pack_spent),
         "metric_card_withdraw_label": history_labels.get("kpi_card_withdraw", "Card Withdrawal Value"),
