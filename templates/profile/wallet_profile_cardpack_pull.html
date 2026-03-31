@@ -926,6 +926,7 @@
 
 {% set _bgkey = (background_key or 'classic') %}
 {% set _is_extreme = extreme_mode %}
+{% set _extreme_overlay_enabled = extreme_overlay_enabled | default(true) %}
 <body class="bg-[#f8f9fa] flex items-center justify-center p-0 m-0 overflow-hidden relative min-h-[900px] {% if background_image %}bg-transparent{% endif %} {% if _bgkey == '2' %}bg-key-2{% endif %} {% if _bgkey == '3' %}bg-key-3 bg-vivid-gold{% endif %} {% if _bgkey in ['2', '3'] %}bg-bright-text{% endif %}">
 
     {% if background_image %}
@@ -943,7 +944,7 @@
 
     <!-- Main Container — overflow:visible when extreme so italic title never clips -->
     <div class="relative w-[1200px] h-[900px] glass-container prismatic-border {% if background_image %}bg-photo-mode{% endif %} {% if _bgkey == '3' %}bg-photo-mode-3{% endif %} {% if _is_extreme %}extreme-duality{% endif %} flex flex-col pt-12 px-12 pb-8 z-10 {% if _is_extreme %}overflow-visible{% else %}overflow-hidden{% endif %}" data-tilt="{% if enable_tilt %}on{% else %}off{% endif %}" data-grid-rows="{% if items|length > 5 %}two{% else %}one{% endif %}" data-item-count="{{ items|length }}" data-hide-footer="{% if hide_footer %}1{% else %}0{% endif %}" data-pnl-tone="{{ pnl_tone or 'neutral' }}">
-        {% if _is_extreme %}
+        {% if _is_extreme and _extreme_overlay_enabled %}
         <div class="extreme-split-bg"></div>
         <div class="extreme-center-haze"></div>
         {% endif %}

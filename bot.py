@@ -4657,11 +4657,13 @@ def _build_wallet_flex_pack_template_context(
     selected_pack_contract: str,
     mode: str,
     card_count: int,
+    beta_mode: bool = False,
     profile_lang: str = "en",
 ) -> dict:
     lang = _profile_lang_from_locale(profile_lang)
     pack_contract = str(selected_pack_contract or "").strip().lower()
     mode_name = "extreme" if str(mode or "").strip().lower() == "extreme" else "picked"
+    use_beta_mode = bool(beta_mode)
     requested_count = _clamp_flex_pack_card_count(card_count)
 
     history_data = (picker_data or {}).get("history_data") if isinstance(picker_data, dict) else {}
@@ -4871,6 +4873,7 @@ def _build_wallet_flex_pack_template_context(
             "meta_counter_label": "PULL",
             "pack_name_display": pack_title,
             "pnl_tone": pnl_tone,
+            "extreme_overlay_enabled": True,
             "_meta_subtitle": subtitle,
         }
         return {
@@ -4953,6 +4956,9 @@ def _build_wallet_flex_pack_template_context(
         "meta_counter_label": "PULL",
         "pack_name_display": pack_title,
         "pnl_tone": pnl_tone,
+        # Beta mode keeps the same data pipeline but removes the built-in duality overlay
+        # so custom heaven/hell map backgrounds are not masked.
+        "extreme_overlay_enabled": (not use_beta_mode),
         "_meta_subtitle": subtitle,
     }
     return {
@@ -8413,13 +8419,14 @@ class FlexPackTemplateSelect(discord.ui.Select):
 
 
 class FlexPackConfigView(discord.ui.View):
-    def __init__(self, author_id: int, wallet: str, picker_data: dict, selected_lang: str):
+    def __init__(self, author_id: int, wallet: str, picker_data: dict, selected_lang: str, beta_mode: bool = False):
         super().__init__(timeout=240)
         self.author_id = author_id
         self.wallet = wallet
         self.picker_data = picker_data or {}
         self.selected_lang = _profile_lang_from_locale(selected_lang)
         self.username = str((picker_data or {}).get("username") or "Unknown")
+        self.beta_mode = bool(beta_mode)
 
         self.selected_mode = "picked"
         self.selected_template = 10
@@ -8457,14 +8464,22 @@ class FlexPackConfigView(discord.ui.View):
 
     def render_message(self) -> str:
         pack_label = self.pack_label_map.get(self.selected_pack_contract) or _short_hex(self.selected_pack_contract)
-        mode_label = (
+        mode_base = (
             _t(self.selected_lang, "天堂與地獄", "Heaven and Hell", "천국과 지옥", "天堂与地狱")
             if self.selected_mode == "extreme"
             else _t(self.selected_lang, "剛抽卡排版", "Recent Pull Layout", "최근 뽑기 레이아웃", "刚抽卡排版")
         )
+        mode_label = (
+            f"{mode_base} (Beta)"
+            if self.beta_mode and self.selected_mode == "extreme"
+            else mode_base
+        )
         layout_value = "-" if self.selected_mode == "extreme" else str(self.selected_template)
+        panel_title = _t(self.selected_lang, "卡包海報設定", "Pack Poster Setup", "팩 포스터 설정", "卡包海报设置")
+        if self.beta_mode:
+            panel_title = f"{panel_title} · Beta"
         return (
-            f"🎛️ **{self.username}** · {_t(self.selected_lang, '卡包海報設定', 'Pack Poster Setup', '팩 포스터 설정', '卡包海报设置')}\n"
+            f"🎛️ **{self.username}** · {panel_title}\n"
             f"{_t(self.selected_lang, '錢包', 'Wallet', '지갑', '钱包')}: `{self.wallet}`\n"
             f"{_t(self.selected_lang, '卡包', 'Pack', '팩', '卡包')}: **{pack_label}**\n"
             f"{_t(self.selected_lang, '模式', 'Mode', '모드', '模式')}: **{mode_label}**\n"
@@ -8495,7 +8510,13 @@ class FlexPackConfigView(discord.ui.View):
         if self.bound_message:
             try:
                 await self.bound_message.edit(
-                    content=_t(self.selected_lang, "⏰ 設定面板已逾時，請重新輸入 `/flex_pack`。", "⏰ Setup panel timed out. Run `/flex_pack` again.", "⏰ 설정 시간이 만료되었습니다. `/flex_pack`을 다시 실행하세요.", "⏰ 设置面板已超时，请重新输入 `/flex_pack`。"),
+                    content=_t(
+                        self.selected_lang,
+                        "⏰ 設定面板已逾時，請重新輸入 `/flex_pack_beta`。" if self.beta_mode else "⏰ 設定面板已逾時，請重新輸入 `/flex_pack`。",
+                        "⏰ Setup panel timed out. Run `/flex_pack_beta` again." if self.beta_mode else "⏰ Setup panel timed out. Run `/flex_pack` again.",
+                        "⏰ 설정 시간이 만료되었습니다. `/flex_pack_beta`을 다시 실행하세요." if self.beta_mode else "⏰ 설정 시간이 만료되었습니다. `/flex_pack`을 다시 실행하세요.",
+                        "⏰ 设置面板已超时，请重新输入 `/flex_pack_beta`。" if self.beta_mode else "⏰ 设置面板已超时，请重新输入 `/flex_pack`。",
+                    ),
                     view=self,
                 )
             except Exception:
@@ -8519,10 +8540,11 @@ class FlexPackConfigView(discord.ui.View):
                     selected_pack_contract=self.selected_pack_contract,
                     mode=self.selected_mode,
                     card_count=self.selected_template,
+                    beta_mode=self.beta_mode,
                     profile_lang=self.selected_lang,
                 ),
             )
-            safe_name = f"{self.username}_{self.wallet[-6:]}_flex_pack"
+            safe_name = f"{self.username}_{self.wallet[-6:]}_flex_pack_beta" if self.beta_mode else f"{self.username}_{self.wallet[-6:]}_flex_pack"
             async with POSTER_SEMAPHORE:
                 poster_path = await _render_wallet_profile_cardpack_pull_poster(payload, out_dir, safe_name=safe_name)
 
@@ -8538,6 +8560,8 @@ class FlexPackConfigView(discord.ui.View):
                 if self.selected_mode == "extreme"
                 else _t(self.selected_lang, "剛抽卡排版", "Recent Pull Layout", "최근 뽑기 레이아웃", "刚抽卡排版")
             )
+            if self.beta_mode and self.selected_mode == "extreme":
+                mode_label = f"{mode_label} (Beta)"
             fallback_note = ""
             if self.selected_mode == "picked" and selected < requested:
                 fallback_note = _t(
@@ -8886,9 +8910,8 @@ class MarketBrowserView(discord.ui.View):
                 pass
 
 
-@tree.command(name="flex_pack", description="指定卡包生成 Flex 海報（剛抽排版 / 天堂地獄）")
-@app_commands.describe(address="錢包地址（可留空使用已儲存的預設地址）")
-async def flex_pack(interaction: discord.Interaction, address: str = None):
+async def _run_flex_pack_command(interaction: discord.Interaction, address: str = None, *, beta_mode: bool = False):
+    cmd_name = "/flex_pack_beta" if beta_mode else "/flex_pack"
     if not address:
         address = _get_user_default_wallet(str(interaction.user.id))
         if not address:
@@ -8907,16 +8930,27 @@ async def flex_pack(interaction: discord.Interaction, address: str = None):
         return
 
     try:
-        await interaction.response.send_message("🎛️ 正在建立卡包 Flex 海報設定討論串...", ephemeral=False)
+        opening_text = (
+            "🎛️ 正在建立卡包 Flex 海報設定（Beta）討論串..."
+            if beta_mode
+            else "🎛️ 正在建立卡包 Flex 海報設定討論串..."
+        )
+        await interaction.response.send_message(opening_text, ephemeral=False)
         resp = await interaction.original_response()
     except discord.NotFound:
         channel = interaction.channel
         if channel is None:
-            print("❌ /flex_pack 互動已失效且找不到可用頻道。", file=sys.stderr)
+            print(f"❌ {cmd_name} 互動已失效且找不到可用頻道。", file=sys.stderr)
             return
-        resp = await channel.send("🎛️ 正在建立卡包 Flex 海報設定討論串...")
+        opening_text = (
+            "🎛️ 正在建立卡包 Flex 海報設定（Beta）討論串..."
+            if beta_mode
+            else "🎛️ 正在建立卡包 Flex 海報設定討論串..."
+        )
+        resp = await channel.send(opening_text)
 
-    thread = await resp.create_thread(name="卡包 Flex 海報設定", auto_archive_duration=60)
+    thread_name = "卡包 Flex 海報設定 Beta" if beta_mode else "卡包 Flex 海報設定"
+    thread = await resp.create_thread(name=thread_name, auto_archive_duration=60)
     await thread.add_user(interaction.user)
 
     default_lang = "zh"
@@ -8942,13 +8976,25 @@ async def flex_pack(interaction: discord.Interaction, address: str = None):
         if not (picker_data.get("pack_options") or []):
             await thread.send("⚠️ 這個地址目前找不到可用的卡包抽卡紀錄。")
             return
-        view = FlexPackConfigView(interaction.user.id, wallet, picker_data, profile_lang)
+        view = FlexPackConfigView(interaction.user.id, wallet, picker_data, profile_lang, beta_mode=beta_mode)
         msg = await thread.send(view.render_message(), view=view)
         view.bind_message(msg)
     except Exception as e:
-        print(f"❌ /flex_pack 失敗: {e}", file=sys.stderr)
+        print(f"❌ {cmd_name} 失敗: {e}", file=sys.stderr)
         print(traceback.format_exc(), file=sys.stderr)
         await thread.send(f"❌ 生成失敗：{e}")
+
+
+@tree.command(name="flex_pack", description="指定卡包生成 Flex 海報（剛抽排版 / 天堂地獄）")
+@app_commands.describe(address="錢包地址（可留空使用已儲存的預設地址）")
+async def flex_pack(interaction: discord.Interaction, address: str = None):
+    await _run_flex_pack_command(interaction, address, beta_mode=False)
+
+
+@tree.command(name="flex_pack_beta", description="Flex 海報 Beta（天堂地獄改用純背景，不疊雙色遮罩）")
+@app_commands.describe(address="錢包地址（可留空使用已儲存的預設地址）")
+async def flex_pack_beta(interaction: discord.Interaction, address: str = None):
+    await _run_flex_pack_command(interaction, address, beta_mode=True)
 
 
 @tree.command(name="manual_analyze", description="手動選擇版本生成報告與海報")
