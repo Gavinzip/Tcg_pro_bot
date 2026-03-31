@@ -927,13 +927,16 @@
 {% set _bgkey = (background_key or 'classic') %}
 {% set _is_extreme = extreme_mode %}
 {% set _extreme_overlay_enabled = extreme_overlay_enabled | default(true) %}
+{% set _is_beta_extreme = _is_extreme and (not _extreme_overlay_enabled) %}
 <body class="bg-[#f8f9fa] flex items-center justify-center p-0 m-0 overflow-hidden relative min-h-[900px] {% if background_image %}bg-transparent{% endif %} {% if _bgkey == '2' %}bg-key-2{% endif %} {% if _bgkey == '3' %}bg-key-3 bg-vivid-gold{% endif %} {% if _bgkey in ['2', '3'] %}bg-bright-text{% endif %}">
 
     {% if background_image %}
-    <div class="poster-bg-image {% if _bgkey == '3' %}bg-style-3{% endif %}" style="background-image: {% if _bgkey == '3' %}linear-gradient(160deg, rgba(248,249,250,0.004) 0%, rgba(248,249,250,0.000) 100%){% else %}linear-gradient(160deg, rgba(248,249,250,0.03) 0%, rgba(248,249,250,0.01) 100%){% endif %}, url('{{ background_image }}');"></div>
+    <div class="poster-bg-image {% if _bgkey == '3' %}bg-style-3{% endif %}" style="background-image: {% if _is_beta_extreme %}url('{{ background_image }}'){% elif _bgkey == '3' %}linear-gradient(160deg, rgba(248,249,250,0.004) 0%, rgba(248,249,250,0.000) 100%), url('{{ background_image }}'){% else %}linear-gradient(160deg, rgba(248,249,250,0.03) 0%, rgba(248,249,250,0.01) 100%), url('{{ background_image }}'){% endif %};"></div>
     {% endif %}
 
+    {% if not _is_beta_extreme %}
     <div class="noise-overlay"></div>
+    {% endif %}
 
     {% if _bgkey == 'classic' and not _is_extreme %}
     <div class="absolute top-[-10%] left-[-10%] w-[600px] h-[600px] bg-[#0044ff] rounded-full mix-blend-multiply filter blur-[150px] opacity-10 animate-pulse"></div>
@@ -943,7 +946,7 @@
     {% endif %}
 
     <!-- Main Container — overflow:visible when extreme so italic title never clips -->
-    <div class="relative w-[1200px] h-[900px] glass-container prismatic-border {% if background_image %}bg-photo-mode{% endif %} {% if _bgkey == '3' %}bg-photo-mode-3{% endif %} {% if _is_extreme %}extreme-duality{% endif %} flex flex-col pt-12 px-12 pb-8 z-10 {% if _is_extreme %}overflow-visible{% else %}overflow-hidden{% endif %}" data-tilt="{% if enable_tilt %}on{% else %}off{% endif %}" data-grid-rows="{% if items|length > 5 %}two{% else %}one{% endif %}" data-item-count="{{ items|length }}" data-hide-footer="{% if hide_footer %}1{% else %}0{% endif %}" data-pnl-tone="{{ pnl_tone or 'neutral' }}">
+    <div class="relative w-[1200px] h-[900px] glass-container {% if not _is_beta_extreme %}prismatic-border{% endif %} {% if background_image and not _is_beta_extreme %}bg-photo-mode{% endif %} {% if _bgkey == '3' and not _is_beta_extreme %}bg-photo-mode-3{% endif %} {% if _is_extreme %}extreme-duality{% endif %} flex flex-col pt-12 px-12 pb-8 z-10 {% if _is_extreme %}overflow-visible{% else %}overflow-hidden{% endif %}" {% if _is_beta_extreme %}style="background: transparent; backdrop-filter: none; -webkit-backdrop-filter: none; border: none; box-shadow: none;"{% endif %} data-tilt="{% if enable_tilt %}on{% else %}off{% endif %}" data-grid-rows="{% if items|length > 5 %}two{% else %}one{% endif %}" data-item-count="{{ items|length }}" data-hide-footer="{% if hide_footer %}1{% else %}0{% endif %}" data-pnl-tone="{{ pnl_tone or 'neutral' }}">
         {% if _is_extreme and _extreme_overlay_enabled %}
         <div class="extreme-split-bg"></div>
         <div class="extreme-center-haze"></div>
