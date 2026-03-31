@@ -655,6 +655,7 @@ PROFILE_DISK_FMV_CACHE_DIR = (
 )
 PROFILE_ENABLE_SNKR_TIMELINE = _env_true("PROFILE_ENABLE_SNKR_TIMELINE", True)
 PROFILE_ENABLE_HOLDINGS_POSTER = _env_true("PROFILE_ENABLE_HOLDINGS_POSTER", False)
+PROFILE_ENABLE_SBT_RANK_POSTER = _env_true("PROFILE_ENABLE_SBT_RANK_POSTER", False)
 try:
     PROFILE_POSTER_DEVICE_SCALE = max(2.0, float(str(os.getenv("PROFILE_POSTER_DEVICE_SCALE", "3")).strip()))
 except Exception:
@@ -6094,7 +6095,7 @@ async def _render_wallet_profile_posters_bundle(
     profile_out = os.path.join(out_dir, f"{safe}_profile.png") if render_profile else None
     history_out = os.path.join(out_dir, f"{safe}_profile_history.png")
     extremes_out = os.path.join(out_dir, f"{safe}_profile_extremes.png")
-    sbt_rank_template_exists = os.path.exists(PROFILE_SBT_RANK_TEMPLATE_PATH)
+    sbt_rank_template_exists = PROFILE_ENABLE_SBT_RANK_POSTER and os.path.exists(PROFILE_SBT_RANK_TEMPLATE_PATH)
     sbt_rank_out = os.path.join(out_dir, f"{safe}_profile_sbt_rank.png") if sbt_rank_template_exists else None
     holdings_out = os.path.join(out_dir, f"{safe}_profile_holdings.png") if render_holdings else None
 
@@ -9756,7 +9757,9 @@ async def ranking(interaction: discord.Interaction):
     def _int_text(row: dict, field: str) -> str:
         return _format_number(_parse_int(row.get(field)) or 0)
 
-    def _rank_text(row: dict, field: str) -> str:
+    def _rank_text(row: dict, field: str, fallback_idx: int | None = None) -> str:
+        if not field:
+            return str(fallback_idx) if fallback_idx is not None else "-"
         val = _parse_int(row.get(field))
         return str(val) if (val is not None and val > 0) else "-"
 
@@ -9792,6 +9795,7 @@ async def ranking(interaction: discord.Interaction):
 
     sections = [
         ("volume", "交易量", "trade_volume_usdt", "volume_rank", "money", True, False),
+        ("pack_spent", "抽卡花費", "pack_spent_usdt", "", "money", True, False),
         ("total_spent", "總花費", "total_spent_usdt", "total_spent_rank", "money", True, False),
         ("holdings", "持有價值", "holdings_value_usdt", "holdings_rank", "money", True, False),
         ("pnl", "總盈虧", "total_pnl_usdt", "pnl_rank", "money_signed", True, False),
@@ -9826,7 +9830,7 @@ async def ranking(interaction: discord.Interaction):
                 value_txt = _money_text(row, value_field, signed=True)
             else:
                 value_txt = _int_text(row, value_field)
-            section_lines.append(f"{idx}. `{_rank_text(row, rank_field)}` {_label(row)} | {value_txt}")
+            section_lines.append(f"{idx}. `{_rank_text(row, rank_field, idx)}` {_label(row)} | {value_txt}")
         blocks.append("\n".join(section_lines))
 
     updated_at = "-"
