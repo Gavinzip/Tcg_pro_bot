@@ -736,6 +736,11 @@ _PROFILE_SBT_WREATH_FILES = {
     "bronze": "copper.jpg",
     "none": "black.jpg",
 }
+FLEX_PACK_BG_TEST_IMAGE = str(os.getenv("FLEX_PACK_BG_TEST_IMAGE", "")).strip()
+FLEX_PACK_BG_TEST_TARGET = str(os.getenv("FLEX_PACK_BG_TEST_TARGET", "none")).strip().lower() or "none"
+FLEX_PACK_BG_OVERRIDE_IMAGE = str(os.getenv("FLEX_PACK_BG_OVERRIDE_IMAGE", "")).strip()
+FLEX_PACK_BG_OVERRIDE_CONTRACT = str(os.getenv("FLEX_PACK_BG_OVERRIDE_CONTRACT", "")).strip()
+FLEX_PACK_BG_OVERRIDE_PACK_NAME = str(os.getenv("FLEX_PACK_BG_OVERRIDE_PACK_NAME", "")).strip()
 
 
 def _normalize_wallet_address(address: str) -> str | None:
@@ -1892,6 +1897,66 @@ def _file_to_data_uri(file_path: str | None) -> str:
         return f"data:{mime};base64,{b64}"
     except Exception:
         return ""
+
+
+def _normalize_flex_pack_bg_target(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if text in ("all", "latest", "none"):
+        return text
+    return "none"
+
+
+def _resolve_image_source_to_data_uri_or_url(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered.startswith("data:image/"):
+        return text
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        return text
+    return _file_to_data_uri(text)
+
+
+def _latest_pack_contract_from_picker_data(picker_data: dict | None) -> str:
+    options = (picker_data or {}).get("pack_options") if isinstance(picker_data, dict) else []
+    if not isinstance(options, list):
+        return ""
+    for row in options:
+        if not isinstance(row, dict):
+            continue
+        contract = str(row.get("value") or row.get("contract") or "").strip().lower()
+        if contract:
+            return contract
+    return ""
+
+
+def _resolve_flex_pack_background_image(pack_contract: str, pack_name: str, picker_data: dict | None) -> str:
+    contract_norm = _normalize_wallet_address(pack_contract) or str(pack_contract or "").strip().lower()
+    pack_name_norm = str(pack_name or "").strip().lower()
+
+    override_image = _resolve_image_source_to_data_uri_or_url(FLEX_PACK_BG_OVERRIDE_IMAGE)
+    if override_image:
+        target_contract = _normalize_wallet_address(FLEX_PACK_BG_OVERRIDE_CONTRACT)
+        target_name = str(FLEX_PACK_BG_OVERRIDE_PACK_NAME or "").strip().lower()
+        if target_contract and contract_norm == target_contract:
+            return override_image
+        if target_name and target_name in pack_name_norm:
+            return override_image
+        if not target_contract and not target_name:
+            return override_image
+
+    test_image = _resolve_image_source_to_data_uri_or_url(FLEX_PACK_BG_TEST_IMAGE)
+    if test_image:
+        target = _normalize_flex_pack_bg_target(FLEX_PACK_BG_TEST_TARGET)
+        if target == "all":
+            return test_image
+        if target == "latest":
+            latest_contract = _latest_pack_contract_from_picker_data(picker_data)
+            if latest_contract and contract_norm == latest_contract:
+                return test_image
+
+    return _profile_background_data_uri("classic")
 
 
 def _profile_sbt_rank_background_data_uri(rank_tier: str | None) -> str:
@@ -4675,6 +4740,11 @@ def _build_wallet_flex_pack_template_context(
 
     ui_labels = _profile_ui_labels(lang)
     pack_name = str(pack_cards[0].get("pack_name") or f"Contract {_short_hex(pack_contract)}")
+    flex_pack_background_image = _resolve_flex_pack_background_image(
+        pack_contract=pack_contract,
+        pack_name=pack_name,
+        picker_data=picker_data,
+    )
 
     def _pack_title_short(name: str) -> str:
         text = str(name or "").strip()
@@ -4796,6 +4866,7 @@ def _build_wallet_flex_pack_template_context(
             "update_date": datetime.now().strftime("%Y-%m-%d"),
             "enable_tilt": False,
             "background_key": "classic",
+            # Keep normal picked layout on default background.
             "background_image": _profile_background_data_uri("classic"),
             "meta_counter_label": "PULL",
             "pack_name_display": pack_title,
@@ -4878,7 +4949,7 @@ def _build_wallet_flex_pack_template_context(
         "update_date": datetime.now().strftime("%Y-%m-%d"),
         "enable_tilt": False,
         "background_key": "classic",
-        "background_image": _profile_background_data_uri("classic"),
+        "background_image": flex_pack_background_image,
         "meta_counter_label": "PULL",
         "pack_name_display": pack_title,
         "pnl_tone": pnl_tone,
@@ -6047,7 +6118,7 @@ def _render_wallet_template_html(template_path: str, template_context: dict | No
         html_doc = html_doc.replace('src="logo.png"', f'src="{logo_src}"').replace("src='logo.png'", f"src='{logo_src}'")
 
     template_context = template_context or {}
-    if template_context and ("{%" in html_doc or "{{" in html_doc):
+    if "{%" in html_doc or "{{" in html_doc:
         try:
             from jinja2 import Template
         except ModuleNotFoundError as e:
