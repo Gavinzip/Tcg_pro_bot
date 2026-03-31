@@ -879,6 +879,109 @@
             background-clip: text;
         }
 
+        .beta-extreme .extreme-heaven .extreme-price {
+            background: linear-gradient(
+                156deg,
+                #2f1e06 0%,
+                #7a4b08 8%,
+                #ffe18a 18%,
+                #fffadf 28%,
+                #ffcf4d 38%,
+                #b87411 48%,
+                #fff4bf 58%,
+                #ffd35e 68%,
+                #8f5e10 78%,
+                #fff2ad 88%,
+                #d08c1e 94%,
+                #3b2508 100%
+            );
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow:
+                0 1px 0 rgba(255, 248, 212, 0.95),
+                0 3px 0 rgba(118, 77, 16, 0.58),
+                0 7px 12px rgba(64, 40, 8, 0.45),
+                0 0 16px rgba(255, 208, 102, 0.72),
+                0 0 34px rgba(255, 194, 60, 0.55);
+            filter: saturate(1.24) contrast(1.08) brightness(1.08);
+        }
+
+        .beta-extreme .foil-label,
+        .beta-extreme .items-label,
+        .beta-extreme .asset-number,
+        .beta-extreme .asset-unit {
+            background: linear-gradient(
+                162deg,
+                #101623 0%,
+                #4d5a70 14%,
+                #070b12 29%,
+                #9aa6bb 43%,
+                #1b2433 58%,
+                #03050a 72%,
+                #707d95 86%,
+                #121a28 100%
+            );
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow:
+                0 1px 0 rgba(240, 245, 255, 0.44),
+                0 2px 7px rgba(5, 8, 14, 0.38);
+            color: transparent !important;
+        }
+
+        .beta-extreme .pack-name-label,
+        .beta-extreme .pack-name-value,
+        .beta-extreme .sbt-title {
+            background: linear-gradient(
+                165deg,
+                #f8fbff 0%,
+                #c8d0dc 14%,
+                #ffffff 27%,
+                #8d96a5 41%,
+                #f5f8ff 54%,
+                #d7dde8 69%,
+                #ffffff 82%,
+                #a3adbe 100%
+            );
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow:
+                0 1px 0 rgba(255, 255, 255, 0.9),
+                0 3px 10px rgba(8, 12, 20, 0.6);
+            color: transparent !important;
+        }
+
+        .beta-extreme[data-pnl-tone="gain"] .foil-number,
+        .beta-extreme[data-pnl-tone="gain"] .foil-currency,
+        .beta-extreme[data-pnl-tone="gain"] .foil-unit {
+            background: linear-gradient(
+                154deg,
+                #3a2506 0%,
+                #8d5a0d 10%,
+                #ffe89f 20%,
+                #fffef2 30%,
+                #ffd35e 40%,
+                #bb7c11 52%,
+                #ffe7a5 64%,
+                #f4b528 74%,
+                #7d4f0a 86%,
+                #f9d77a 94%,
+                #4a2e07 100%
+            );
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow:
+                0 1px 0 rgba(255, 247, 207, 0.95),
+                0 3px 0 rgba(122, 81, 16, 0.56),
+                0 7px 14px rgba(52, 33, 8, 0.42),
+                0 0 16px rgba(255, 210, 88, 0.62);
+            filter: saturate(1.24) contrast(1.1) brightness(1.08);
+        }
+
         .brand-suffix {
             font-size: 0.58em;
             letter-spacing: 0.08em;
@@ -928,7 +1031,7 @@
 {% set _is_extreme = extreme_mode %}
 {% set _extreme_overlay_enabled = extreme_overlay_enabled | default(true) %}
 {% set _is_beta_extreme = _is_extreme and (not _extreme_overlay_enabled) %}
-<body class="bg-[#f8f9fa] flex items-center justify-center p-0 m-0 overflow-hidden relative min-h-[900px] {% if background_image %}bg-transparent{% endif %} {% if _bgkey == '2' %}bg-key-2{% endif %} {% if _bgkey == '3' %}bg-key-3 bg-vivid-gold{% endif %} {% if _bgkey in ['2', '3'] %}bg-bright-text{% endif %}">
+<body class="bg-[#f8f9fa] flex items-center justify-center p-0 m-0 overflow-hidden relative min-h-[900px] {% if background_image %}bg-transparent{% endif %} {% if _bgkey == '2' %}bg-key-2{% endif %} {% if _bgkey == '3' %}bg-key-3 bg-vivid-gold{% endif %} {% if _bgkey in ['2', '3'] %}bg-bright-text{% endif %} {% if _is_beta_extreme %}beta-extreme{% endif %}">
 
     {% if background_image %}
     <div class="poster-bg-image {% if _bgkey == '3' %}bg-style-3{% endif %}" style="background-image: {% if _is_beta_extreme %}url('{{ background_image }}'){% elif _bgkey == '3' %}linear-gradient(160deg, rgba(248,249,250,0.004) 0%, rgba(248,249,250,0.000) 100%), url('{{ background_image }}'){% else %}linear-gradient(160deg, rgba(248,249,250,0.03) 0%, rgba(248,249,250,0.01) 100%), url('{{ background_image }}'){% endif %};"></div>
