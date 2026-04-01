@@ -741,6 +741,9 @@ FLEX_PACK_BG_TEST_TARGET = str(os.getenv("FLEX_PACK_BG_TEST_TARGET", "none")).st
 FLEX_PACK_BG_OVERRIDE_IMAGE = str(os.getenv("FLEX_PACK_BG_OVERRIDE_IMAGE", "")).strip()
 FLEX_PACK_BG_OVERRIDE_CONTRACT = str(os.getenv("FLEX_PACK_BG_OVERRIDE_CONTRACT", "")).strip()
 FLEX_PACK_BG_OVERRIDE_PACK_NAME = str(os.getenv("FLEX_PACK_BG_OVERRIDE_PACK_NAME", "")).strip()
+FLEX_PACK_AUTO_BETA_BG_IMAGE = str(
+    os.getenv("FLEX_PACK_AUTO_BETA_BG_IMAGE", os.path.join(BASE_DIR, "templates", "heaven.jpg"))
+).strip()
 FLEX_PACK_AUTO_BETA_CONTRACT = str(
     os.getenv(
         "FLEX_PACK_AUTO_BETA_CONTRACT",
@@ -1954,6 +1957,11 @@ def _latest_pack_contract_from_picker_data(picker_data: dict | None) -> str:
 def _resolve_flex_pack_background_image(pack_contract: str, pack_name: str, picker_data: dict | None) -> str:
     contract_norm = _normalize_pack_contract_key(pack_contract)
     pack_name_norm = str(pack_name or "").strip().lower()
+
+    if _is_auto_beta_pack_contract(contract_norm):
+        auto_beta_bg_image = _resolve_image_source_to_data_uri_or_url(FLEX_PACK_AUTO_BETA_BG_IMAGE)
+        if auto_beta_bg_image:
+            return auto_beta_bg_image
 
     override_image = _resolve_image_source_to_data_uri_or_url(FLEX_PACK_BG_OVERRIDE_IMAGE)
     if override_image:
