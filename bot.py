@@ -741,6 +741,12 @@ FLEX_PACK_BG_TEST_TARGET = str(os.getenv("FLEX_PACK_BG_TEST_TARGET", "none")).st
 FLEX_PACK_BG_OVERRIDE_IMAGE = str(os.getenv("FLEX_PACK_BG_OVERRIDE_IMAGE", "")).strip()
 FLEX_PACK_BG_OVERRIDE_CONTRACT = str(os.getenv("FLEX_PACK_BG_OVERRIDE_CONTRACT", "")).strip()
 FLEX_PACK_BG_OVERRIDE_PACK_NAME = str(os.getenv("FLEX_PACK_BG_OVERRIDE_PACK_NAME", "")).strip()
+FLEX_PACK_AUTO_BETA_CONTRACT = str(
+    os.getenv(
+        "FLEX_PACK_AUTO_BETA_CONTRACT",
+        "legacy:0xa1e83e1bfa3ca36947b9004e2e35fa1804a503b4416a7ce65b332ae7594a0585",
+    )
+).strip()
 
 
 def _normalize_wallet_address(address: str) -> str | None:
@@ -1864,6 +1870,20 @@ def _clamp_flex_pack_card_count(value: int | None) -> int:
     return 10
 
 
+def _normalize_pack_contract_key(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    return text
+
+
+def _is_auto_beta_pack_contract(value: str | None) -> bool:
+    target = _normalize_pack_contract_key(FLEX_PACK_AUTO_BETA_CONTRACT)
+    if not target:
+        return False
+    return _normalize_pack_contract_key(value) == target
+
+
 def _normalize_profile_background_key(value: str | None) -> str:
     text = str(value or "").strip().lower()
     if text in ("classic", "經典", "经典", "default", "0"):
@@ -1932,12 +1952,12 @@ def _latest_pack_contract_from_picker_data(picker_data: dict | None) -> str:
 
 
 def _resolve_flex_pack_background_image(pack_contract: str, pack_name: str, picker_data: dict | None) -> str:
-    contract_norm = _normalize_wallet_address(pack_contract) or str(pack_contract or "").strip().lower()
+    contract_norm = _normalize_pack_contract_key(pack_contract)
     pack_name_norm = str(pack_name or "").strip().lower()
 
     override_image = _resolve_image_source_to_data_uri_or_url(FLEX_PACK_BG_OVERRIDE_IMAGE)
     if override_image:
-        target_contract = _normalize_wallet_address(FLEX_PACK_BG_OVERRIDE_CONTRACT)
+        target_contract = _normalize_pack_contract_key(FLEX_PACK_BG_OVERRIDE_CONTRACT)
         target_name = str(FLEX_PACK_BG_OVERRIDE_PACK_NAME or "").strip().lower()
         if target_contract and contract_norm == target_contract:
             return override_image
@@ -4661,9 +4681,12 @@ def _build_wallet_flex_pack_template_context(
     profile_lang: str = "en",
 ) -> dict:
     lang = _profile_lang_from_locale(profile_lang)
-    pack_contract = str(selected_pack_contract or "").strip().lower()
+    pack_contract = _normalize_pack_contract_key(selected_pack_contract)
+    auto_beta_pack = _is_auto_beta_pack_contract(pack_contract)
     mode_name = "extreme" if str(mode or "").strip().lower() == "extreme" else "picked"
-    use_beta_mode = bool(beta_mode)
+    if auto_beta_pack:
+        mode_name = "extreme"
+    use_beta_mode = bool(beta_mode or auto_beta_pack)
     requested_count = _clamp_flex_pack_card_count(card_count)
 
     history_data = (picker_data or {}).get("history_data") if isinstance(picker_data, dict) else {}
@@ -4889,7 +4912,18 @@ def _build_wallet_flex_pack_template_context(
         }
 
     resolved_positive = [x for x in resolved_all if _to_decimal(x.get("value")) > 0]
-    if len(resolved_positive) < 2:
+    if auto_beta_pack and not resolved_positive:
+        raise RuntimeError("此卡包可定價的卡片不足 1 張，無法生成天堂地獄版本。")
+    beta_single_card = bool(use_beta_mode and requested_count == 1)
+    if auto_beta_pack:
+        # Auto mode for designated pack:
+        # 1 priceable card -> single-card heaven
+        # 2+ priceable cards -> heaven/hell highest+lowest
+        beta_single_card = (len(resolved_positive) == 1)
+    min_required = 1 if beta_single_card else 2
+    if len(resolved_positive) < min_required:
+        if beta_single_card:
+            raise RuntimeError("此卡包可定價的卡片不足 1 張，無法生成單卡天堂版本。")
         raise RuntimeError("此卡包可定價的卡片不足 2 張，無法生成天堂地獄版本。")
 
     sorted_cards = sorted(
@@ -4917,20 +4951,30 @@ def _build_wallet_flex_pack_template_context(
     highest["image"] = _prepare_final_extreme_image(highest)
     lowest["image"] = _prepare_final_extreme_image(lowest)
 
-    items = [
-        {
-            "name": f"Heaven / {str(highest.get('name') or 'Unknown Collectible')}",
-            "image": str(highest.get("image") or _TRANSPARENT_CARD_IMAGE),
-            "value": _format_usdt_decimal(highest.get("value")),
-            "price_up": bool(highest.get("used_token_image_fallback")),
-        },
-        {
-            "name": f"Hell / {str(lowest.get('name') or 'Unknown Collectible')}",
-            "image": str(lowest.get("image") or _TRANSPARENT_CARD_IMAGE),
-            "value": _format_usdt_decimal(lowest.get("value")),
-            "price_up": bool(lowest.get("used_token_image_fallback")),
-        },
-    ]
+    if beta_single_card:
+        items = [
+            {
+                "name": f"Heaven / {str(highest.get('name') or 'Unknown Collectible')}",
+                "image": str(highest.get("image") or _TRANSPARENT_CARD_IMAGE),
+                "value": _format_usdt_decimal(highest.get("value")),
+                "price_up": bool(highest.get("used_token_image_fallback")),
+            }
+        ]
+    else:
+        items = [
+            {
+                "name": f"Heaven / {str(highest.get('name') or 'Unknown Collectible')}",
+                "image": str(highest.get("image") or _TRANSPARENT_CARD_IMAGE),
+                "value": _format_usdt_decimal(highest.get("value")),
+                "price_up": bool(highest.get("used_token_image_fallback")),
+            },
+            {
+                "name": f"Hell / {str(lowest.get('name') or 'Unknown Collectible')}",
+                "image": str(lowest.get("image") or _TRANSPARENT_CARD_IMAGE),
+                "value": _format_usdt_decimal(lowest.get("value")),
+                "price_up": bool(lowest.get("used_token_image_fallback")),
+            },
+        ]
     pair_total = _to_decimal(highest.get("value")) + _to_decimal(lowest.get("value"))
     template_context = {
         "collection_name": pack_title,
@@ -4959,6 +5003,7 @@ def _build_wallet_flex_pack_template_context(
         # Beta mode keeps the same data pipeline but removes the built-in duality overlay
         # so custom heaven/hell map backgrounds are not masked.
         "extreme_overlay_enabled": (not use_beta_mode),
+        "beta_single_card": beta_single_card,
         "_meta_subtitle": subtitle,
     }
     return {
@@ -4966,7 +5011,7 @@ def _build_wallet_flex_pack_template_context(
         "mode": mode_name,
         "pack_name": pack_name,
         "requested_count": requested_count,
-        "selected_count": 2,
+        "selected_count": 1 if beta_single_card else 2,
         "pack_total_count": len(unique_cards),
         "pack_spent_total": pack_spent_total,
         "pack_value_total": total_pack_card_value,
@@ -8395,15 +8440,14 @@ class FlexPackPackSelect(discord.ui.Select):
 
 
 class FlexPackTemplateSelect(discord.ui.Select):
-    def __init__(self, selected_count: int, lang: str):
-        default_count = _clamp_flex_pack_card_count(selected_count)
+    def __init__(self, selected_count: int, lang: str, allowed_counts: list[int] | None = None):
+        counts = [int(x) for x in (allowed_counts or [1, 2, 3, 4, 7, 10]) if int(x) > 0]
+        if not counts:
+            counts = [1, 2]
+        default_count = int(selected_count) if int(selected_count or 0) in counts else counts[0]
         options = [
-            discord.SelectOption(label="1", value="1", default=(default_count == 1)),
-            discord.SelectOption(label="2", value="2", default=(default_count == 2)),
-            discord.SelectOption(label="3", value="3", default=(default_count == 3)),
-            discord.SelectOption(label="4", value="4", default=(default_count == 4)),
-            discord.SelectOption(label="7", value="7", default=(default_count == 7)),
-            discord.SelectOption(label="10", value="10", default=(default_count == 10)),
+            discord.SelectOption(label=str(c), value=str(c), default=(default_count == c))
+            for c in counts
         ]
         super().__init__(
             placeholder=_t(lang, "3) 選擇排版數量", "3) Choose Layout Count", "3) 레이아웃 수 선택", "3) 选择排版数量"),
@@ -8441,14 +8485,23 @@ class FlexPackConfigView(discord.ui.View):
 
         self._rebuild_components()
 
+    def _is_auto_beta_pack_selected(self) -> bool:
+        return _is_auto_beta_pack_contract(self.selected_pack_contract)
+
     def _rebuild_components(self):
         self.clear_items()
-        self.add_item(FlexPackModeSelect(self.selected_mode, self.selected_lang))
+        auto_beta_pack = self._is_auto_beta_pack_selected()
+        if auto_beta_pack:
+            self.selected_mode = "extreme"
+            self.selected_template = 1 if self._pack_count() <= 1 else 2
+        else:
+            self.add_item(FlexPackModeSelect(self.selected_mode, self.selected_lang))
         self.add_item(FlexPackPackSelect(self.pack_options, self.selected_pack_contract, self.selected_lang))
-        layout_select = FlexPackTemplateSelect(self.selected_template, self.selected_lang)
+        allowed_counts = [self.selected_template] if auto_beta_pack else [1, 2, 3, 4, 7, 10]
+        layout_select = FlexPackTemplateSelect(self.selected_template, self.selected_lang, allowed_counts=allowed_counts)
         # Keep layout selector visible/clickable in all modes to avoid UI controls disappearing after mode switch.
         # In extreme mode the selected layout value is ignored by generator logic.
-        layout_select.disabled = False
+        layout_select.disabled = auto_beta_pack
         self.add_item(layout_select)
         self.generate.label = _t(self.selected_lang, "生成海報", "Generate Poster", "포스터 생성", "生成海报")[:80]
         self.add_item(self.generate)
@@ -8463,6 +8516,7 @@ class FlexPackConfigView(discord.ui.View):
         return len(pack_map.get(self.selected_pack_contract) or [])
 
     def render_message(self) -> str:
+        auto_beta_pack = self._is_auto_beta_pack_selected()
         pack_label = self.pack_label_map.get(self.selected_pack_contract) or _short_hex(self.selected_pack_contract)
         mode_base = (
             _t(self.selected_lang, "天堂與地獄", "Heaven and Hell", "천국과 지옥", "天堂与地狱")
@@ -8471,13 +8525,39 @@ class FlexPackConfigView(discord.ui.View):
         )
         mode_label = (
             f"{mode_base} (Beta)"
-            if self.beta_mode and self.selected_mode == "extreme"
+            if (self.beta_mode or auto_beta_pack) and self.selected_mode == "extreme"
             else mode_base
         )
-        layout_value = "-" if self.selected_mode == "extreme" else str(self.selected_template)
+        if self.selected_mode == "extreme":
+            layout_value = str(self.selected_template) if (self.beta_mode or auto_beta_pack) else "-"
+        else:
+            layout_value = str(self.selected_template)
         panel_title = _t(self.selected_lang, "卡包海報設定", "Pack Poster Setup", "팩 포스터 설정", "卡包海报设置")
-        if self.beta_mode:
+        if self.beta_mode or auto_beta_pack:
             panel_title = f"{panel_title} · Beta"
+        layout_hint = _t(
+            self.selected_lang,
+            "剛抽卡排版提供 1/2/3/4/7/10，卡片不足會自動 fallback。",
+            "Recent Pull Layout supports 1/2/3/4/7/10 and auto-fallback on insufficient cards.",
+            "최근 뽑기 레이아웃은 1/2/3/4/7/10 지원, 카드 부족 시 자동 fallback.",
+            "刚抽卡排版提供 1/2/3/4/7/10，卡片不足自动 fallback。",
+        )
+        if self.beta_mode:
+            layout_hint = _t(
+                self.selected_lang,
+                "Beta 天堂地獄：選 1 會生成單卡版；其他數值走雙卡版。",
+                "Beta Heaven/Hell: choose 1 for single-card layout; other values use dual-card layout.",
+                "베타 천국/지옥: 1을 선택하면 단일 카드 레이아웃, 그 외 값은 2카드 레이아웃.",
+                "Beta 天堂地狱：选 1 生成单卡版；其他数值走双卡版。",
+            )
+        if auto_beta_pack:
+            layout_hint = _t(
+                self.selected_lang,
+                "此卡包為專用 Beta 模板：自動判斷，1 張走單卡天堂；2 張以上走雙卡天堂地獄（最高/最低）。",
+                "This pack uses the dedicated Beta template: auto mode (1 card => single heaven, 2+ cards => heaven/hell highest+lowest).",
+                "이 팩은 전용 베타 템플릿이 적용됩니다: 자동 판별(1장=단일 천국, 2장 이상=천국/지옥 최고+최저).",
+                "此卡包为专用 Beta 模板：自动判定，1 张走单卡天堂；2 张以上走双卡天堂地狱（最高/最低）。",
+            )
         return (
             f"🎛️ **{self.username}** · {panel_title}\n"
             f"{_t(self.selected_lang, '錢包', 'Wallet', '지갑', '钱包')}: `{self.wallet}`\n"
@@ -8485,7 +8565,7 @@ class FlexPackConfigView(discord.ui.View):
             f"{_t(self.selected_lang, '模式', 'Mode', '모드', '模式')}: **{mode_label}**\n"
             f"{_t(self.selected_lang, '排版數量', 'Layout Count', '레이아웃 수', '排版数量')}: **{layout_value}**\n"
             f"{_t(self.selected_lang, '該包卡片數', 'Cards in Pack', '해당 팩 카드 수', '该包卡片数')}: **{self._pack_count()}**\n\n"
-            f"{_t(self.selected_lang, '剛抽卡排版提供 1/2/3/4/7/10，卡片不足會自動 fallback。', 'Recent Pull Layout supports 1/2/3/4/7/10 and auto-fallback on insufficient cards.', '최근 뽑기 레이아웃은 1/2/3/4/7/10 지원, 카드 부족 시 자동 fallback.', '刚抽卡排版提供 1/2/3/4/7/10，卡片不足自动 fallback。')}"
+            f"{layout_hint}"
         )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -8555,12 +8635,13 @@ class FlexPackConfigView(discord.ui.View):
             pack_pnl = _to_decimal(payload.get("pack_pnl_total"))
             pack_spent = _to_decimal(payload.get("pack_spent_total"))
             pack_value = _to_decimal(payload.get("pack_value_total"))
+            auto_beta_pack = self._is_auto_beta_pack_selected()
             mode_label = (
                 _t(self.selected_lang, "天堂與地獄", "Heaven and Hell", "천국과 지옥", "天堂与地狱")
                 if self.selected_mode == "extreme"
                 else _t(self.selected_lang, "剛抽卡排版", "Recent Pull Layout", "최근 뽑기 레이아웃", "刚抽卡排版")
             )
-            if self.beta_mode and self.selected_mode == "extreme":
+            if (self.beta_mode or auto_beta_pack) and self.selected_mode == "extreme":
                 mode_label = f"{mode_label} (Beta)"
             fallback_note = ""
             if self.selected_mode == "picked" and selected < requested:
