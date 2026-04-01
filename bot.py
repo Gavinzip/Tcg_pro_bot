@@ -4912,22 +4912,21 @@ def _build_wallet_flex_pack_template_context(
         }
 
     resolved_positive = [x for x in resolved_all if _to_decimal(x.get("value")) > 0]
-    if auto_beta_pack and not resolved_positive:
-        raise RuntimeError("此卡包可定價的卡片不足 1 張，無法生成天堂地獄版本。")
+    extreme_candidates = resolved_positive
     beta_single_card = bool(use_beta_mode and requested_count == 1)
     if auto_beta_pack:
         # Auto mode for designated pack:
         # 1 priceable card -> single-card heaven
         # 2+ priceable cards -> heaven/hell highest+lowest
-        beta_single_card = (len(resolved_positive) == 1)
+        beta_single_card = (len(extreme_candidates) == 1)
     min_required = 1 if beta_single_card else 2
-    if len(resolved_positive) < min_required:
+    if len(extreme_candidates) < min_required:
         if beta_single_card:
             raise RuntimeError("此卡包可定價的卡片不足 1 張，無法生成單卡天堂版本。")
         raise RuntimeError("此卡包可定價的卡片不足 2 張，無法生成天堂地獄版本。")
 
     sorted_cards = sorted(
-        resolved_positive,
+        extreme_candidates,
         key=lambda x: (_to_decimal(x.get("value")), str(x.get("token_id") or "")),
         reverse=True,
     )
