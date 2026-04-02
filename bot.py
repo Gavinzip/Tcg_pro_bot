@@ -4876,6 +4876,7 @@ def _build_wallet_flex_pack_template_context(
                 "image": str(x.get("image") or _TRANSPARENT_CARD_IMAGE),
                 "value": _format_usdt_decimal(x.get("value")),
                 "price_up": bool(x.get("used_token_image_fallback")),
+                "from_collection_fallback": bool(x.get("used_token_image_fallback")),
             }
             for x in resolved
         ]
@@ -4883,6 +4884,7 @@ def _build_wallet_flex_pack_template_context(
             "collection_name": pack_title,
             "sbt_total": len(pack_cards),
             "extreme_mode": False,
+            "auto_beta_pack": auto_beta_pack,
             "hide_footer": False,
             "sbt_badges_display": [],
             "items": items,
@@ -4965,6 +4967,7 @@ def _build_wallet_flex_pack_template_context(
                 "image": str(highest.get("image") or _TRANSPARENT_CARD_IMAGE),
                 "value": _format_usdt_decimal(highest.get("value")),
                 "price_up": bool(highest.get("used_token_image_fallback")),
+                "from_collection_fallback": bool(highest.get("used_token_image_fallback")),
             }
         ]
     else:
@@ -4974,12 +4977,14 @@ def _build_wallet_flex_pack_template_context(
                 "image": str(highest.get("image") or _TRANSPARENT_CARD_IMAGE),
                 "value": _format_usdt_decimal(highest.get("value")),
                 "price_up": bool(highest.get("used_token_image_fallback")),
+                "from_collection_fallback": bool(highest.get("used_token_image_fallback")),
             },
             {
                 "name": f"Hell / {str(lowest.get('name') or 'Unknown Collectible')}",
                 "image": str(lowest.get("image") or _TRANSPARENT_CARD_IMAGE),
                 "value": _format_usdt_decimal(lowest.get("value")),
                 "price_up": bool(lowest.get("used_token_image_fallback")),
+                "from_collection_fallback": bool(lowest.get("used_token_image_fallback")),
             },
         ]
     pair_total = _to_decimal(highest.get("value")) + _to_decimal(lowest.get("value"))
@@ -4987,6 +4992,7 @@ def _build_wallet_flex_pack_template_context(
         "collection_name": pack_title,
         "sbt_total": len(pack_cards),
         "extreme_mode": True,
+        "auto_beta_pack": auto_beta_pack,
         "hide_footer": False,
         "sbt_badges_display": [],
         "items": items,

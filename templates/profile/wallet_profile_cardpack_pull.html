@@ -1038,6 +1038,27 @@
             letter-spacing: -0.02em;
         }
 
+        /* Only for auto-beta single-card posters where image comes from collection fallback.
+           Slab/framed collectibles are larger; shrink just this case to avoid footer overlap. */
+        .beta-extreme .extreme-single.extreme-single-token-fallback .extreme-single-slot {
+            max-width: 500px;
+            min-height: 580px;
+            padding-top: 0.4rem;
+        }
+
+        .beta-extreme .extreme-single.extreme-single-token-fallback .extreme-single-slot .extreme-card-box {
+            width: min(350px, 84%);
+            margin-bottom: 0.85rem;
+        }
+
+        .beta-extreme .extreme-single.extreme-single-token-fallback .extreme-single-slot .extreme-card-art {
+            transform: scale(0.86);
+        }
+
+        .beta-extreme .extreme-single.extreme-single-token-fallback .extreme-single-slot .extreme-price {
+            font-size: 3.28rem;
+        }
+
         .brand-suffix {
             font-size: 0.58em;
             letter-spacing: 0.08em;
@@ -1087,6 +1108,7 @@
 {% set _is_extreme = extreme_mode %}
 {% set _extreme_overlay_enabled = extreme_overlay_enabled | default(true) %}
 {% set _is_beta_extreme = _is_extreme and (not _extreme_overlay_enabled) %}
+{% set _is_auto_beta_pack = auto_beta_pack | default(false) %}
 <body class="bg-[#f8f9fa] flex items-center justify-center p-0 m-0 overflow-hidden relative min-h-[900px] {% if background_image %}bg-transparent{% endif %} {% if _bgkey == '2' %}bg-key-2{% endif %} {% if _bgkey == '3' %}bg-key-3 bg-vivid-gold{% endif %} {% if _bgkey in ['2', '3'] %}bg-bright-text{% endif %} {% if _is_beta_extreme %}beta-extreme{% endif %}">
 
     {% if background_image %}
@@ -1139,7 +1161,8 @@
             {% set _beta_single_card = beta_single_card | default(false) %}
             {% if (_is_beta_extreme and _beta_single_card) or (items|length <= 1) %}
             {% set single_item = items[0] if items|length > 0 else none %}
-            <div class="extreme-single">
+            {% set _single_token_fallback = _is_auto_beta_pack and single_item and single_item.from_collection_fallback %}
+            <div class="extreme-single {% if _single_token_fallback %}extreme-single-token-fallback{% endif %}">
                 <div class="extreme-slot extreme-heaven extreme-single-slot">
                     {% if single_item %}
                     <div class="extreme-card-box">
