@@ -750,6 +750,13 @@ FLEX_PACK_AUTO_BETA_CONTRACT = str(
         "legacy:0xa1e83e1bfa3ca36947b9004e2e35fa1804a503b4416a7ce65b332ae7594a0585",
     )
 ).strip()
+FLEX_PACK_DESTINY_BG_IMAGE = str(os.getenv("FLEX_PACK_DESTINY_BG_IMAGE", FLEX_PACK_AUTO_BETA_BG_IMAGE)).strip()
+FLEX_PACK_DESTINY_CONTRACTS = (
+    # Existing destiny target
+    "legacy:0xa1e83e1bfa3ca36947b9004e2e35fa1804a503b4416a7ce65b332ae7594a0585",
+    # Newly added destiny target
+    "0xb8174e82deeeb0de3842a48a51c7107f43ea2654dec910e9a8ff50929250554a",
+)
 
 
 def _normalize_wallet_address(address: str) -> str | None:
@@ -1880,11 +1887,46 @@ def _normalize_pack_contract_key(value: str | None) -> str:
     return text
 
 
-def _is_auto_beta_pack_contract(value: str | None) -> bool:
-    target = _normalize_pack_contract_key(FLEX_PACK_AUTO_BETA_CONTRACT)
-    if not target:
+def _match_pack_contract_targets(value: str | None, targets: set[str]) -> bool:
+    contract = _normalize_pack_contract_key(value)
+    if not contract:
         return False
-    return _normalize_pack_contract_key(value) == target
+    if not targets:
+        return False
+    if contract in targets:
+        return True
+    # Tolerate prefix mismatch between "legacy:<id>" and "<id>"
+    if contract.startswith("legacy:"):
+        return contract.split("legacy:", 1)[1] in targets
+    return f"legacy:{contract}" in targets
+
+
+def _destiny_contract_target_set() -> set[str]:
+    out: set[str] = set()
+    for row in FLEX_PACK_DESTINY_CONTRACTS:
+        contract = _normalize_pack_contract_key(row)
+        if not contract:
+            continue
+        out.add(contract)
+    return out
+
+
+def _auto_beta_contract_target_set() -> set[str]:
+    # Keep backward compatibility with the old single-contract env value,
+    # while allowing all "Destiny" contracts to share Easter-like behavior.
+    out = _destiny_contract_target_set()
+    legacy_target = _normalize_pack_contract_key(FLEX_PACK_AUTO_BETA_CONTRACT)
+    if legacy_target:
+        out.add(legacy_target)
+    return out
+
+
+def _is_auto_beta_pack_contract(value: str | None) -> bool:
+    return _match_pack_contract_targets(value, _auto_beta_contract_target_set())
+
+
+def _is_destiny_bg_pack_contract(value: str | None) -> bool:
+    return _match_pack_contract_targets(value, _destiny_contract_target_set())
 
 
 def _normalize_profile_background_key(value: str | None) -> str:
@@ -1958,10 +2000,10 @@ def _resolve_flex_pack_background_image(pack_contract: str, pack_name: str, pick
     contract_norm = _normalize_pack_contract_key(pack_contract)
     pack_name_norm = str(pack_name or "").strip().lower()
 
-    if _is_auto_beta_pack_contract(contract_norm):
-        auto_beta_bg_image = _resolve_image_source_to_data_uri_or_url(FLEX_PACK_AUTO_BETA_BG_IMAGE)
-        if auto_beta_bg_image:
-            return auto_beta_bg_image
+    if _is_destiny_bg_pack_contract(contract_norm):
+        destiny_bg_image = _resolve_image_source_to_data_uri_or_url(FLEX_PACK_DESTINY_BG_IMAGE)
+        if destiny_bg_image:
+            return destiny_bg_image
 
     override_image = _resolve_image_source_to_data_uri_or_url(FLEX_PACK_BG_OVERRIDE_IMAGE)
     if override_image:
@@ -4901,8 +4943,8 @@ def _build_wallet_flex_pack_template_context(
             "update_date": datetime.now().strftime("%Y-%m-%d"),
             "enable_tilt": False,
             "background_key": "classic",
-            # Keep normal picked layout on default background.
-            "background_image": _profile_background_data_uri("classic"),
+            # Picked mode also follows pack-specific background resolution (e.g. Destiny).
+            "background_image": flex_pack_background_image,
             "meta_counter_label": "PULL",
             "pack_name_display": pack_title,
             "pnl_tone": pnl_tone,
