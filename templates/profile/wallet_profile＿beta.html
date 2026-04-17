@@ -884,6 +884,49 @@
             margin-top: 2.2rem;
             padding-top: 0.5rem;
         }
+
+        /* 6-card layout can overflow footer with slab renders.
+           Keep this override strictly scoped to item-count=6. */
+        [data-item-count="6"] .grid-layout-6 {
+            column-gap: 0.95rem;
+            row-gap: 0.86rem;
+            transform: translateY(-10px);
+        }
+
+        [data-item-count="6"] .grid-layout-6 .item-card {
+            max-width: 198px;
+            padding: 0.42rem 0.32rem 0.48rem;
+        }
+
+        [data-item-count="6"] .grid-layout-6 .item-card .card-frame {
+            margin-bottom: 0.36rem;
+        }
+
+        [data-item-count="6"] .grid-layout-6 .price-tag {
+            transform: translateY(6px);
+        }
+
+        [data-item-count="6"] .grid-layout-6 .price-value {
+            font-size: 1.62rem;
+        }
+
+        [data-item-count="6"] .grid-layout-6 .price-currency {
+            font-size: 0.98rem;
+        }
+
+        [data-item-count="6"] .grid-layout-6 .price-unit {
+            font-size: 0.66rem;
+        }
+
+        [data-item-count="6"] .cards-block {
+            padding-top: 0.12rem;
+            padding-bottom: 0.06rem;
+        }
+
+        [data-item-count="6"] .footer-block {
+            margin-top: 1.15rem;
+            padding-top: 0.36rem;
+        }
     </style>
 </head>
 
