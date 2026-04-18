@@ -627,8 +627,10 @@ PROFILE_TOKEN_ACTIVITY_PAGE_LIMIT = max(1, min(50, int(os.getenv("PROFILE_TOKEN_
 PROFILE_TOKEN_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_TOKEN_ACTIVITY_MAX_PAGES", "20")))
 PROFILE_HTTP_POOL_MAXSIZE = max(8, int(os.getenv("PROFILE_HTTP_POOL_MAXSIZE", "48")))
 PROFILE_RESOLVE_SCAN_WORKERS = max(1, int(os.getenv("PROFILE_RESOLVE_SCAN_WORKERS", "8")))
+PROFILE_RESOLVE_ADDRESS_MAX_PAGES = max(1, min(80, int(os.getenv("PROFILE_RESOLVE_ADDRESS_MAX_PAGES", "8"))))
 PROFILE_COLLECTION_FETCH_WORKERS = max(1, int(os.getenv("PROFILE_COLLECTION_FETCH_WORKERS", "8")))
 PROFILE_WITHDRAW_VALUE_WORKERS = max(1, int(os.getenv("PROFILE_WITHDRAW_VALUE_WORKERS", "10")))
+PROFILE_CHAIN_CARD_TOKEN_SYMBOL = str(os.getenv("PROFILE_CHAIN_CARD_TOKEN_SYMBOL", "RENAISS")).strip().lower()
 PROFILE_HOLDINGS_TOP_GAINERS = max(1, min(8, int(os.getenv("PROFILE_HOLDINGS_TOP_GAINERS", "4"))))
 FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT = max(0, int(os.getenv("FLEX_PACK_EXTREME_TOKEN_LOOKUP_LIMIT", "24")))
 FLEX_PACK_ALLOW_PREVIEW_IMAGE_FALLBACK = _env_true("FLEX_PACK_ALLOW_PREVIEW_IMAGE_FALLBACK", False)
@@ -676,6 +678,9 @@ PROFILE_REALTIME_RECALC_ON_PROFILE = _env_true("PROFILE_REALTIME_RECALC_ON_PROFI
 PROFILE_REALTIME_METRICS_SOURCE = str(os.getenv("PROFILE_REALTIME_METRICS_SOURCE", "onchain")).strip().lower() or "onchain"
 if PROFILE_REALTIME_METRICS_SOURCE not in ("onchain", "ranking", "official"):
     PROFILE_REALTIME_METRICS_SOURCE = "onchain"
+PROFILE_DATA_MODE = str(os.getenv("PROFILE_DATA_MODE", "chain_official")).strip().lower() or "chain_official"
+if PROFILE_DATA_MODE not in ("legacy", "chain_official"):
+    PROFILE_DATA_MODE = "legacy"
 DEFAULT_ONCHAIN_PACK_CONTRACTS = (
     "0xaab5f5fa75437a6e9e7004c12c9c56cda4b4885a",
     "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
@@ -696,8 +701,12 @@ if PROFILE_SBT_BADGE_SOURCE in ("onchain", "auto"):
 PROFILE_CARD_WITHDRAW_ADDRESS = str(
     os.getenv("PROFILE_CARD_WITHDRAW_ADDRESS", "0x341Edb3EdC1E45612E5704F29eC8d26fBb4072b4")
 ).strip().lower()
+PROFILE_CARD_WITHDRAW_ADDRESS_EXTRA = str(
+    os.getenv("PROFILE_CARD_WITHDRAW_ADDRESS_EXTRA", "0x72a004654Cef4694a6377f5b019d0489bA8A6c9E")
+).strip().lower()
 # SellActivity amount is gross (pre-fee) in current upstream data; convert to net received.
 PROFILE_MARKET_SELL_GROSS_DIVISOR = Decimal(os.getenv("PROFILE_MARKET_SELL_GROSS_DIVISOR", "1.02"))
+PROFILE_BSC_RPC_URL = str(os.getenv("PROFILE_BSC_RPC_URL", "https://bsc-dataseed.binance.org")).strip() or "https://bsc-dataseed.binance.org"
 _WALLET_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _TRANSPARENT_CARD_IMAGE = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="
 _WEI_DECIMAL = Decimal("1000000000000000000")
@@ -871,10 +880,24 @@ def _parse_address_csv(raw: str | None, *, default_values: tuple[str, ...] = ())
     return tuple(values)
 
 
-def _build_profile_onchain_cfg():
-    if not PROFILE_REALTIME_RECALC_ON_PROFILE:
+def _profile_withdraw_target_set() -> set[str]:
+    out: set[str] = set()
+    for addr in (
+        str(PROFILE_CARD_WITHDRAW_ADDRESS or "").strip().lower(),
+        str(PROFILE_CARD_WITHDRAW_ADDRESS_EXTRA or "").strip().lower(),
+    ):
+        if addr.startswith("0x") and len(addr) == 42:
+            out.add(addr)
+    for addr in _parse_address_csv(os.getenv("PROFILE_CARD_WITHDRAW_ADDRESSES"), default_values=()):
+        if addr.startswith("0x") and len(addr) == 42:
+            out.add(addr)
+    return out
+
+
+def _build_profile_onchain_cfg(*, force: bool = False):
+    if (not force) and (not PROFILE_REALTIME_RECALC_ON_PROFILE):
         return None
-    if PROFILE_REALTIME_METRICS_SOURCE != "onchain":
+    if (not force) and PROFILE_REALTIME_METRICS_SOURCE != "onchain":
         return None
     if _ONCHAIN_CONFIG_CLS is None or _ONCHAIN_ANALYZE_WALLET_FN is None:
         return None
@@ -915,7 +938,7 @@ def _profile_compute_onchain_metrics(wallet_address: str) -> dict[str, Decimal] 
     wallet_norm = _normalize_wallet_address(wallet_address or "")
     if not wallet_norm:
         return None
-    cfg = _build_profile_onchain_cfg()
+    cfg = _build_profile_onchain_cfg(force=False)
     if cfg is None:
         return None
     if _ONCHAIN_ANALYZE_WALLET_FN is None:
@@ -3431,7 +3454,7 @@ def _record_pack_unit_price(pack_map: dict, contract_key: str | None, pack_name:
     return changed
 
 
-def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en") -> dict:
+def _build_wallet_activity_history_legacy(wallet_address: str, profile_lang: str = "en") -> dict:
     lang = _profile_lang_from_locale(profile_lang)
     labels = _profile_history_labels(lang)
     wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
@@ -3616,7 +3639,7 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
                 trade_earned_total += (amount / divisor)
         elif row_type == "TransferActivity":
             target = str(row.get("to") or "").strip().lower()
-            if target != PROFILE_CARD_WITHDRAW_ADDRESS:
+            if target not in _profile_withdraw_target_set():
                 continue
             row_item = row.get("item") if isinstance(row.get("item"), dict) else {}
             token_id = str(row.get("tokenId") or row_item.get("tokenId") or "").strip()
@@ -3978,6 +4001,523 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         "token_value_hints": token_value_hints,
         "token_acquire_cost_hints": token_acquire_cost_hints,
     }
+
+
+def _bsc_account_api_fetch_page(
+    cfg,
+    *,
+    action: str,
+    page: int,
+    sort: str,
+    extra_params: dict[str, object],
+) -> list[dict]:
+    params = {
+        "chainid": int(getattr(cfg, "chain_id", 56)),
+        "module": "account",
+        "action": str(action or "").strip(),
+        "page": int(page),
+        "offset": int(max(1, min(10000, int(getattr(cfg, "page_size", 10000) or 10000)))),
+        "sort": str(sort or "asc"),
+        "apikey": str(getattr(cfg, "api_key", "") or ""),
+    }
+    for k, v in (extra_params or {}).items():
+        if v is None:
+            continue
+        params[str(k)] = str(v)
+
+    retries = max(1, int(getattr(cfg, "retries", PROFILE_API_MAX_RETRIES) or PROFILE_API_MAX_RETRIES))
+    backoff = max(0.2, float(getattr(cfg, "backoff_sec", PROFILE_API_RETRY_BACKOFF_SEC) or PROFILE_API_RETRY_BACKOFF_SEC))
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = _http_get(str(getattr(cfg, "api_url", "https://api.etherscan.io/v2/api")), params=params, timeout=30)
+            status = int(resp.status_code or 0)
+            if status == 429 or status >= 500:
+                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError(f"bsc {action} invalid response")
+            message = str(data.get("message") or "").strip()
+            result = data.get("result")
+            if message == "No transactions found":
+                return []
+            if isinstance(result, list):
+                return [x for x in result if isinstance(x, dict)]
+            if isinstance(result, str):
+                lowered = result.lower()
+                if "no transactions found" in lowered:
+                    return []
+                if "max rate limit" in lowered or "query timeout" in lowered:
+                    raise RuntimeError(result)
+            raise RuntimeError(f"bsc {action} error: {message or result}")
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(backoff * (2 ** (attempt - 1)))
+                continue
+            break
+    raise RuntimeError(f"bsc {action} request failed: {last_err}")
+
+
+def _bsc_account_api_fetch_all(
+    cfg,
+    *,
+    action: str,
+    extra_params: dict[str, object],
+    sort: str = "asc",
+) -> list[dict]:
+    out: list[dict] = []
+    page = 1
+    limit = int(max(1, min(10000, int(getattr(cfg, "page_size", 10000) or 10000))))
+    while True:
+        rows = _bsc_account_api_fetch_page(
+            cfg,
+            action=action,
+            page=page,
+            sort=sort,
+            extra_params=extra_params,
+        )
+        if not rows:
+            break
+        out.extend(rows)
+        if len(rows) < limit:
+            break
+        page += 1
+    return out
+
+
+def _tokentx_usdt_amount(row: dict) -> Decimal:
+    value = _to_decimal(row.get("value"))
+    decimals = int(_to_decimal(row.get("tokenDecimal")) or 18)
+    if value <= 0:
+        return Decimal("0")
+    if decimals <= 0:
+        return value
+    return value / (Decimal(10) ** decimals)
+
+
+def _classify_onchain_usdt_transfer(row: dict, wallet_norm: str, cfg) -> str:
+    frm = str(row.get("from") or "").strip().lower()
+    to = str(row.get("to") or "").strip().lower()
+    pack_contracts = {str(x or "").strip().lower() for x in (getattr(cfg, "pack_contracts", ()) or ())}
+    marketplace_contract = str(getattr(cfg, "marketplace_contract", "") or "").strip().lower()
+    if frm == wallet_norm and to in pack_contracts:
+        return "open_pack"
+    if frm in pack_contracts and to == wallet_norm:
+        return "buyback"
+    if frm == wallet_norm and to == marketplace_contract:
+        return "mp_buy"
+    if frm == marketplace_contract and to == wallet_norm:
+        return "mp_sell"
+    return "other"
+
+
+def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str = "en") -> dict:
+    lang = _profile_lang_from_locale(profile_lang)
+    labels = _profile_history_labels(lang)
+    wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
+    if not wallet_norm:
+        raise RuntimeError("invalid wallet address")
+
+    cfg = _build_profile_onchain_cfg(force=True)
+    if cfg is None:
+        raise RuntimeError("chain_official mode requires valid BSCSCAN API config")
+
+    usdt_contract = str(getattr(cfg, "usdt_contract", "") or "").strip().lower()
+    if not usdt_contract:
+        raise RuntimeError("missing onchain usdt contract")
+
+    usdt_rows = _bsc_account_api_fetch_all(
+        cfg,
+        action="tokentx",
+        extra_params={"address": wallet_norm, "contractaddress": usdt_contract},
+        sort="asc",
+    )
+    nft_rows = _bsc_account_api_fetch_all(
+        cfg,
+        action="tokennfttx",
+        extra_params={"address": wallet_norm},
+        sort="asc",
+    )
+
+    ts_values: list[int] = []
+    open_pack_txs: dict[str, dict] = {}
+    buyback_txs: dict[str, dict] = {}
+    market_buy_txs: dict[str, dict] = {}
+    market_sell_txs: dict[str, dict] = {}
+
+    def _upsert_tx(bucket: dict[str, dict], tx_hash: str, *, counterparty: str, ts: int, amount: Decimal):
+        key = str(tx_hash or "").strip().lower()
+        if not key:
+            key = f"synthetic:{len(bucket)}:{counterparty}:{ts}"
+        row = bucket.get(key)
+        if row is None:
+            row = {"hash": key, "counterparty": counterparty, "timestamp": int(ts or 0), "amount": Decimal("0")}
+            bucket[key] = row
+        row["amount"] = _to_decimal(row.get("amount")) + _to_decimal(amount)
+        if ts and ts > int(_parse_int(row.get("timestamp")) or 0):
+            row["timestamp"] = int(ts)
+        if (not row.get("counterparty")) and counterparty:
+            row["counterparty"] = counterparty
+
+    for row in usdt_rows:
+        if not isinstance(row, dict):
+            continue
+        ts = int(_parse_int(row.get("timeStamp")) or _parse_int(row.get("timestamp")) or 0)
+        if ts > 0:
+            ts_values.append(ts)
+        amount = _tokentx_usdt_amount(row)
+        if amount <= 0:
+            continue
+        tx_hash = str(row.get("hash") or "").strip().lower()
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        cls = _classify_onchain_usdt_transfer(row, wallet_norm, cfg)
+        if cls == "open_pack":
+            _upsert_tx(open_pack_txs, tx_hash, counterparty=to, ts=ts, amount=amount)
+        elif cls == "buyback":
+            _upsert_tx(buyback_txs, tx_hash, counterparty=frm, ts=ts, amount=amount)
+        elif cls == "mp_buy":
+            _upsert_tx(market_buy_txs, tx_hash, counterparty=to, ts=ts, amount=amount)
+        elif cls == "mp_sell":
+            _upsert_tx(market_sell_txs, tx_hash, counterparty=frm, ts=ts, amount=amount)
+
+    contract_pull_price_counter: defaultdict[str, Counter] = defaultdict(Counter)
+    contract_open_count: defaultdict[str, int] = defaultdict(int)
+    contract_direct_count: defaultdict[str, int] = defaultdict(int)
+    contract_inferred_count: defaultdict[str, int] = defaultdict(int)
+    contract_spent_total: defaultdict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    contract_pack_name: dict[str, str] = {}
+
+    release_cards_by_token: dict[str, dict] = {}
+    open_pack_tokens_by_tx: defaultdict[str, set[str]] = defaultdict(set)
+    buyback_tokens_by_tx: defaultdict[str, set[str]] = defaultdict(set)
+    market_buy_tokens_by_tx: defaultdict[str, set[str]] = defaultdict(set)
+    withdraw_token_ids: set[str] = set()
+    withdraw_targets = _profile_withdraw_target_set()
+
+    for row in nft_rows:
+        if not isinstance(row, dict):
+            continue
+        tx_hash = str(row.get("hash") or "").strip().lower()
+        token_id = str(row.get("tokenID") or row.get("tokenId") or "").strip()
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        ts = int(_parse_int(row.get("timeStamp")) or _parse_int(row.get("timestamp")) or 0)
+        if ts > 0:
+            ts_values.append(ts)
+        if not token_id:
+            continue
+
+        if to == wallet_norm and tx_hash in open_pack_txs and frm == "0x0000000000000000000000000000000000000000":
+            open_pack_tokens_by_tx[tx_hash].add(token_id)
+            current = release_cards_by_token.get(token_id) or {}
+            current_ts = int(_parse_int(current.get("timestamp_raw")) or 0)
+            if (not current) or ts >= current_ts:
+                release_cards_by_token[token_id] = {
+                    "token_id": token_id,
+                    "name": str(row.get("tokenName") or "Unknown Collectible"),
+                    "market_image": "",
+                    "preview_image": "",
+                    "image": "",
+                    "timestamp_raw": ts,
+                    "pack_contract": str((open_pack_txs.get(tx_hash) or {}).get("counterparty") or "").strip().lower(),
+                    "checkout_id": tx_hash,
+                }
+
+        if frm == wallet_norm and tx_hash in buyback_txs:
+            buyback_tokens_by_tx[tx_hash].add(token_id)
+        if to == wallet_norm and tx_hash in market_buy_txs:
+            market_buy_tokens_by_tx[tx_hash].add(token_id)
+        if frm == wallet_norm and to in withdraw_targets:
+            withdraw_token_ids.add(token_id)
+
+    effective_open_pack_txs: dict[str, dict] = {}
+    for tx_hash, tx in open_pack_txs.items():
+        if open_pack_tokens_by_tx.get(tx_hash):
+            effective_open_pack_txs[tx_hash] = tx
+    if not effective_open_pack_txs:
+        # Fallback to raw open-pack transfer inference if NFT rows are unavailable.
+        effective_open_pack_txs = dict(open_pack_txs)
+
+    for tx in effective_open_pack_txs.values():
+        contract = str(tx.get("counterparty") or "").strip().lower()
+        if not contract:
+            continue
+        amount = _to_decimal(tx.get("amount"))
+        contract_open_count[contract] += 1
+        contract_direct_count[contract] += 1
+        contract_spent_total[contract] += amount
+        if amount > 0:
+            contract_pull_price_counter[contract][amount] += 1
+        if contract not in contract_pack_name:
+            contract_pack_name[contract] = f"Contract {_short_hex(contract)}"
+
+    token_latest_values: dict[str, tuple[int, Decimal]] = {}
+    token_buy_cost_by_ts: dict[str, tuple[int, Decimal]] = {}
+    token_pull_cost_by_ts: dict[str, tuple[int, Decimal]] = {}
+
+    def _remember_token_value(token_id: str, value: Decimal, ts_value: int):
+        tid = str(token_id or "").strip()
+        if not tid or value <= 0:
+            return
+        ts_norm = int(_parse_int(ts_value) or 0)
+        prev = token_latest_values.get(tid)
+        if prev is None or ts_norm >= prev[0]:
+            token_latest_values[tid] = (ts_norm, value)
+
+    def _remember_token_cost(cost_map: dict[str, tuple[int, Decimal]], token_id: str, value: Decimal, ts_value: int):
+        tid = str(token_id or "").strip()
+        if not tid or value <= 0:
+            return
+        ts_norm = int(_parse_int(ts_value) or 0)
+        prev = cost_map.get(tid)
+        if prev is None or ts_norm >= prev[0]:
+            cost_map[tid] = (ts_norm, value)
+
+    for tx_hash, token_set in open_pack_tokens_by_tx.items():
+        tokens = sorted({str(x) for x in token_set if str(x)})
+        if not tokens:
+            continue
+        tx = effective_open_pack_txs.get(tx_hash) or open_pack_txs.get(tx_hash) or {}
+        total_amount = _to_decimal(tx.get("amount"))
+        ts = int(_parse_int(tx.get("timestamp")) or 0)
+        per_token_cost = (total_amount / Decimal(len(tokens))) if total_amount > 0 else Decimal("0")
+        for token_id in tokens:
+            _remember_token_cost(token_pull_cost_by_ts, token_id, per_token_cost, ts)
+
+    for tx_hash, token_set in market_buy_tokens_by_tx.items():
+        tokens = sorted({str(x) for x in token_set if str(x)})
+        if not tokens:
+            continue
+        tx = market_buy_txs.get(tx_hash) or {}
+        total_amount = _to_decimal(tx.get("amount"))
+        ts = int(_parse_int(tx.get("timestamp")) or 0)
+        per_token_cost = (total_amount / Decimal(len(tokens))) if total_amount > 0 else Decimal("0")
+        for token_id in tokens:
+            _remember_token_cost(token_buy_cost_by_ts, token_id, per_token_cost, ts)
+
+    for tx_hash, token_set in buyback_tokens_by_tx.items():
+        tokens = sorted({str(x) for x in token_set if str(x)})
+        if not tokens:
+            continue
+        tx = buyback_txs.get(tx_hash) or {}
+        total_amount = _to_decimal(tx.get("amount"))
+        ts = int(_parse_int(tx.get("timestamp")) or 0)
+        per_token_value = (total_amount / Decimal(len(tokens))) if total_amount > 0 else Decimal("0")
+        for token_id in tokens:
+            _remember_token_value(token_id, per_token_value, ts)
+
+    card_withdraw_total = Decimal("0")
+    unresolved_withdraw_tokens: list[str] = []
+    for token_id in withdraw_token_ids:
+        hinted = _to_decimal((token_latest_values.get(token_id) or (0, Decimal("0")))[1])
+        if hinted > 0:
+            card_withdraw_total += hinted
+        else:
+            unresolved_withdraw_tokens.append(token_id)
+    if unresolved_withdraw_tokens:
+        workers = min(PROFILE_WITHDRAW_VALUE_WORKERS, len(unresolved_withdraw_tokens))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_fetch_card_fmv_by_token_id, tid): tid for tid in unresolved_withdraw_tokens}
+                for future in as_completed(futures):
+                    try:
+                        value = _to_decimal(future.result())
+                    except Exception:
+                        value = Decimal("0")
+                    if value > 0:
+                        card_withdraw_total += value
+        else:
+            for token_id in unresolved_withdraw_tokens:
+                value = _to_decimal(_fetch_card_fmv_by_token_id(token_id))
+                if value > 0:
+                    card_withdraw_total += value
+
+    pack_spent_total = sum((_to_decimal(v.get("amount")) for v in effective_open_pack_txs.values()), Decimal("0"))
+    trade_spent_total = sum((_to_decimal(v.get("amount")) for v in market_buy_txs.values()), Decimal("0"))
+    buyback_earned_total = sum((_to_decimal(v.get("amount")) for v in buyback_txs.values()), Decimal("0"))
+    divisor = PROFILE_MARKET_SELL_GROSS_DIVISOR if PROFILE_MARKET_SELL_GROSS_DIVISOR > 0 else Decimal("1")
+    trade_earned_total = sum((_to_decimal(v.get("amount")) / divisor for v in market_sell_txs.values()), Decimal("0"))
+    total_spent = pack_spent_total + trade_spent_total
+    total_earned = buyback_earned_total + trade_earned_total
+    net_total = total_earned - total_spent + card_withdraw_total
+    trade_volume = trade_spent_total + trade_earned_total
+
+    contract_rows = []
+    all_contracts = sorted(contract_open_count.keys())
+    for contract in all_contracts:
+        unit_price = _pick_contract_unit_price(contract_pull_price_counter.get(contract) or Counter())
+        contract_rows.append(
+            {
+                "pack_name": contract_pack_name.get(contract) or f"Contract {_short_hex(contract)}",
+                "contract": contract,
+                "contract_short": _short_hex(contract),
+                "open_count": int(contract_open_count.get(contract, 0)),
+                "direct_count": int(contract_direct_count.get(contract, 0)),
+                "inferred_count": int(contract_inferred_count.get(contract, 0)),
+                "unit_price": _format_usdt_decimal(unit_price) if unit_price > 0 else "-",
+                "spent_total": _format_usdt_decimal(contract_spent_total.get(contract)),
+                "spent_total_raw": _to_decimal(contract_spent_total.get(contract)),
+            }
+        )
+    contract_rows.sort(key=lambda x: (_to_decimal(x.get("spent_total_raw")), int(x.get("open_count") or 0)), reverse=True)
+    for row in contract_rows:
+        row.pop("spent_total_raw", None)
+
+    opened_pack_ids = set(effective_open_pack_txs.keys())
+    activity_rows = []
+    open_count = len(opened_pack_ids)
+    buyback_count = len(buyback_txs)
+    market_buy_count = len(market_buy_txs)
+    market_sell_count = len(market_sell_txs)
+    if open_count > 0:
+        activity_rows.append(
+            {
+                "name": _profile_activity_display_name("PerpetualReleaseTokenActivity", lang),
+                "count": open_count,
+                "type": "PerpetualReleaseTokenActivity",
+                "highlight": True,
+            }
+        )
+    if buyback_count > 0:
+        activity_rows.append(
+            {
+                "name": _profile_activity_display_name("PerpetualBuybackActivity", lang),
+                "count": buyback_count,
+                "type": "PerpetualBuybackActivity",
+                "highlight": False,
+            }
+        )
+    if market_buy_count > 0:
+        activity_rows.append(
+            {
+                "name": _profile_activity_display_name("BuyActivity", lang),
+                "count": market_buy_count,
+                "type": "BuyActivity",
+                "highlight": False,
+            }
+        )
+    if market_sell_count > 0:
+        activity_rows.append(
+            {
+                "name": _profile_activity_display_name("SellActivity", lang),
+                "count": market_sell_count,
+                "type": "SellActivity",
+                "highlight": False,
+            }
+        )
+
+    history_range = "-"
+    active_days_count = 0
+    if ts_values:
+        ts_min = min(ts_values)
+        ts_max = max(ts_values)
+        dt_min = datetime.utcfromtimestamp(ts_min).strftime("%Y-%m-%d")
+        dt_max = datetime.utcfromtimestamp(ts_max).strftime("%Y-%m-%d")
+        history_range = dt_min if dt_min == dt_max else f"{dt_min} ~ {dt_max}"
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        active_days_count = max(1, int((max(now_ts, ts_min) - ts_min) // 86400) + 1)
+
+    release_cards = sorted(
+        [x for x in release_cards_by_token.values() if isinstance(x, dict)],
+        key=lambda x: int(_parse_int(x.get("timestamp_raw")) or 0),
+        reverse=True,
+    )
+    pack_release_counts: defaultdict[str, int] = defaultdict(int)
+    pack_latest_ts: defaultdict[str, int] = defaultdict(int)
+    for card in release_cards:
+        ts_raw = int(_parse_int(card.get("timestamp_raw")) or 0)
+        card["timestamp"] = ts_raw
+        card.pop("timestamp_raw", None)
+        contract = str(card.get("pack_contract") or "").strip().lower()
+        if contract:
+            pack_release_counts[contract] += 1
+            if ts_raw > int(pack_latest_ts.get(contract, 0)):
+                pack_latest_ts[contract] = ts_raw
+            card["pack_name"] = contract_pack_name.get(contract) or f"Contract {_short_hex(contract)}"
+        else:
+            card["pack_name"] = "Unknown Pack"
+
+    pack_options = []
+    for contract, count in pack_release_counts.items():
+        if not contract or count <= 0:
+            continue
+        pack_options.append(
+            {
+                "contract": contract,
+                "pack_name": contract_pack_name.get(contract) or f"Contract {_short_hex(contract)}",
+                "release_count": int(count),
+                "latest_ts": int(pack_latest_ts.get(contract, 0)),
+            }
+        )
+    pack_options.sort(
+        key=lambda x: (int(x.get("latest_ts") or 0), int(x.get("release_count") or 0), str(x.get("pack_name") or "")),
+        reverse=True,
+    )
+
+    pack_spent_map: dict[str, str] = {}
+    for key, value in contract_spent_total.items():
+        norm_key = str(key or "").strip().lower()
+        if not norm_key:
+            continue
+        pack_spent_map[norm_key] = _format_usdt_decimal(_to_decimal(value))
+
+    token_acquire_cost_hints: dict[str, dict[str, object]] = {}
+    for token_id, row in token_pull_cost_by_ts.items():
+        token_acquire_cost_hints[token_id] = {
+            "cost": _to_decimal(row[1]),
+            "timestamp": int(row[0]),
+            "source": "pull",
+        }
+    for token_id, row in token_buy_cost_by_ts.items():
+        prev = token_acquire_cost_hints.get(token_id)
+        ts_raw = int(row[0])
+        if prev is None or ts_raw >= int(_parse_int(prev.get("timestamp")) or 0):
+            token_acquire_cost_hints[token_id] = {
+                "cost": _to_decimal(row[1]),
+                "timestamp": ts_raw,
+                "source": "buy",
+            }
+    token_value_hints = {k: v[1] for k, v in token_latest_values.items()}
+
+    return {
+        "labels": labels,
+        "history_range": history_range,
+        "wallet_short": f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm,
+        "activity_total_count": len(usdt_rows) + len(nft_rows),
+        "opened_packs_count": len(opened_pack_ids),
+        "direct_price_count": len(effective_open_pack_txs),
+        "inferred_price_count": 0,
+        "unknown_price_count": 0,
+        "pack_spent_total": pack_spent_total,
+        "total_spent": total_spent,
+        "total_earned": total_earned,
+        "net_total": net_total,
+        "trade_volume": trade_volume,
+        "buyback_total": buyback_earned_total,
+        "market_buy_total": trade_spent_total,
+        "market_sell_total": trade_earned_total,
+        "card_withdraw_total": card_withdraw_total,
+        "active_days_count": active_days_count,
+        "contract_rows": contract_rows,
+        "activity_rows": activity_rows,
+        "release_cards": release_cards,
+        "pack_options": pack_options,
+        "pack_spent_map": pack_spent_map,
+        "token_value_hints": token_value_hints,
+        "token_acquire_cost_hints": token_acquire_cost_hints,
+    }
+
+
+def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en") -> dict:
+    if PROFILE_DATA_MODE == "chain_official":
+        try:
+            return _build_wallet_activity_history_chain(wallet_address, profile_lang=profile_lang)
+        except Exception as e:
+            print(f"⚠️ chain_official history failed for {wallet_address}: {e}; fallback legacy", file=sys.stderr)
+    return _build_wallet_activity_history_legacy(wallet_address, profile_lang=profile_lang)
 
 
 def _build_wallet_extremes_template_context(
@@ -4754,21 +5294,28 @@ def _build_wallet_flex_pack_template_context(
 
     current_cards_by_token: dict[str, dict] = {}
     user_id = str((picker_data or {}).get("user_id") or "").strip()
-    if user_id:
+    if PROFILE_DATA_MODE == "chain_official":
+        try:
+            collection = _fetch_wallet_collection_chain(wallet_address)
+        except Exception:
+            collection = []
+    elif user_id:
         try:
             collection = _fetch_user_collection(user_id)
         except Exception:
             collection = []
-        for item in collection:
-            token_id = str((item or {}).get("tokenId") or "").strip()
-            if not token_id:
-                continue
-            current_cards_by_token[token_id] = {
-                "token_id": token_id,
-                "name": str((item or {}).get("name") or "Unknown Collectible"),
-                "image": str((item or {}).get("frontImageUrl") or ""),
-                "value": _to_decimal(_parse_int((item or {}).get("fmvPriceInUSD"))) / Decimal("100"),
-            }
+    else:
+        collection = []
+    for item in collection:
+        token_id = str((item or {}).get("tokenId") or "").strip()
+        if not token_id:
+            continue
+        current_cards_by_token[token_id] = {
+            "token_id": token_id,
+            "name": str((item or {}).get("name") or "Unknown Collectible"),
+            "image": str((item or {}).get("frontImageUrl") or ""),
+            "value": _to_decimal(_parse_int((item or {}).get("fmvPriceInUSD"))) / Decimal("100"),
+        }
 
     def _resolve_card_candidate(
         card: dict,
@@ -5140,6 +5687,121 @@ def _fetch_user_sbt_badges_official(username: str | None) -> list[dict]:
     return []
 
 
+def _decode_abi_string(hex_ret: str) -> str:
+    raw = str(hex_ret or "").strip()
+    if not raw.startswith("0x"):
+        return ""
+    hex_data = raw[2:]
+    if len(hex_data) < 128:
+        return ""
+    try:
+        offset = int(hex_data[:64], 16)
+        start = offset * 2
+        if start + 64 > len(hex_data):
+            return ""
+        length = int(hex_data[start : start + 64], 16)
+        body_start = start + 64
+        body_end = body_start + (length * 2)
+        if body_end > len(hex_data):
+            return ""
+        data_hex = hex_data[body_start:body_end]
+        return bytes.fromhex(data_hex).decode("utf-8", errors="ignore").rstrip("\x00")
+    except Exception:
+        return ""
+
+
+def _rpc_eth_call(to_addr: str, data_hex: str) -> str:
+    to_norm = str(to_addr or "").strip()
+    data_norm = str(data_hex or "").strip()
+    if not to_norm or not data_norm:
+        return ""
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "eth_call",
+        "params": [{"to": to_norm, "data": data_norm}, "latest"],
+        "id": 1,
+    }
+    for attempt in range(1, PROFILE_API_MAX_RETRIES + 1):
+        try:
+            resp = _http_session().post(
+                PROFILE_BSC_RPC_URL,
+                json=payload,
+                headers={"content-type": "application/json"},
+                timeout=20,
+            )
+            status = int(resp.status_code or 0)
+            if status == 429 or status >= 500:
+                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("rpc invalid response")
+            if data.get("error"):
+                raise RuntimeError(str(data.get("error")))
+            return str(data.get("result") or "")
+        except Exception:
+            if attempt < PROFILE_API_MAX_RETRIES:
+                wait_sec = PROFILE_API_RETRY_BACKOFF_SEC * (2 ** (attempt - 1))
+                time.sleep(wait_sec)
+                continue
+            return ""
+    return ""
+
+
+def _erc1155_uri_from_chain(contract: str, token_id: str) -> str:
+    c = str(contract or "").strip()
+    tid = str(token_id or "").strip()
+    if not c.startswith("0x") or len(c) != 42 or not tid:
+        return ""
+    try:
+        tid_hex = format(int(tid), "x").rjust(64, "0")
+    except Exception:
+        return ""
+    # uri(uint256)
+    ret = _rpc_eth_call(c, "0x0e89341c" + tid_hex)
+    return _decode_abi_string(ret)
+
+
+def _fetch_sbt_metadata_map_onchain(token_ids: list[str] | tuple[str, ...]) -> dict[str, dict[str, str]]:
+    ids = [str(x or "").strip() for x in (token_ids or []) if str(x or "").strip()]
+    if not ids:
+        return {}
+    now_ts = time.time()
+    cached_data: dict[str, dict[str, str]] = {}
+    with _PROFILE_SBT_METADATA_LOCK:
+        raw = _PROFILE_SBT_METADATA_CACHE.get("data")
+        if isinstance(raw, dict):
+            cached_data = {str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)}
+        cached_ts = float(_PROFILE_SBT_METADATA_CACHE.get("ts") or 0.0)
+        if PROFILE_SBT_METADATA_CACHE_TTL_SEC > 0 and (now_ts - cached_ts) > PROFILE_SBT_METADATA_CACHE_TTL_SEC:
+            cached_data = {}
+
+    out: dict[str, dict[str, str]] = dict(cached_data)
+    for token_id in ids:
+        if token_id in out and out[token_id].get("name"):
+            continue
+        meta_url = _erc1155_uri_from_chain(ONCHAIN_SBT_CONTRACT, token_id)
+        if not meta_url:
+            continue
+        try:
+            resp = _http_get(meta_url, timeout=20)
+            resp.raise_for_status()
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                continue
+            name = str(payload.get("name") or "").strip()
+            image_url = str(payload.get("image") or payload.get("image_url") or "").strip()
+            if name or image_url:
+                out[token_id] = {"name": name, "image_url": image_url}
+        except Exception:
+            continue
+
+    with _PROFILE_SBT_METADATA_LOCK:
+        _PROFILE_SBT_METADATA_CACHE["ts"] = time.time()
+        _PROFILE_SBT_METADATA_CACHE["data"] = {str(k): dict(v) for k, v in out.items() if isinstance(v, dict)}
+    return out
+
+
 def _fetch_sbt_metadata_map() -> dict[str, dict[str, str]]:
     now_ts = time.time()
     with _PROFILE_SBT_METADATA_LOCK:
@@ -5205,7 +5867,7 @@ def _fetch_wallet_sbt_badges_onchain(wallet_address: str | None) -> list[dict]:
         return [dict(x) for x in cached[1]]
     if _ONCHAIN_ANALYZE_SBT_WALLET_FN is None:
         return []
-    cfg = _build_profile_onchain_cfg()
+    cfg = _build_profile_onchain_cfg(force=True)
     if cfg is None:
         return []
     if not ONCHAIN_SBT_CONTRACT.startswith("0x") or len(ONCHAIN_SBT_CONTRACT) != 42:
@@ -5221,7 +5883,13 @@ def _fetch_wallet_sbt_badges_onchain(wallet_address: str | None) -> list[dict]:
     if not isinstance(balances, dict):
         return []
 
-    metadata = _fetch_sbt_metadata_map()
+    metadata: dict[str, dict[str, str]]
+    if PROFILE_DATA_MODE == "chain_official":
+        metadata = _fetch_sbt_metadata_map_onchain(list(balances.keys()))
+        if not metadata:
+            metadata = _fetch_sbt_metadata_map()
+    else:
+        metadata = _fetch_sbt_metadata_map()
     out: list[dict] = []
     for token_id_raw, amount_raw in balances.items():
         token_id = str(token_id_raw or "").strip()
@@ -5277,6 +5945,39 @@ def _resolve_user_from_wallet(wallet_address: str) -> tuple[str | None, str | No
             if user_id or username:
                 return (str(user_id) if user_id is not None else None), (str(username) if username is not None else None)
         return None, None
+
+    # Fast path: ask collectible.list with address filter first.
+    # Upstream can often return this wallet's holdings directly, which avoids global pagination scan.
+    fast_limit = max(10, min(100, PROFILE_PAGE_LIMIT))
+    fast_offset = 0
+    for _ in range(PROFILE_RESOLVE_ADDRESS_MAX_PAGES):
+        fast_payload = {
+            "address": wallet_address,
+            "filter": "all",
+            "isHolding": True,
+            "limit": fast_limit,
+            "offset": fast_offset,
+            "sortBy": "mintDate",
+            "sortOrder": "desc",
+            "includeOpenCardPackRecords": True,
+        }
+        try:
+            fast_result = _trpc_collectible_list(fast_payload)
+        except Exception:
+            break
+        fast_collection = fast_result.get("collection") or []
+        found_user_id, found_username = _find_owner_in_collection(
+            fast_collection if isinstance(fast_collection, list) else []
+        )
+        if found_user_id or found_username:
+            return found_user_id, found_username
+        fast_pagination = fast_result.get("pagination") or {}
+        if not fast_pagination.get("hasMore"):
+            break
+        fast_step = _parse_int(fast_pagination.get("limit")) or fast_limit
+        if fast_step <= 0:
+            break
+        fast_offset += fast_step
 
     first_payload = {
         "limit": PROFILE_PAGE_LIMIT,
@@ -5411,6 +6112,132 @@ def _fetch_user_collection(user_id: str) -> list[dict]:
     return all_items
 
 
+def _fetch_wallet_owned_token_ids_chain(wallet_address: str) -> list[str]:
+    wallet_norm = _normalize_wallet_address(wallet_address or "") or str(wallet_address or "").strip().lower()
+    if not wallet_norm:
+        return []
+    cfg = _build_profile_onchain_cfg(force=True)
+    if cfg is None:
+        return []
+
+    try:
+        nft_rows = _bsc_account_api_fetch_all(
+            cfg,
+            action="tokennfttx",
+            extra_params={"address": wallet_norm},
+            sort="asc",
+        )
+    except Exception:
+        return []
+
+    latest_by_key: dict[str, tuple[tuple[int, int, int, int], str, str]] = {}
+    symbol_filter = str(PROFILE_CHAIN_CARD_TOKEN_SYMBOL or "").strip().lower()
+
+    for row in nft_rows:
+        if not isinstance(row, dict):
+            continue
+        token_id = str(row.get("tokenID") or row.get("tokenId") or "").strip()
+        contract = str(row.get("contractAddress") or "").strip().lower()
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        if not token_id or not contract:
+            continue
+        if not frm and not to:
+            continue
+
+        if symbol_filter:
+            sym = str(row.get("tokenSymbol") or "").strip().lower()
+            nm = str(row.get("tokenName") or "").strip().lower()
+            if sym:
+                if sym != symbol_filter:
+                    continue
+            elif nm and symbol_filter not in nm:
+                continue
+
+        ts = int(_parse_int(row.get("timeStamp")) or _parse_int(row.get("timestamp")) or 0)
+        bn = int(_parse_int(row.get("blockNumber")) or 0)
+        txi = int(_parse_int(row.get("transactionIndex")) or 0)
+        nonce = int(_parse_int(row.get("nonce")) or 0)
+        order_key = (ts, bn, txi, nonce)
+        key = f"{contract}:{token_id}"
+        prev = latest_by_key.get(key)
+        if prev is None or order_key >= prev[0]:
+            latest_by_key[key] = (order_key, to, token_id)
+
+    owned_rows: list[tuple[tuple[int, int, int, int], str]] = []
+    for order_key, owner_addr, token_id in latest_by_key.values():
+        if owner_addr == wallet_norm:
+            owned_rows.append((order_key, token_id))
+    owned_rows.sort(key=lambda x: x[0], reverse=True)
+
+    seen: set[str] = set()
+    token_ids: list[str] = []
+    for _, token_id in owned_rows:
+        if token_id in seen:
+            continue
+        seen.add(token_id)
+        token_ids.append(token_id)
+    return token_ids
+
+
+def _fetch_wallet_collection_chain(wallet_address: str) -> list[dict]:
+    token_ids = _fetch_wallet_owned_token_ids_chain(wallet_address)
+    if not token_ids:
+        return []
+
+    out_rows: list[dict] = []
+    workers = min(PROFILE_COLLECTION_FETCH_WORKERS, len(token_ids))
+
+    def _build_row(token_id: str) -> dict | None:
+        tid = str(token_id or "").strip()
+        if not tid:
+            return None
+        try:
+            collectible = _collectible_by_token_cached(tid)
+        except Exception:
+            collectible = {}
+        if not isinstance(collectible, dict):
+            collectible = {}
+
+        front_image = str(
+            collectible.get("frontImageUrl")
+            or collectible.get("imageUrl")
+            or collectible.get("collectibleImageUrl")
+            or ""
+        ).strip()
+        return {
+            "tokenId": tid,
+            "name": str(collectible.get("name") or collectible.get("collectibleName") or f"Token #{tid[-6:]}").strip(),
+            "setName": str(collectible.get("setName") or "").strip(),
+            "fmvPriceInUSD": collectible.get("fmvPriceInUSD") or 0,
+            "askPriceInUSDT": collectible.get("askPriceInUSDT"),
+            "frontImageUrl": front_image,
+            "imageUrl": str(collectible.get("imageUrl") or front_image).strip(),
+            "collectibleImageUrl": str(collectible.get("collectibleImageUrl") or front_image).strip(),
+            "ownerAddress": _normalize_wallet_address(wallet_address or "") or str(wallet_address or "").strip().lower(),
+        }
+
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futures = {pool.submit(_build_row, tid): tid for tid in token_ids}
+            for future in as_completed(futures):
+                try:
+                    row = future.result()
+                except Exception:
+                    row = None
+                if isinstance(row, dict):
+                    out_rows.append(row)
+    else:
+        for tid in token_ids:
+            row = _build_row(tid)
+            if isinstance(row, dict):
+                out_rows.append(row)
+
+    # Keep output deterministic with highest FMV first.
+    out_rows.sort(key=lambda x: (_parse_int(x.get("fmvPriceInUSD")) or 0, str(x.get("tokenId") or "")), reverse=True)
+    return out_rows
+
+
 def _build_wallet_features_html(top_items: list[dict]) -> str:
     if not top_items:
         return "<p class='text-sm text-text-muted font-medium'>No collectible data.</p>"
@@ -5439,44 +6266,26 @@ def _build_wallet_profile_picker_data(wallet_address: str) -> dict:
     wallet_short = (
         f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else (wallet_norm or "Unknown User")
     )
-    try:
-        user_id, username = _resolve_user_from_wallet(wallet_address)
-    except Exception:
-        user_id, username = None, None
-    if not username:
-        username = _username_from_rankings_wallet(wallet_norm)
-    if not user_id:
-        sbt_badges = _fetch_user_sbt_badges(username, wallet_norm)
-        owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
-        sbt_options = []
-        for b in owned_badges[:25]:
-            name = str(b.get("name") or "").strip()
-            if not name:
-                continue
-            sbt_id = str(b.get("sbt_id") or "").strip()
-            balance = _parse_int(b.get("balance")) or 0
-            value = f"id:{sbt_id}" if sbt_id else f"name:{name.lower()}"
-            sbt_options.append(
-                {
-                    "value": value[:100],
-                    "label": name[:100],
-                    "full_label": name[:160],
-                    "description": f"Balance {balance}"[:100],
-                }
-            )
-        return {
-            "username": str(username or wallet_short),
-            "user_id": None,
-            "collection_count": 0,
-            "card_options": [],
-            "owned_sbt_count": len(owned_badges),
-            "sbt_options": sbt_options,
-        }
-
-    try:
-        collection = _fetch_user_collection(user_id)
-    except Exception:
-        collection = []
+    if PROFILE_DATA_MODE == "chain_official":
+        user_id, username = None, _username_from_rankings_wallet(wallet_norm)
+        try:
+            collection = _fetch_wallet_collection_chain(wallet_norm)
+        except Exception:
+            collection = []
+    else:
+        try:
+            user_id, username = _resolve_user_from_wallet(wallet_address)
+        except Exception:
+            user_id, username = None, None
+        if not username:
+            username = _username_from_rankings_wallet(wallet_norm)
+        if user_id:
+            try:
+                collection = _fetch_user_collection(user_id)
+            except Exception:
+                collection = []
+        else:
+            collection = []
     if not collection:
         sbt_badges = _fetch_user_sbt_badges(username, wallet_norm)
         owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
@@ -5604,21 +6413,31 @@ def _build_wallet_profile_context(
         )
         live_onchain_thread.start()
 
-    try:
-        user_id, username = _resolve_user_from_wallet(wallet_address)
-    except Exception:
-        user_id, username = None, None
-    if not username:
-        username = _username_from_rankings_wallet(wallet_norm)
+    if PROFILE_DATA_MODE == "chain_official":
+        user_id, username = None, _username_from_rankings_wallet(wallet_norm)
+    else:
+        try:
+            user_id, username = _resolve_user_from_wallet(wallet_address)
+        except Exception:
+            user_id, username = None, None
+        if not username:
+            username = _username_from_rankings_wallet(wallet_norm)
+
     short_wallet = f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm
     ranking_row = _load_rankings_wallet_map().get(wallet_norm, {}) if wallet_norm else {}
-    if user_id:
+    if PROFILE_DATA_MODE == "chain_official":
         try:
-            collection = _fetch_user_collection(user_id)
+            collection = _fetch_wallet_collection_chain(wallet_norm)
         except Exception:
             collection = []
     else:
-        collection = []
+        if user_id:
+            try:
+                collection = _fetch_user_collection(user_id)
+            except Exception:
+                collection = []
+        else:
+            collection = []
     has_collection = bool(collection)
 
     parsed = []
