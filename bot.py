@@ -719,6 +719,7 @@ _PROFILE_RELEASE_CARD_TYPES = {
 _CARD_FMV_CACHE: dict[str, Decimal] = {}
 _CARD_IMAGE_CACHE: dict[str, str] = {}
 _CARD_COLLECTIBLE_CACHE: dict[str, dict] = {}
+_CARD_CHAIN_METADATA_IMAGE_CACHE: dict[str, str] = {}
 _PROFILE_SBT_BADGE_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _PROFILE_SBT_METADATA_CACHE: dict[str, object] = {"ts": 0.0, "data": {}}
 _PROFILE_SBT_METADATA_LOCK = threading.Lock()
@@ -3268,6 +3269,115 @@ def _fetch_card_image_by_token_id(token_id: str) -> str:
     return image_url
 
 
+def _normalize_chain_metadata_image_url(image_url: str) -> str:
+    url = str(image_url or "").strip()
+    if not url:
+        return ""
+    if url.startswith("ipfs://"):
+        key = url[len("ipfs://"):].lstrip("/")
+        if key:
+            return f"https://ipfs.io/ipfs/{key}"
+        return ""
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return ""
+
+
+def _decode_eth_call_string(result_hex: str) -> str:
+    raw = str(result_hex or "").strip()
+    if not raw.startswith("0x") or len(raw) <= 2:
+        return ""
+    try:
+        data = bytes.fromhex(raw[2:])
+    except Exception:
+        return ""
+    if len(data) < 64:
+        return ""
+    try:
+        offset = int.from_bytes(data[:32], "big")
+        if offset + 32 > len(data):
+            return ""
+        length = int.from_bytes(data[offset : offset + 32], "big")
+        start = offset + 32
+        end = start + length
+        if end > len(data):
+            return ""
+        return data[start:end].decode("utf-8", errors="ignore").strip()
+    except Exception:
+        return ""
+
+
+def _fetch_card_image_from_chain_metadata(token_contract: str, token_id: str) -> str:
+    contract = str(token_contract or "").strip().lower()
+    tid = str(token_id or "").strip()
+    if not contract.startswith("0x") or len(contract) != 42 or not tid:
+        return ""
+    cache_key = f"{contract}:{tid}"
+    if PROFILE_ENABLE_RUNTIME_CACHE and cache_key in _CARD_CHAIN_METADATA_IMAGE_CACHE:
+        return str(_CARD_CHAIN_METADATA_IMAGE_CACHE.get(cache_key) or "")
+
+    # tokenURI(uint256)
+    selector = "c87b56dd"
+    try:
+        token_hex = format(int(tid), "x")
+    except Exception:
+        token_hex = ""
+    if not token_hex:
+        return ""
+    calldata = "0x" + selector + token_hex.rjust(64, "0")
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [
+            {"to": contract, "data": calldata},
+            "latest",
+        ],
+    }
+
+    image_url = ""
+    try:
+        resp = requests.post(PROFILE_BSC_RPC_URL, json=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict):
+            token_uri = _decode_eth_call_string(data.get("result"))
+            if token_uri:
+                meta_url = _normalize_chain_metadata_image_url(token_uri)
+                if meta_url:
+                    meta_resp = _http_get(meta_url, timeout=15)
+                    meta_resp.raise_for_status()
+                    meta = meta_resp.json() if meta_resp is not None else {}
+                    if isinstance(meta, dict):
+                        item_info = meta.get("item_info") if isinstance(meta.get("item_info"), dict) else {}
+                        token_info = meta.get("token_info") if isinstance(meta.get("token_info"), dict) else {}
+                        image_url = _normalize_chain_metadata_image_url(
+                            str(
+                                meta.get("image")
+                                or meta.get("image_url")
+                                or meta.get("imageUrl")
+                                or meta.get("frontImageUrl")
+                                or meta.get("collectibleImageUrl")
+                                or item_info.get("image")
+                                or item_info.get("image_url")
+                                or item_info.get("imageUrl")
+                                or item_info.get("frontImageUrl")
+                                or token_info.get("image")
+                                or token_info.get("image_url")
+                                or token_info.get("imageUrl")
+                                or ""
+                            ).strip()
+                        )
+    except Exception:
+        image_url = ""
+
+    if PROFILE_ENABLE_RUNTIME_CACHE:
+        _CARD_CHAIN_METADATA_IMAGE_CACHE[cache_key] = image_url
+    return image_url
+
+
 def _fetch_user_activities(wallet_address: str) -> list[dict]:
     all_rows: list[dict] = []
     seen_cursors: set[str] = set()
@@ -4223,6 +4333,7 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
                     "image": "",
                     "timestamp_raw": ts,
                     "pack_contract": str((open_pack_txs.get(tx_hash) or {}).get("counterparty") or "").strip().lower(),
+                    "token_contract": str(row.get("contractAddress") or "").strip().lower(),
                     "checkout_id": tx_hash,
                 }
 
@@ -4591,6 +4702,7 @@ def _build_wallet_extremes_template_context(
                     "name": str(card.get("name") or current_info.get("name") or "Unknown Collectible"),
                     "image": str(current_info.get("image") or ""),
                     "release_image": str(card.get("image") or "").strip(),
+                    "token_contract": str(card.get("token_contract") or "").strip().lower(),
                 }
             )
             continue
@@ -4603,6 +4715,7 @@ def _build_wallet_extremes_template_context(
                 "image": current_image or release_image,
                 "release_image": release_image,
                 "need_api_image": bool(not current_image and (not release_image or "graded-cards-renders" not in release_image)),
+                "token_contract": str(card.get("token_contract") or "").strip().lower(),
                 "value": value,
             }
         )
@@ -4632,6 +4745,7 @@ def _build_wallet_extremes_template_context(
                             "image": image or release_image,
                             "release_image": release_image,
                             "need_api_image": bool(not image and (not release_image or "graded-cards-renders" not in release_image)),
+                            "token_contract": str(base.get("token_contract") or "").strip().lower(),
                             "value": value,
                         }
                     )
@@ -4650,6 +4764,7 @@ def _build_wallet_extremes_template_context(
                         "image": image or release_image,
                         "release_image": release_image,
                         "need_api_image": bool(not image and (not release_image or "graded-cards-renders" not in release_image)),
+                        "token_contract": str(base.get("token_contract") or "").strip().lower(),
                         "value": value,
                     }
                 )
@@ -4669,6 +4784,7 @@ def _build_wallet_extremes_template_context(
 
     def _resolve_extreme_image(cand: dict) -> str:
         token_id = str(cand.get("token_id") or "").strip()
+        token_contract = str(cand.get("token_contract") or "").strip().lower()
         image = str(cand.get("image") or "").strip()
         if (not image) or bool(cand.get("need_api_image")):
             api_image = _fetch_card_image_by_token_id(token_id) if token_id else ""
@@ -4676,6 +4792,10 @@ def _build_wallet_extremes_template_context(
                 image = api_image
             elif not image:
                 image = str(cand.get("release_image") or "").strip()
+        if not image and token_contract and token_id:
+            chain_meta_image = _fetch_card_image_from_chain_metadata(token_contract, token_id)
+            if chain_meta_image:
+                image = chain_meta_image
         return _prepare_collectible_image_for_poster(image)
 
     if has_data:
