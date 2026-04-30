@@ -1894,7 +1894,7 @@ def _looks_like_pack_image_url(url: str | None) -> bool:
 
 
 def _clamp_profile_card_count(value: int | None) -> int:
-    if value in (1, 3, 4, 5, 7, 10):
+    if value in (1, 2, 3, 4, 5, 7, 10):
         return int(value)
     return 10
 
@@ -2502,7 +2502,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "收藏數量",
             "selectable_sbt_label": "可選 SBT",
             "setup_tip": "請選模板、SBT、卡片後按「生成海報」。若不選 SBT/卡片，會用預設（依 FMV 由高到低）。",
-            "template_placeholder": "1) 選擇模板（Top 1 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10）",
+            "template_placeholder": "1) 選擇模板（Top 1 / Top 2 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10）",
             "background_placeholder": "2) 選擇背景（經典 / 超級甲賀忍蛙 / 妙蛙花 / 小智與皮卡丘）",
             "sbt_placeholder": "2) 複選 SBT（可略過）",
             "card_placeholder": "3) 複選卡片（可略過）",
@@ -2536,7 +2536,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "收藏数量",
             "selectable_sbt_label": "可选 SBT",
             "setup_tip": "请选择模板、SBT、卡片后点击“生成海报”。若不选 SBT/卡片，将使用默认（按 FMV 从高到低）。",
-            "template_placeholder": "1) 选择模板（Top 1 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10）",
+            "template_placeholder": "1) 选择模板（Top 1 / Top 2 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10）",
             "background_placeholder": "2) 选择背景（经典 / 超级甲贺忍蛙 / 妙蛙花 / 小智与皮卡丘）",
             "sbt_placeholder": "2) 多选 SBT（可跳过）",
             "card_placeholder": "3) 多选卡片（可跳过）",
@@ -2570,7 +2570,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "collection_label": "컬렉션 수",
             "selectable_sbt_label": "선택 가능 SBT",
             "setup_tip": "템플릿, SBT, 카드를 선택한 뒤 \"포스터 생성\"을 누르세요. SBT/카드를 선택하지 않으면 기본값(FMV 내림차순)을 사용합니다.",
-            "template_placeholder": "1) 템플릿 선택 (Top 1 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10)",
+            "template_placeholder": "1) 템플릿 선택 (Top 1 / Top 2 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10)",
             "background_placeholder": "2) 배경 선택 (Classic / 개굴닌자(유대변화) / 이상해꽃 / 지우와 피카츄)",
             "sbt_placeholder": "2) SBT 다중 선택 (선택 사항)",
             "card_placeholder": "3) 카드 다중 선택 (선택 사항)",
@@ -2603,7 +2603,7 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
         "collection_label": "Collection",
         "selectable_sbt_label": "Selectable SBT",
         "setup_tip": "Choose template, SBT, and cards, then click Generate Poster. If SBT/cards are not selected, defaults are used (FMV high to low).",
-        "template_placeholder": "1) Select template (Top 1 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10)",
+        "template_placeholder": "1) Select template (Top 1 / Top 2 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10)",
         "background_placeholder": "2) Select background (Classic / Ash-Greninja / Venusaur / Ash & Pikachu)",
         "sbt_placeholder": "2) Select SBT (optional)",
         "card_placeholder": "3) Select cards (optional)",
@@ -9065,6 +9065,7 @@ class ProfileTemplateSelect(discord.ui.Select):
     def __init__(self, default_count: int = 10, placeholder: str = "Template"):
         options = [
             discord.SelectOption(label="Top 1", value="1", default=(default_count == 1)),
+            discord.SelectOption(label="Top 2", value="2", default=(default_count == 2)),
             discord.SelectOption(label="Top 3", value="3", default=(default_count == 3)),
             discord.SelectOption(label="Top 4", value="4", default=(default_count == 4)),
             discord.SelectOption(label="Top 5", value="5", default=(default_count == 5)),
