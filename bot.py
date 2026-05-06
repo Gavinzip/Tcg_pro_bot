@@ -392,6 +392,9 @@ async def ranking(interaction: discord.Interaction):
             return ""
         return f" ({username[:28]})"
 
+    def _label(row: dict) -> str:
+        return f"{_addr_label(row)}{_name_suffix(row)}"
+
     def _money_text(row: dict, field: str, signed: bool = False) -> str:
         return _format_usdt_currency(_to_decimal(row.get(field)), signed=signed)
 
@@ -697,7 +700,10 @@ async def pack_rank(interaction: discord.Interaction, address: str = None):
 
     if target_row is None:
         lines.append(f"`{resolved_wallet}` ({wallet_source})")
-        lines.append("🎯 Opens `0` | Rank `-` | Level `-`")
+        lines.append("🏅 **Level:** `-`")
+        lines.append("📊 **Rank:** `-`")
+        lines.append("🎰 **Opens:** `0`")
+        lines.append("🎯 **To Lv.2 (Top50):** `-`")
     else:
         your_opens = _parse_int(target_row.get("monthly_gacha_open_count")) or 0
         your_rank = _parse_int(target_row.get("monthly_gacha_open_rank"))
@@ -705,13 +711,17 @@ async def pack_rank(interaction: discord.Interaction, address: str = None):
         your_level = _level_text_from_row(target_row)
         your_suffix = _name_suffix(target_row)
         lines.append(f"`{resolved_wallet}` ({wallet_source})")
-        lines.append(f"🎯 Opens `{_format_number(your_opens)}` | Rank `{your_rank_txt}` | {your_level}{your_suffix}")
+        lines.append(f"🏅 **Level:** `{your_level}`{your_suffix}")
+        lines.append(f"📊 **Rank:** `#{your_rank_txt}`")
+        lines.append(f"🎰 **Opens:** `{_format_number(your_opens)}`")
         if your_rank is not None and your_rank > 50 and cutoff50 is not None:
             gap = cutoff50 - your_opens
             if gap > 0:
-                lines.append(f"→ 距離 Lv.2（Top50）約還差 `+{_format_number(gap)}` 開包")
+                lines.append(f"🎯 **To Lv.2 (Top50):** `+{_format_number(gap)}` opens")
             else:
-                lines.append("→ 已達 Top50 開包門檻值，但目前仍受同分排序影響未進 Top50")
+                lines.append("🎯 **To Lv.2 (Top50):** `0` (tie-break not in Top50 yet)")
+        else:
+            lines.append("🎯 **To Lv.2 (Top50):** `0`")
 
         target_idx_row = ranked_index.get(str(resolved_wallet or "").lower())
         if target_idx_row is not None:
