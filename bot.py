@@ -383,13 +383,14 @@ async def ranking(interaction: discord.Interaction):
     wallets = wallets_raw if isinstance(wallets_raw, list) else []
     top_map = payload.get("top") if isinstance(payload.get("top"), dict) else {}
 
-    def _label(row: dict) -> str:
-        addr = _short_hex(str(row.get("address") or ""))
+    def _addr_label(row: dict) -> str:
+        return _short_hex(str(row.get("address") or "")) or "unknown"
+
+    def _name_suffix(row: dict) -> str:
         username = str(row.get("username") or "").strip()
         if not username:
-            return addr or "unknown"
-        username = username[:28]
-        return f"{username} · {addr}" if addr else username
+            return ""
+        return f" ({username[:28]})"
 
     def _money_text(row: dict, field: str, signed: bool = False) -> str:
         return _format_usdt_currency(_to_decimal(row.get(field)), signed=signed)
@@ -528,6 +529,247 @@ async def ranking(interaction: discord.Interaction):
         pass
     for block in normalized_blocks:
         await thread.send(block)
+
+
+@tree.command(name="pack_rank", description="查看本月開包排行（鏈上 open-pack tx）與等級")
+@app_commands.describe(address="錢包地址（可留空使用已儲存的預設地址）")
+async def pack_rank(interaction: discord.Interaction, address: str = None):
+    get_user_default_wallet = _COMMAND_HANDLER_DEPS["get_user_default_wallet"]
+    normalize_wallet_address = _COMMAND_HANDLER_DEPS["normalize_wallet_address"]
+
+    resolved_wallet: str | None = None
+    wallet_source = ""
+    raw_input = str(address or "").strip()
+    if raw_input:
+        resolved_wallet = normalize_wallet_address(raw_input)
+        wallet_source = "input"
+        if not resolved_wallet:
+            await interaction.response.send_message(
+                "❌ 錢包地址格式錯誤，請輸入 `0x` 開頭且長度 42 的地址。",
+                ephemeral=True,
+            )
+            return
+    else:
+        default_wallet = get_user_default_wallet(str(interaction.user.id))
+        if not default_wallet:
+            await interaction.response.send_message(
+                "❌ 請輸入錢包地址，或先使用 `/settings wallet:0x...` 設定預設地址。",
+                ephemeral=True,
+            )
+            return
+        resolved_wallet = normalize_wallet_address(default_wallet)
+        wallet_source = "settings"
+        if not resolved_wallet:
+            await interaction.response.send_message(
+                "❌ 你的 `/settings` 預設地址格式錯誤，請重新設定。",
+                ephemeral=True,
+            )
+            return
+
+    latest_path = os.path.join(_rank_sync_data_dir(), "pack_rank_latest.json")
+    if not os.path.exists(latest_path):
+        await interaction.response.send_message(
+            f"⚠️ 尚無 pack rank 資料：`{latest_path}`\n請先等待 pack rank 同步完成。",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        with open(latest_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            raise RuntimeError("latest.json 格式錯誤")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ 讀取排名資料失敗：{e}", ephemeral=True)
+        return
+
+    wallets_raw = payload.get("wallets")
+    wallets = wallets_raw if isinstance(wallets_raw, list) else []
+    top_map = payload.get("top") if isinstance(payload.get("top"), dict) else {}
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    wallet_map: dict[str, dict] = {}
+    for row in wallets:
+        if not isinstance(row, dict):
+            continue
+        addr = _normalize_wallet_address(str(row.get("address") or ""))
+        if addr:
+            wallet_map[addr] = row
+
+    def _label(row: dict) -> str:
+        addr = _short_hex(str(row.get("address") or ""))
+        username = str(row.get("username") or "").strip()
+        if not username:
+            return addr or "unknown"
+        username = username[:28]
+        return f"{username} · {addr}" if addr else username
+
+    def _rank_text(row: dict, field: str, fallback_idx: int | None = None) -> str:
+        val = _parse_int(row.get(field))
+        if val is not None and val > 0:
+            return str(val)
+        return str(fallback_idx) if fallback_idx is not None else "-"
+
+    def _level_by_rank(rank_value: int | None) -> str:
+        rv = int(rank_value or 0)
+        if rv <= 0:
+            return "-"
+        if rv <= 10:
+            return "Lv.3 @Gacha Master"
+        if rv <= 50:
+            return "Lv.2 @Gacha Hunter"
+        if rv <= 200:
+            return "Lv.1 @Gacha Seeker"
+        return "-"
+
+    def _level_text_from_row(row: dict) -> str:
+        rank_val = _parse_int(row.get("monthly_gacha_open_rank"))
+        level = str(row.get("monthly_gacha_level") or "").strip().lower()
+        if level == "master":
+            return "Lv.3 @Gacha Master"
+        if level == "hunter":
+            return "Lv.2 @Gacha Hunter"
+        if level == "seeker":
+            return "Lv.1 @Gacha Seeker"
+        return _level_by_rank(rank_val)
+
+    def _rank_value(row: dict, fallback_idx: int) -> int:
+        val = _parse_int(row.get("monthly_gacha_open_rank"))
+        return val if (val is not None and val > 0) else fallback_idx
+
+    top_rows_raw = top_map.get("monthly_gacha") if isinstance(top_map, dict) else None
+    if isinstance(top_rows_raw, list) and top_rows_raw:
+        ranked_rows = [x for x in top_rows_raw if isinstance(x, dict)]
+    else:
+        ranked_rows = [x for x in wallets if isinstance(x, dict)]
+        ranked_rows.sort(
+            key=lambda x: (_parse_int(x.get("monthly_gacha_open_count")) or 0, str(x.get("address") or "").lower()),
+            reverse=True,
+        )
+
+    # Keep only wallets with at least 1 monthly open-pack tx.
+    ranked_rows = [x for x in ranked_rows if (_parse_int(x.get("monthly_gacha_open_count")) or 0) > 0]
+    top10 = ranked_rows[:10]
+    target_row = wallet_map.get(str(resolved_wallet or "").lower())
+    ranked_index: dict[str, tuple[int, dict]] = {}
+    for idx, row in enumerate(ranked_rows, start=1):
+        addr = _normalize_wallet_address(str(row.get("address") or ""))
+        if addr:
+            ranked_index[addr] = (idx, row)
+
+    def _cutoff_opens(max_rank: int) -> int | None:
+        vals: list[int] = []
+        for idx, row in enumerate(ranked_rows, start=1):
+            rank_val = _rank_value(row, idx)
+            if rank_val > max_rank:
+                continue
+            vals.append(_parse_int(row.get("monthly_gacha_open_count")) or 0)
+        return min(vals) if vals else None
+
+    win_start = str(meta.get("monthly_gacha_window_start") or "-")
+    win_end = str(meta.get("monthly_gacha_window_end") or str(meta.get("updated_at") or "-"))
+    updated_at = str(meta.get("updated_at") or "-")
+    cutoff10 = _cutoff_opens(10)
+    cutoff50 = _cutoff_opens(50)
+    cutoff200 = _cutoff_opens(200)
+
+    lines: list[str] = [
+        "🎰 **Pack Rank (Monthly)**",
+        f"• Window: `{win_start}` ~ `{win_end}`",
+        f"• Last Sync: `{updated_at}`",
+        (
+            "• 目前門檻（開包數）: "
+            f"Top10 `>= {(_format_number(cutoff10) if cutoff10 is not None else '-')}` | "
+            f"Top50 `>= {(_format_number(cutoff50) if cutoff50 is not None else '-')}` | "
+            f"Top200 `>= {(_format_number(cutoff200) if cutoff200 is not None else '-')}`"
+        ),
+        "",
+        "**Your Status**",
+    ]
+
+    if target_row is None:
+        lines.append(f"`{resolved_wallet}` ({wallet_source}) | Opens `0` | Rank `-` | Level `-`")
+    else:
+        your_opens = _parse_int(target_row.get("monthly_gacha_open_count")) or 0
+        your_rank = _parse_int(target_row.get("monthly_gacha_open_rank"))
+        your_rank_txt = str(your_rank) if (your_rank is not None and your_rank > 0) else "-"
+        your_level = _level_text_from_row(target_row)
+        your_suffix = _name_suffix(target_row)
+        lines.append(
+            f"`{resolved_wallet}` ({wallet_source}) | Opens `{_format_number(your_opens)}` | Rank `{your_rank_txt}` | {your_level}{your_suffix}"
+        )
+        if your_rank is not None and your_rank > 50 and cutoff50 is not None:
+            gap = cutoff50 - your_opens
+            if gap > 0:
+                lines.append(f"→ 距離 Lv.2（Top50）約還差 `+{_format_number(gap)}` 開包")
+            else:
+                lines.append("→ 已達 Top50 開包門檻值，但目前仍受同分排序影響未進 Top50")
+
+        target_idx_row = ranked_index.get(str(resolved_wallet or "").lower())
+        if target_idx_row is not None:
+            pos = target_idx_row[0] - 1
+            left = max(0, pos - 5)
+            right = min(len(ranked_rows), pos + 6)
+            lines.extend(["", "**Around You (±5)**"])
+            for i in range(left, right):
+                row = ranked_rows[i]
+                opens = _parse_int(row.get("monthly_gacha_open_count")) or 0
+                rank_txt = str(_rank_value(row, i + 1))
+                addr = _normalize_wallet_address(str(row.get("address") or ""))
+                marker = "👉" if addr == str(resolved_wallet or "").lower() else "　"
+                name_suffix = _name_suffix(row)
+                lines.append(
+                    f"{marker} `{rank_txt}` {_addr_label(row)} | Opens `{_format_number(opens)}` | {_level_text_from_row(row)}{name_suffix}"
+                )
+
+    lines.extend(["", "**Top 10**"])
+    if not top10:
+        lines.append("無資料（本月尚無鏈上開包紀錄）")
+    else:
+        for idx, row in enumerate(top10, start=1):
+            opens = _parse_int(row.get("monthly_gacha_open_count")) or 0
+            name_suffix = _name_suffix(row)
+            lines.append(
+                f"{idx}. `{_rank_text(row, 'monthly_gacha_open_rank', idx)}` {_addr_label(row)} | Opens `{_format_number(opens)}` | {_level_text_from_row(row)}{name_suffix}"
+            )
+
+    lines.append("")
+    lines.append(f"Last Sync: `{updated_at}`")
+    content = "\n".join(lines)
+
+    if isinstance(interaction.channel, discord.Thread):
+        await interaction.response.send_message(content, ephemeral=False)
+        return
+
+    try:
+        await interaction.response.send_message("🎰 正在建立 pack_rank 討論串...", ephemeral=False)
+        starter = await interaction.original_response()
+    except discord.NotFound:
+        channel = interaction.channel
+        if channel is None:
+            print("❌ /pack_rank 互動已失效且找不到可用頻道。", file=sys.stderr)
+            return
+        starter = await channel.send("🎰 正在建立 pack_rank 討論串...")
+
+    thread_name = f"pack-rank-{datetime.now().strftime('%m%d-%H%M')}"
+    try:
+        thread = await starter.create_thread(name=thread_name, auto_archive_duration=60)
+    except Exception as e:
+        print(f"❌ /pack_rank 建立討論串失敗: {e}", file=sys.stderr)
+        await starter.reply(f"❌ 建立討論串失敗：{e}")
+        return
+
+    try:
+        await thread.add_user(interaction.user)
+    except Exception:
+        pass
+
+    if len(content) <= 1900:
+        await thread.send(content)
+    else:
+        start = 0
+        while start < len(content):
+            await thread.send(content[start : start + 1800])
+            start += 1800
 
 
 @tree.command(name="bot_usage", description="查看機器人使用次數（總次數 + 各指令）")

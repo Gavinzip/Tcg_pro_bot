@@ -19,6 +19,7 @@ import html as html_lib
 import time
 import mimetypes
 import hashlib
+import subprocess
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time as dt_time, timezone, timedelta
@@ -191,13 +192,22 @@ RANK_SYNC_ENABLE = _env_true("RANK_SYNC_ENABLE", True)
 RANK_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "update_rankings.py")
 RANK_SYNC_STARTUP_DONE = False
 RANK_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
+RANK_SYNC_SCRIPT_LOCK: asyncio.Lock | None = None
 RANK_SYNC_TZ = str(os.getenv("RANK_SYNC_TZ", "Asia/Taipei")).strip() or "Asia/Taipei"
 RANK_SYNC_COMPARE_ON_STARTUP = _env_true("RANK_SYNC_COMPARE_ON_STARTUP", False)
 RANK_SYNC_HOUR = max(0, min(23, int(os.getenv("RANK_SYNC_HOUR", "6"))))
 RANK_SYNC_MINUTE = max(0, min(59, int(os.getenv("RANK_SYNC_MINUTE", "0"))))
+RANK_SYNC_INTERVAL_MINUTES = max(1, int(os.getenv("RANK_SYNC_INTERVAL_MINUTES", "10")))
 RANK_SYNC_WEEKLY_FULL_ENABLE = _env_true("RANK_SYNC_WEEKLY_FULL_ENABLE", True)
 RANK_SYNC_WEEKLY_FULL_WEEKDAY = max(0, min(6, int(os.getenv("RANK_SYNC_WEEKLY_FULL_WEEKDAY", "6"))))
 RANK_SYNC_RUN_TIME = dt_time(hour=RANK_SYNC_HOUR, minute=RANK_SYNC_MINUTE, tzinfo=_safe_tzinfo(RANK_SYNC_TZ))
+
+PACK_RANK_SYNC_ENABLE = _env_true("PACK_RANK_SYNC_ENABLE", True)
+PACK_RANK_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "update_pack_rank.py")
+PACK_RANK_SYNC_STARTUP_DONE = False
+PACK_RANK_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
+PACK_RANK_SYNC_SCRIPT_LOCK: asyncio.Lock | None = None
+PACK_RANK_SYNC_INTERVAL_MINUTES = max(1, int(os.getenv("PACK_RANK_SYNC_INTERVAL_MINUTES", "10")))
 
 
 def _nft_sync_data_dir() -> str:
@@ -219,6 +229,10 @@ def _rank_sync_data_dir() -> str:
 
 def _rank_sync_status_path() -> str:
     return os.path.join(_rank_sync_data_dir(), "state", "ranking_status.json")
+
+
+def _pack_rank_sync_status_path() -> str:
+    return os.path.join(_rank_sync_data_dir(), "state", "pack_rank_status.json")
 
 
 _USER_SETTINGS_CACHE: dict[str, object] = {
@@ -682,8 +696,18 @@ if PROFILE_REALTIME_METRICS_SOURCE not in ("onchain", "ranking", "official"):
 PROFILE_DATA_MODE = str(os.getenv("PROFILE_DATA_MODE", "chain_official")).strip().lower() or "chain_official"
 if PROFILE_DATA_MODE not in ("legacy", "chain_official"):
     PROFILE_DATA_MODE = "legacy"
+PROFILE_CHAIN_TOKEN_PRICE_SOURCE = str(os.getenv("PROFILE_CHAIN_TOKEN_PRICE_SOURCE", "api")).strip().lower() or "api"
+if PROFILE_CHAIN_TOKEN_PRICE_SOURCE not in ("cli", "api"):
+    PROFILE_CHAIN_TOKEN_PRICE_SOURCE = "api"
+PROFILE_CHAIN_USE_TOKEN_VALUE_HINTS = _env_true("PROFILE_CHAIN_USE_TOKEN_VALUE_HINTS", False)
+try:
+    PROFILE_RENAISS_CLI_TIMEOUT_SEC = max(3.0, float(str(os.getenv("PROFILE_RENAISS_CLI_TIMEOUT_SEC", "18")).strip()))
+except Exception:
+    PROFILE_RENAISS_CLI_TIMEOUT_SEC = 18.0
+PROFILE_RENAISS_CLI_MAX_RETRIES = max(1, int(os.getenv("PROFILE_RENAISS_CLI_MAX_RETRIES", "2")))
+PROFILE_RENAISS_CLI_BIN = str(os.getenv("PROFILE_RENAISS_CLI_BIN", "npx")).strip() or "npx"
+PROFILE_RENAISS_CLI_PACKAGE = str(os.getenv("PROFILE_RENAISS_CLI_PACKAGE", "renaiss")).strip() or "renaiss"
 DEFAULT_ONCHAIN_PACK_CONTRACTS = (
-    "0xaab5f5fa75437a6e9e7004c12c9c56cda4b4885a",
     "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
     "0xb2891022648c5fad3721c42c05d8d283d4d53080",
 )
@@ -729,6 +753,7 @@ _PROFILE_FMV_DISK_LOCK = threading.Lock()
 _PROFILE_SNKR_CACHE_LOCK = threading.Lock()
 _CARD_SNKR_CACHE: dict[str, dict] = {}
 _CARD_PC_CACHE: dict[str, dict] = {}
+_RENAISS_CLI_UNAVAILABLE_REASON: str | None = None
 PROFILE_PREPARED_CARD_CACHE_DIR = os.path.join(BASE_DIR, "templates", "profile", "cache_cards")
 PACK_PRICE_MAP_PATH = (
     str(os.getenv("PACK_PRICE_MAP_PATH", os.path.join(BASE_DIR, "data", "pack_price_map.json"))).strip()
@@ -882,6 +907,21 @@ def _parse_address_csv(raw: str | None, *, default_values: tuple[str, ...] = ())
     return tuple(values)
 
 
+def _merge_address_tuples(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for addr in group:
+            a = str(addr or "").strip().lower()
+            if not a.startswith("0x") or len(a) != 42:
+                continue
+            if a in seen:
+                continue
+            seen.add(a)
+            out.append(a)
+    return tuple(out)
+
+
 def _profile_withdraw_target_set() -> set[str]:
     out: set[str] = set()
     for addr in (
@@ -911,9 +951,22 @@ def _build_profile_onchain_cfg(*, force: bool = False):
     usdt_contract = str(
         os.getenv("ONCHAIN_USDT_CONTRACT", "0x55d398326f99059ff775485246999027b3197955")
     ).strip().lower()
-    pack_contracts = _parse_address_csv(
-        os.getenv("ONCHAIN_PACK_CONTRACTS"),
+    pack_contracts_default = _parse_address_csv(
+        None,
         default_values=DEFAULT_ONCHAIN_PACK_CONTRACTS,
+    )
+    pack_contracts_base = _parse_address_csv(
+        os.getenv("ONCHAIN_PACK_CONTRACTS"),
+        default_values=(),
+    )
+    pack_contracts_extra = _parse_address_csv(
+        os.getenv("ONCHAIN_PACK_CONTRACTS_EXTRA"),
+        default_values=(),
+    )
+    pack_contracts = _merge_address_tuples(
+        pack_contracts_default,
+        pack_contracts_base,
+        pack_contracts_extra,
     )
     marketplace_contract = str(
         os.getenv("ONCHAIN_MARKETPLACE_CONTRACT", "0xae3e7268ef5a062946216a44f58a8f685ffd11d0")
@@ -3027,6 +3080,124 @@ def _extract_card_field_value(text: str, field: str) -> Decimal:
     return Decimal("0")
 
 
+def _profile_chain_prefers_cli_token_price() -> bool:
+    return PROFILE_DATA_MODE == "chain_official" and PROFILE_CHAIN_TOKEN_PRICE_SOURCE == "cli"
+
+
+def _parse_json_object_from_text(text: str) -> dict:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    try:
+        row = json.loads(raw)
+        return row if isinstance(row, dict) else {}
+    except Exception:
+        pass
+
+    # Tolerate banner/noise around JSON output.
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end < start:
+        return {}
+    try:
+        row = json.loads(raw[start : end + 1])
+        return row if isinstance(row, dict) else {}
+    except Exception:
+        return {}
+
+
+def _run_renaiss_cli_card_price(token_id: str) -> dict:
+    global _RENAISS_CLI_UNAVAILABLE_REASON
+    if _RENAISS_CLI_UNAVAILABLE_REASON:
+        return {}
+
+    tid = str(token_id or "").strip()
+    if not tid:
+        return {}
+
+    cli_bin = str(PROFILE_RENAISS_CLI_BIN or "npx").strip() or "npx"
+    cli_base = os.path.basename(cli_bin).lower()
+    if cli_base == "npx":
+        cmd = [cli_bin, "--yes", PROFILE_RENAISS_CLI_PACKAGE, "card", tid, "--price", "--json"]
+    else:
+        cmd = [cli_bin, "card", tid, "--price", "--json"]
+
+    last_err: Exception | None = None
+    for attempt in range(1, PROFILE_RENAISS_CLI_MAX_RETRIES + 1):
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=BASE_DIR,
+                text=True,
+                capture_output=True,
+                timeout=PROFILE_RENAISS_CLI_TIMEOUT_SEC,
+                check=False,
+            )
+            stdout = str(proc.stdout or "").strip()
+            stderr = str(proc.stderr or "").strip()
+            merged = "\n".join(x for x in (stdout, stderr) if x).strip()
+            if proc.returncode != 0:
+                if "card not found" in merged.lower():
+                    return {}
+                last_err = RuntimeError(f"renaiss cli rc={proc.returncode}: {merged[:240]}")
+                if attempt < PROFILE_RENAISS_CLI_MAX_RETRIES:
+                    time.sleep(0.2 * attempt)
+                    continue
+                return {}
+            payload = _parse_json_object_from_text(stdout or merged)
+            if payload:
+                return payload
+            last_err = RuntimeError("renaiss cli empty/non-json output")
+            if attempt < PROFILE_RENAISS_CLI_MAX_RETRIES:
+                time.sleep(0.2 * attempt)
+                continue
+            return {}
+        except FileNotFoundError as e:
+            _RENAISS_CLI_UNAVAILABLE_REASON = str(e)
+            print(f"⚠️ renaiss CLI unavailable: {_RENAISS_CLI_UNAVAILABLE_REASON}", file=sys.stderr)
+            return {}
+        except Exception as e:
+            last_err = e
+            if attempt < PROFILE_RENAISS_CLI_MAX_RETRIES:
+                time.sleep(0.2 * attempt)
+                continue
+            return {}
+
+    if last_err is not None:
+        return {}
+    return {}
+
+
+def _extract_card_price_from_renaiss_payload(payload: dict) -> Decimal:
+    if not isinstance(payload, dict):
+        return Decimal("0")
+    collectible = payload.get("collectible") if isinstance(payload.get("collectible"), dict) else {}
+    pricing = payload.get("pricing") if isinstance(payload.get("pricing"), dict) else {}
+
+    def _pricing_value(key: str) -> Decimal:
+        row = pricing.get(key)
+        if not isinstance(row, dict):
+            return Decimal("0")
+        return _wei_to_usdt(row.get("value"))
+
+    for candidate in (
+        _card_price_to_usd((collectible or {}).get("fmvPriceInUSD")),
+        _card_price_to_usd((collectible or {}).get("buybackBaseValueInUSD")),
+        _wei_to_usdt((collectible or {}).get("askPriceInUSDT")),
+        _pricing_value("price"),
+        _pricing_value("last_sale"),
+        _pricing_value("top_offer"),
+    ):
+        if candidate > 0:
+            return candidate
+    return Decimal("0")
+
+
+def _fetch_card_fmv_by_token_id_cli(token_id: str) -> Decimal:
+    payload = _run_renaiss_cli_card_price(token_id)
+    return _extract_card_price_from_renaiss_payload(payload)
+
+
 def _trpc_collectible_by_token(token_id: str) -> dict:
     token = str(token_id or "").strip()
     if not token:
@@ -3209,7 +3380,9 @@ def _fetch_card_fmv_by_token_id(token_id: str, allow_trade_fallback: bool = True
     tid = str(token_id or "").strip()
     if not tid:
         return Decimal("0")
-    cache_key = tid if allow_trade_fallback else f"{tid}|no_trade"
+    source_tag = "cli" if _profile_chain_prefers_cli_token_price() else "api"
+    cache_key_base = f"{source_tag}:{tid}"
+    cache_key = cache_key_base if allow_trade_fallback else f"{cache_key_base}|no_trade"
     if PROFILE_ENABLE_RUNTIME_CACHE and cache_key in _CARD_FMV_CACHE:
         return _CARD_FMV_CACHE[cache_key]
     cached_disk_value = _load_fmv_from_disk_cache(cache_key)
@@ -3219,21 +3392,26 @@ def _fetch_card_fmv_by_token_id(token_id: str, allow_trade_fallback: bool = True
         return cached_disk_value
 
     value = Decimal("0")
+    if _profile_chain_prefers_cli_token_price():
+        value = _fetch_card_fmv_by_token_id_cli(tid)
+
     try:
-        collectible = _collectible_by_token_cached(tid)
-        fmv_raw = _to_decimal(collectible.get("fmvPriceInUSD"))
-        buyback_raw = _to_decimal(collectible.get("buybackBaseValueInUSD"))
-        ask_raw = _to_decimal(collectible.get("askPriceInUSDT"))
-        for candidate in (
-            _card_price_to_usd(fmv_raw),
-            _card_price_to_usd(buyback_raw),
-            _card_price_to_usd(ask_raw),
-        ):
-            if candidate > 0:
-                value = candidate
-                break
+        if value <= 0:
+            collectible = _collectible_by_token_cached(tid)
+            fmv_raw = _to_decimal(collectible.get("fmvPriceInUSD"))
+            buyback_raw = _to_decimal(collectible.get("buybackBaseValueInUSD"))
+            ask_raw = _to_decimal(collectible.get("askPriceInUSDT"))
+            for candidate in (
+                _card_price_to_usd(fmv_raw),
+                _card_price_to_usd(buyback_raw),
+                _wei_to_usdt(ask_raw),
+            ):
+                if candidate > 0:
+                    value = candidate
+                    break
     except Exception:
-        value = Decimal("0")
+        if value <= 0:
+            value = Decimal("0")
 
     # Burned/withdrawn cards may no longer be queryable by collectible token API.
     # Fallback to the latest token-level trade/buyback amount as an estimated card value.
@@ -4245,11 +4423,35 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         extra_params={"address": wallet_norm, "contractaddress": usdt_contract},
         sort="asc",
     )
-    nft_rows = _bsc_account_api_fetch_all(
+    nft_rows_721 = _bsc_account_api_fetch_all(
         cfg,
         action="tokennfttx",
         extra_params={"address": wallet_norm},
         sort="asc",
+    )
+    nft_rows_1155 = _bsc_account_api_fetch_all(
+        cfg,
+        action="token1155tx",
+        extra_params={"address": wallet_norm},
+        sort="asc",
+    )
+    nft_rows: list[dict] = []
+    nft_seen: set[tuple[str, str, str, str, str]] = set()
+    for row in list(nft_rows_721 or []) + list(nft_rows_1155 or []):
+        if not isinstance(row, dict):
+            continue
+        tx_hash = str(row.get("hash") or "").strip().lower()
+        token_id = str(row.get("tokenID") or row.get("tokenId") or "").strip()
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        contract_addr = str(row.get("contractAddress") or "").strip().lower()
+        dedupe_key = (tx_hash, token_id, frm, to, contract_addr)
+        if dedupe_key in nft_seen:
+            continue
+        nft_seen.add(dedupe_key)
+        nft_rows.append(row)
+    nft_rows.sort(
+        key=lambda r: int(_parse_int((r or {}).get("timeStamp")) or _parse_int((r or {}).get("timestamp")) or 0)
     )
 
     ts_values: list[int] = []
@@ -4321,7 +4523,7 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         if not token_id:
             continue
 
-        if to == wallet_norm and tx_hash in open_pack_txs and frm == "0x0000000000000000000000000000000000000000":
+        if to == wallet_norm and tx_hash in open_pack_txs:
             open_pack_tokens_by_tx[tx_hash].add(token_id)
             current = release_cards_by_token.get(token_id) or {}
             current_ts = int(_parse_int(current.get("timestamp_raw")) or 0)
@@ -4423,12 +4625,14 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
 
     card_withdraw_total = Decimal("0")
     unresolved_withdraw_tokens: list[str] = []
+    use_hint_for_withdraw = bool(PROFILE_CHAIN_USE_TOKEN_VALUE_HINTS)
     for token_id in withdraw_token_ids:
-        hinted = _to_decimal((token_latest_values.get(token_id) or (0, Decimal("0")))[1])
-        if hinted > 0:
-            card_withdraw_total += hinted
-        else:
-            unresolved_withdraw_tokens.append(token_id)
+        if use_hint_for_withdraw:
+            hinted = _to_decimal((token_latest_values.get(token_id) or (0, Decimal("0")))[1])
+            if hinted > 0:
+                card_withdraw_total += hinted
+                continue
+        unresolved_withdraw_tokens.append(token_id)
     if unresolved_withdraw_tokens:
         workers = min(PROFILE_WITHDRAW_VALUE_WORKERS, len(unresolved_withdraw_tokens))
         if workers > 1:
@@ -4592,7 +4796,7 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
                 "timestamp": ts_raw,
                 "source": "buy",
             }
-    token_value_hints = {k: v[1] for k, v in token_latest_values.items()}
+    token_value_hints = {k: v[1] for k, v in token_latest_values.items()} if PROFILE_CHAIN_USE_TOKEN_VALUE_HINTS else {}
 
     return {
         "labels": labels,
@@ -8748,11 +8952,17 @@ async def _run_ranking_sync_script(
     push_only: bool = False,
     market_only: bool = False,
 ) -> bool:
+    global RANK_SYNC_SCRIPT_LOCK
     if not RANK_SYNC_ENABLE:
         return True
     if not os.path.exists(RANK_SYNC_SCRIPT_PATH):
         print(f"⚠️ Ranking sync script not found: {RANK_SYNC_SCRIPT_PATH}")
         return False
+    if RANK_SYNC_SCRIPT_LOCK is None:
+        RANK_SYNC_SCRIPT_LOCK = asyncio.Lock()
+    if RANK_SYNC_SCRIPT_LOCK.locked():
+        print(f"⏭️ Ranking sync skipped trigger={trigger} reason=already_running")
+        return True
 
     rank_data_dir = _rank_sync_data_dir()
     cmd = [
@@ -8772,30 +8982,79 @@ async def _run_ranking_sync_script(
     if market_only:
         cmd.append("--market-only")
 
-    print(
-        "🕒 Ranking sync start "
-        f"trigger={trigger} bootstrap_only={1 if bootstrap_only else 0} "
-        f"full_rebuild={1 if full_rebuild else 0} push_only={1 if push_only else 0} market_only={1 if market_only else 0} "
-        f"data_dir={rank_data_dir}"
-    )
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=BASE_DIR,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    out_b, err_b = await proc.communicate()
-    out = (out_b or b"").decode("utf-8", errors="replace").strip()
-    err = (err_b or b"").decode("utf-8", errors="replace").strip()
-    if out:
-        print(out)
-    if err:
-        print(err, file=sys.stderr)
-    if proc.returncode != 0:
-        print(f"❌ Ranking sync failed trigger={trigger} rc={proc.returncode}")
+    async with RANK_SYNC_SCRIPT_LOCK:
+        print(
+            "🕒 Ranking sync start "
+            f"trigger={trigger} bootstrap_only={1 if bootstrap_only else 0} "
+            f"full_rebuild={1 if full_rebuild else 0} push_only={1 if push_only else 0} market_only={1 if market_only else 0} "
+            f"data_dir={rank_data_dir}"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=BASE_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out_b, err_b = await proc.communicate()
+        out = (out_b or b"").decode("utf-8", errors="replace").strip()
+        err = (err_b or b"").decode("utf-8", errors="replace").strip()
+        if out:
+            print(out)
+        if err:
+            print(err, file=sys.stderr)
+        if proc.returncode != 0:
+            print(f"❌ Ranking sync failed trigger={trigger} rc={proc.returncode}")
+            return False
+        print(f"✅ Ranking sync done trigger={trigger}")
+        return True
+
+
+async def _run_pack_rank_sync_script(trigger: str) -> bool:
+    global PACK_RANK_SYNC_SCRIPT_LOCK
+    if not PACK_RANK_SYNC_ENABLE:
+        return True
+    if not os.path.exists(PACK_RANK_SYNC_SCRIPT_PATH):
+        print(f"⚠️ Pack rank sync script not found: {PACK_RANK_SYNC_SCRIPT_PATH}")
         return False
-    print(f"✅ Ranking sync done trigger={trigger}")
-    return True
+    if PACK_RANK_SYNC_SCRIPT_LOCK is None:
+        PACK_RANK_SYNC_SCRIPT_LOCK = asyncio.Lock()
+    if PACK_RANK_SYNC_SCRIPT_LOCK.locked():
+        print(f"⏭️ Pack rank sync skipped trigger={trigger} reason=already_running")
+        return True
+
+    rank_data_dir = _rank_sync_data_dir()
+    cmd = [
+        sys.executable,
+        PACK_RANK_SYNC_SCRIPT_PATH,
+        "--trigger",
+        trigger,
+        "--data-dir",
+        rank_data_dir,
+    ]
+
+    async with PACK_RANK_SYNC_SCRIPT_LOCK:
+        print(
+            "🕒 Pack rank sync start "
+            f"trigger={trigger} data_dir={rank_data_dir}"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=BASE_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out_b, err_b = await proc.communicate()
+        out = (out_b or b"").decode("utf-8", errors="replace").strip()
+        err = (err_b or b"").decode("utf-8", errors="replace").strip()
+        if out:
+            print(out)
+        if err:
+            print(err, file=sys.stderr)
+        if proc.returncode != 0:
+            print(f"❌ Pack rank sync failed trigger={trigger} rc={proc.returncode}")
+            return False
+        print(f"✅ Pack rank sync done trigger={trigger}")
+        return True
 
 
 def _rank_sync_should_weekly_full_rebuild_today() -> bool:
@@ -8848,6 +9107,30 @@ async def _before_ranking_daily_sync_job():
     await client.wait_until_ready()
 
 
+@tasks.loop(minutes=RANK_SYNC_INTERVAL_MINUTES)
+async def ranking_interval_sync_job():
+    await _run_ranking_sync_script(
+        f"interval_{RANK_SYNC_INTERVAL_MINUTES}m",
+        bootstrap_only=False,
+        full_rebuild=False,
+    )
+
+
+@ranking_interval_sync_job.before_loop
+async def _before_ranking_interval_sync_job():
+    await client.wait_until_ready()
+
+
+@tasks.loop(minutes=PACK_RANK_SYNC_INTERVAL_MINUTES)
+async def pack_rank_interval_sync_job():
+    await _run_pack_rank_sync_script(f"interval_{PACK_RANK_SYNC_INTERVAL_MINUTES}m")
+
+
+@pack_rank_interval_sync_job.before_loop
+async def _before_pack_rank_interval_sync_job():
+    await client.wait_until_ready()
+
+
 @tasks.loop(minutes=SUBPACK_MONITOR_INTERVAL_MINUTES)
 async def subpack_odds_monitor_job():
     await _subpack_monitor_poll_once("interval")
@@ -8871,6 +9154,7 @@ async def _before_legendary_alert_monitor_job():
 @client.event
 async def on_ready():
     global NFT_SYNC_STARTUP_DONE, NFT_SYNC_STARTUP_LOCK, RANK_SYNC_STARTUP_DONE, RANK_SYNC_STARTUP_LOCK
+    global PACK_RANK_SYNC_STARTUP_DONE, PACK_RANK_SYNC_STARTUP_LOCK
     # Attempt to sync global commands
     try:
         await tree.sync()
@@ -8908,8 +9192,20 @@ async def on_ready():
                         f"bootstrap_ok={1 if bootstrap_ok else 0} compare_ok={1 if compare_ok else 0}"
                     )
                 RANK_SYNC_STARTUP_DONE = True
+        if not ranking_interval_sync_job.is_running():
+            ranking_interval_sync_job.start()
         if not ranking_daily_sync_job.is_running():
             ranking_daily_sync_job.start()
+
+    if PACK_RANK_SYNC_ENABLE:
+        if PACK_RANK_SYNC_STARTUP_LOCK is None:
+            PACK_RANK_SYNC_STARTUP_LOCK = asyncio.Lock()
+        async with PACK_RANK_SYNC_STARTUP_LOCK:
+            if not PACK_RANK_SYNC_STARTUP_DONE:
+                await _run_pack_rank_sync_script("startup")
+                PACK_RANK_SYNC_STARTUP_DONE = True
+        if not pack_rank_interval_sync_job.is_running():
+            pack_rank_interval_sync_job.start()
 
     if MARKET_LIVE_SYNC_ON_EVENT and MARKET_SOURCE_CHANNEL_ID > 0:
         asyncio.create_task(_market_live_sync_refresh("startup", force=True))

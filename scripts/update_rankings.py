@@ -23,7 +23,12 @@ except Exception:  # pragma: no cover
 
 import requests
 from dotenv import load_dotenv
-from onchain_metrics import OnchainConfig, analyze_wallet as analyze_wallet_onchain, fetch_latest_usdt_tx_hash
+from onchain_metrics import (
+    OnchainConfig,
+    analyze_wallet as analyze_wallet_onchain,
+    fetch_latest_usdt_tx_hash,
+    scan_pack_open_counts_incremental,
+)
 
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
 RENAISS_COLLECTIBLE_BY_TOKEN_URL = "https://www.renaiss.xyz/api/trpc/collectible.getCollectibleByTokenId"
@@ -44,10 +49,10 @@ TOKEN_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_TOKEN_ACTIVITY_MAX_PAGE
 DEFAULT_HOLDERS_FILE_SERVER = Path("/data/renaiss_sync/snapshots/nft_13_holders.latest.json")
 DEFAULT_HOLDERS_FILE_LOCAL = Path("/Users/gavin/renaiss_project/renaiss_sync_data/snapshots/nft_13_holders.latest.json")
 DEFAULT_ONCHAIN_PACK_CONTRACTS = (
-    "0xaab5f5fa75437a6e9e7004c12c9c56cda4b4885a",
     "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
     "0xb2891022648c5fad3721c42c05d8d283d4d53080",
 )
+DEFAULT_MONTHLY_PACK_LAUNCH_START = "2026-05-01T00:00:00+08:00"
 
 _HTTP_SESSION_LOCAL = threading.local()
 _WITHDRAW_VALUE_CACHE: dict[str, Decimal] = {}
@@ -76,6 +81,21 @@ def _parse_address_csv(raw: str | None, *, default_values: tuple[str, ...] = ())
         seen.add(addr)
         values.append(addr)
     return tuple(values)
+
+
+def _merge_address_tuples(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for addr in group:
+            a = str(addr or "").strip().lower()
+            if not a.startswith("0x") or len(a) != 42:
+                continue
+            if a in seen:
+                continue
+            seen.add(a)
+            out.append(a)
+    return tuple(out)
 
 
 def _safe_tzinfo(name: str):
@@ -195,6 +215,24 @@ def _day_key_from_ts(ts: int) -> str:
         return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
     except Exception:
         return ""
+
+
+def _month_start_local(now_dt: datetime) -> datetime:
+    return now_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _monthly_pack_rank_window(cfg: "RankingConfig", now_dt: datetime) -> tuple[datetime, datetime]:
+    month_start = _month_start_local(now_dt)
+    launch_raw = str(os.getenv("PACK_RANK_LAUNCH_START", DEFAULT_MONTHLY_PACK_LAUNCH_START)).strip()
+    launch_dt = _parse_iso_dt(launch_raw)
+    if launch_dt is not None:
+        if launch_dt.tzinfo is None:
+            launch_dt = launch_dt.replace(tzinfo=cfg.tzinfo)
+        else:
+            launch_dt = launch_dt.astimezone(cfg.tzinfo)
+        if launch_dt.year == now_dt.year and launch_dt.month == now_dt.month and launch_dt > month_start:
+            month_start = launch_dt
+    return month_start, now_dt
 
 
 def _participation_days_since_join(day_keys: set[str], now_dt: datetime) -> int:
@@ -586,12 +624,15 @@ class WalletRecord:
     participation_days_count: int = 0
     sbt_owned_total: int = 0
     sbt_owned_badge_count: int = 0
+    monthly_gacha_open_count: int = 0
     volume_rank: int | None = None
     total_spent_rank: int | None = None
     holdings_rank: int | None = None
     pnl_rank: int | None = None
     participation_days_rank: int | None = None
     sbt_rank: int | None = None
+    monthly_gacha_open_rank: int | None = None
+    monthly_gacha_level: str = "none"
 
 
 @dataclass
@@ -645,6 +686,10 @@ class RankingConfig:
     @property
     def checkpoint_path(self) -> Path:
         return self.data_dir / "state" / "activity_checkpoints.json"
+
+    @property
+    def pack_rank_state_path(self) -> Path:
+        return self.data_dir / "state" / "pack_rank_state.json"
 
     def history_path(self, now_dt: datetime) -> Path:
         key = now_dt.strftime("%Y-%m-%d_%H")
@@ -714,9 +759,22 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
     onchain_usdt_contract = str(
         os.getenv("ONCHAIN_USDT_CONTRACT", "0x55d398326f99059ff775485246999027b3197955")
     ).strip().lower()
-    onchain_pack_contracts = _parse_address_csv(
-        os.getenv("ONCHAIN_PACK_CONTRACTS"),
+    onchain_pack_contracts_default = _parse_address_csv(
+        None,
         default_values=DEFAULT_ONCHAIN_PACK_CONTRACTS,
+    )
+    onchain_pack_contracts_base = _parse_address_csv(
+        os.getenv("ONCHAIN_PACK_CONTRACTS"),
+        default_values=(),
+    )
+    onchain_pack_contracts_extra = _parse_address_csv(
+        os.getenv("ONCHAIN_PACK_CONTRACTS_EXTRA"),
+        default_values=(),
+    )
+    onchain_pack_contracts = _merge_address_tuples(
+        onchain_pack_contracts_default,
+        onchain_pack_contracts_base,
+        onchain_pack_contracts_extra,
     )
     onchain_marketplace_contract = str(
         os.getenv("ONCHAIN_MARKETPLACE_CONTRACT", "0xae3e7268ef5a062946216a44f58a8f685ffd11d0")
@@ -1002,11 +1060,18 @@ def _from_wallet_row(row: dict[str, Any]) -> WalletRecord | None:
         participation_days_count=int(_to_decimal(row.get("participation_days_count"))),
         sbt_owned_total=int(_to_decimal(row.get("sbt_owned_total"))),
         sbt_owned_badge_count=int(_to_decimal(row.get("sbt_owned_badge_count"))),
+        monthly_gacha_open_count=int(_to_decimal(row.get("monthly_gacha_open_count"))),
         total_spent_rank=(
             int(_to_decimal(row.get("total_spent_rank")))
             if str(row.get("total_spent_rank") or "").strip()
             else None
         ),
+        monthly_gacha_open_rank=(
+            int(_to_decimal(row.get("monthly_gacha_open_rank")))
+            if str(row.get("monthly_gacha_open_rank") or "").strip()
+            else None
+        ),
+        monthly_gacha_level=str(row.get("monthly_gacha_level") or "none").strip().lower() or "none",
     )
     return rec
 
@@ -1051,6 +1116,11 @@ def load_activity_checkpoints(cfg: RankingConfig) -> dict[str, dict[str, Any]]:
             "activity_day_keys": sorted(set(day_keys)),
         }
     return out
+
+
+def load_pack_rank_state(cfg: RankingConfig) -> dict[str, Any]:
+    data = _json_load(cfg.pack_rank_state_path)
+    return data if isinstance(data, dict) else {}
 
 
 def build_checkpoint_dump(
@@ -1514,13 +1584,39 @@ def build_payload(
     removed_wallets: int,
     wallet_source: str,
     holders_file: Path | None,
+    monthly_pack_window_start: datetime,
+    monthly_pack_window_end: datetime,
+    monthly_pack_scan_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    def _gacha_level(rank_value: int | None) -> str:
+        rv = int(rank_value or 0)
+        if rv <= 0:
+            return "none"
+        if rv <= 10:
+            return "master"
+        if rv <= 50:
+            return "hunter"
+        if rv <= 200:
+            return "seeker"
+        return "none"
+
+    for rec in records:
+        rec.monthly_gacha_open_count = max(0, int(rec.monthly_gacha_open_count or 0))
+
     assign_rank(records, lambda r: r.trade_volume_usdt, "volume_rank")
     assign_rank(records, lambda r: r.total_spent_usdt, "total_spent_rank")
     assign_rank(records, lambda r: r.holdings_value_usdt, "holdings_rank")
     assign_rank(records, lambda r: r.total_pnl_usdt, "pnl_rank")
     assign_rank(records, lambda r: r.participation_days_count, "participation_days_rank")
     assign_rank(records, lambda r: r.sbt_owned_total, "sbt_rank")
+    assign_rank(records, lambda r: r.monthly_gacha_open_count, "monthly_gacha_open_rank")
+
+    for rec in records:
+        if rec.monthly_gacha_open_count <= 0:
+            rec.monthly_gacha_open_rank = None
+            rec.monthly_gacha_level = "none"
+            continue
+        rec.monthly_gacha_level = _gacha_level(rec.monthly_gacha_open_rank)
 
     by_volume = sorted(records, key=lambda x: (x.trade_volume_usdt, x.address), reverse=True)
     by_total_spent = sorted(records, key=lambda x: (x.total_spent_usdt, x.address), reverse=True)
@@ -1528,6 +1624,11 @@ def build_payload(
     by_pnl = sorted(records, key=lambda x: (x.total_pnl_usdt, x.address), reverse=True)
     by_participation = sorted(records, key=lambda x: (x.participation_days_count, x.address), reverse=True)
     by_sbt = sorted(records, key=lambda x: (x.sbt_owned_total, x.address), reverse=True)
+    by_monthly_gacha = sorted(
+        (x for x in records if x.monthly_gacha_open_count > 0),
+        key=lambda x: (x.monthly_gacha_open_count, x.address),
+        reverse=True,
+    )
 
     def to_wallet_dict(rec: WalletRecord) -> dict[str, Any]:
         return {
@@ -1548,12 +1649,15 @@ def build_payload(
             "participation_days_count": rec.participation_days_count,
             "sbt_owned_total": rec.sbt_owned_total,
             "sbt_owned_badge_count": rec.sbt_owned_badge_count,
+            "monthly_gacha_open_count": rec.monthly_gacha_open_count,
             "volume_rank": rec.volume_rank,
             "total_spent_rank": rec.total_spent_rank,
             "holdings_rank": rec.holdings_rank,
             "pnl_rank": rec.pnl_rank,
             "participation_days_rank": rec.participation_days_rank,
             "sbt_rank": rec.sbt_rank,
+            "monthly_gacha_open_rank": rec.monthly_gacha_open_rank,
+            "monthly_gacha_level": rec.monthly_gacha_level,
         }
 
     return {
@@ -1572,6 +1676,17 @@ def build_payload(
             "trigger": None,
             "wallet_source": wallet_source,
             "holders_file": str(holders_file) if holders_file is not None else None,
+            "monthly_gacha_window_start": monthly_pack_window_start.isoformat(),
+            "monthly_gacha_window_end": monthly_pack_window_end.isoformat(),
+            "monthly_gacha_level_rules": {
+                "master": "top10",
+                "hunter": "top50",
+                "seeker": "top200",
+            },
+            "monthly_gacha_scan_mode": str((monthly_pack_scan_stats or {}).get("scan_mode") or "contract_center"),
+            "monthly_gacha_scan_api_calls": int(_to_decimal((monthly_pack_scan_stats or {}).get("api_calls")) or 0),
+            "monthly_gacha_scan_rows_scanned": int(_to_decimal((monthly_pack_scan_stats or {}).get("rows_scanned")) or 0),
+            "monthly_gacha_scan_reset": bool((monthly_pack_scan_stats or {}).get("reset_applied")),
         },
         "top": {
             "volume": [to_wallet_dict(x) for x in by_volume[:100]],
@@ -1580,6 +1695,7 @@ def build_payload(
             "pnl": [to_wallet_dict(x) for x in by_pnl[:100]],
             "participation_days": [to_wallet_dict(x) for x in by_participation[:100]],
             "sbt": [to_wallet_dict(x) for x in by_sbt[:100]],
+            "monthly_gacha": [to_wallet_dict(x) for x in by_monthly_gacha[:300]],
         },
         "wallets": [to_wallet_dict(x) for x in sorted(records, key=lambda x: x.address)],
     }
@@ -1587,6 +1703,14 @@ def build_payload(
 
 def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     started_at = datetime.now(tz=cfg.tzinfo)
+    monthly_pack_window_start, monthly_pack_window_end = _monthly_pack_rank_window(cfg, started_at)
+    monthly_window_start_iso = monthly_pack_window_start.isoformat()
+    monthly_pack_window_start_ts = int(monthly_pack_window_start.astimezone(timezone.utc).timestamp())
+    monthly_pack_window_end_ts = int(monthly_pack_window_end.astimezone(timezone.utc).timestamp())
+    prev_latest_payload = _json_load(cfg.latest_path)
+    prev_meta = prev_latest_payload.get("meta") if isinstance(prev_latest_payload.get("meta"), dict) else {}
+    prev_monthly_window_start = str(prev_meta.get("monthly_gacha_window_start") or "").strip()
+    monthly_window_changed = bool(prev_monthly_window_start and prev_monthly_window_start != monthly_window_start_iso)
     prev_wallets = load_previous_wallets(cfg)
     prev_state = _json_load(cfg.state_path)
     prev_checkpoints = load_activity_checkpoints(cfg)
@@ -1613,6 +1737,12 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         prev = prev_wallets.get(rec.address)
         if prev is not None and prev.username:
             rec.username = prev.username
+    for rec in records:
+        prev = prev_wallets.get(rec.address)
+        if prev is not None and not monthly_window_changed:
+            rec.monthly_gacha_open_count = int(prev.monthly_gacha_open_count or 0)
+        else:
+            rec.monthly_gacha_open_count = 0
 
     username_changed_addrs: set[str] = set()
     for rec in records:
@@ -1627,6 +1757,34 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
 
     use_onchain_metrics = cfg.metrics_source in ("onchain", "hybrid")
     onchain_cfg = _build_onchain_cfg(cfg) if use_onchain_metrics else None
+    pack_rank_onchain_cfg = _build_onchain_cfg(cfg) if bool(cfg.onchain_api_key) else None
+    monthly_pack_counts_map: dict[str, int] = {}
+    monthly_pack_scan_stats: dict[str, Any] | None = None
+    monthly_pack_scan_ok = False
+    if pack_rank_onchain_cfg is not None:
+        try:
+            pack_rank_prev_state = load_pack_rank_state(cfg)
+            pack_scan = scan_pack_open_counts_incremental(
+                pack_rank_onchain_cfg,
+                pack_contracts=cfg.onchain_pack_contracts,
+                window_start_ts=monthly_pack_window_start_ts,
+                window_end_ts=monthly_pack_window_end_ts,
+                prev_state=pack_rank_prev_state,
+            )
+            pack_state = pack_scan.get("state") if isinstance(pack_scan.get("state"), dict) else {}
+            if pack_state:
+                _atomic_write_json(cfg.pack_rank_state_path, pack_state)
+            monthly_pack_scan_stats = pack_scan.get("stats") if isinstance(pack_scan.get("stats"), dict) else {}
+            raw_counts = pack_scan.get("wallet_counts")
+            if isinstance(raw_counts, dict):
+                for addr, raw in raw_counts.items():
+                    key = str(addr or "").strip().lower()
+                    if not key.startswith("0x") or len(key) != 42:
+                        continue
+                    monthly_pack_counts_map[key] = max(0, int(_to_decimal(raw)))
+            monthly_pack_scan_ok = True
+        except Exception as e:
+            print(f"[WARN] contract-centered monthly pack scan failed: {e}", flush=True)
     latest_activity_map: dict[str, str] = {}
     latest_usdt_tx_map: dict[str, str] = {}
     changed_by_activity: set[str] = set()
@@ -1790,6 +1948,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             rec.participation_days_count = prev.participation_days_count
             rec.sbt_owned_total = prev.sbt_owned_total
             rec.sbt_owned_badge_count = prev.sbt_owned_badge_count
+            rec.monthly_gacha_open_count = 0 if monthly_window_changed else prev.monthly_gacha_open_count
 
     if refresh_addrs:
         refresh_records = [r for r in records if r.address in refresh_addrs]
@@ -1807,6 +1966,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                 rec.total_earned_usdt = prev.total_earned_usdt
                 rec.cash_net_usdt = prev.cash_net_usdt
                 rec.participation_days_count = prev.participation_days_count
+                rec.monthly_gacha_open_count = 0 if monthly_window_changed else prev.monthly_gacha_open_count
             else:
                 rec.pack_spent_usdt = Decimal("0")
                 rec.trade_volume_usdt = Decimal("0")
@@ -1818,6 +1978,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                 rec.total_earned_usdt = Decimal("0")
                 rec.cash_net_usdt = Decimal("0")
                 rec.participation_days_count = 0
+                rec.monthly_gacha_open_count = 0
 
         def _apply_metrics_result(rec: WalletRecord, prev: WalletRecord | None, metrics: dict[str, Any], delta_mode: bool) -> None:
             latest_id = str(metrics.get("latest_activity_id") or "").strip()
@@ -1850,7 +2011,6 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                 checkpoint_next[rec.address] = checkpoint_row
             prev_day_keys_map[rec.address] = set(merged_day_keys)
             rec.participation_days_count = len(merged_day_keys)
-
             if delta_mode and prev is not None:
                 rec.pack_spent_usdt = prev.pack_spent_usdt + _to_decimal(metrics.get("pack_spent_usdt"))
                 rec.trade_volume_usdt = prev.trade_volume_usdt + _to_decimal(metrics.get("trade_volume_usdt"))
@@ -2065,6 +2225,8 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             prev = prev_wallets.get(rec.address)
             rec.participation_days_count = prev.participation_days_count if prev is not None else 0
         rec.total_pnl_usdt = rec.cash_net_usdt + rec.holdings_value_usdt
+        if monthly_pack_scan_ok:
+            rec.monthly_gacha_open_count = int(monthly_pack_counts_map.get(rec.address, 0))
 
     checkpoint_time = finished_at.isoformat()
     checkpoint_dump = build_checkpoint_dump(current_addrs, checkpoint_next, checkpoint_time)
@@ -2081,6 +2243,9 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         removed_wallets=removed_wallets,
         wallet_source=cfg.wallet_source,
         holders_file=cfg.holders_file,
+        monthly_pack_window_start=monthly_pack_window_start,
+        monthly_pack_window_end=monthly_pack_window_end,
+        monthly_pack_scan_stats=monthly_pack_scan_stats,
     )
     if isinstance(payload.get("meta"), dict):
         payload["meta"]["trigger"] = cfg.trigger
@@ -2115,6 +2280,11 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "refreshed_wallets": refresh_cnt,
         "removed_wallets": removed_wallets,
         "duration_sec": (finished_at - started_at).total_seconds(),
+        "monthly_pack_scan_mode": str((monthly_pack_scan_stats or {}).get("scan_mode") or ""),
+        "monthly_pack_scan_api_calls": int(_to_decimal((monthly_pack_scan_stats or {}).get("api_calls")) or 0),
+        "monthly_pack_scan_rows_scanned": int(_to_decimal((monthly_pack_scan_stats or {}).get("rows_scanned")) or 0),
+        "monthly_pack_scan_reset": bool((monthly_pack_scan_stats or {}).get("reset_applied")),
+        "pack_rank_state_path": str(cfg.pack_rank_state_path),
     }
     _atomic_write_json(cfg.state_path, state_payload)
 
@@ -2138,6 +2308,10 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "full_rebuild_reason": full_reason,
         "duration_sec": (finished_at - started_at).total_seconds(),
         "push_required": (len(changed_addrs) > 0 or removed_wallets > 0 or full_rebuild),
+        "monthly_pack_scan_mode": str((monthly_pack_scan_stats or {}).get("scan_mode") or ""),
+        "monthly_pack_scan_api_calls": int(_to_decimal((monthly_pack_scan_stats or {}).get("api_calls")) or 0),
+        "monthly_pack_scan_rows_scanned": int(_to_decimal((monthly_pack_scan_stats or {}).get("rows_scanned")) or 0),
+        "monthly_pack_scan_reset": bool((monthly_pack_scan_stats or {}).get("reset_applied")),
     }
 
 
@@ -2244,6 +2418,9 @@ def main() -> int:
         f"checkpoints={result['checkpoint_count']} probe_failed={result['activity_probe_failed']} "
         f"metric_fail={result['metric_failed_initial']} metric_resolved={result['metric_failed_resolved']} "
         f"metric_unresolved={result['metric_failed_unresolved']} "
+        f"pack_scan_mode={result['monthly_pack_scan_mode'] or '-'} "
+        f"pack_scan_calls={result['monthly_pack_scan_api_calls']} "
+        f"pack_scan_rows={result['monthly_pack_scan_rows_scanned']} "
         f"duration_sec={result['duration_sec']:.2f} backup_status={backup_status} commit={commit_hash}"
     )
     print(f"[OK] {msg}")
@@ -2268,11 +2445,16 @@ def main() -> int:
             "full_rebuild": result["full_rebuild"],
             "full_rebuild_reason": result["full_rebuild_reason"],
             "duration_sec": result["duration_sec"],
+            "monthly_pack_scan_mode": result["monthly_pack_scan_mode"],
+            "monthly_pack_scan_api_calls": result["monthly_pack_scan_api_calls"],
+            "monthly_pack_scan_rows_scanned": result["monthly_pack_scan_rows_scanned"],
+            "monthly_pack_scan_reset": result["monthly_pack_scan_reset"],
             "backup_status": backup_status,
             "commit": commit_hash,
             "latest_path": str(cfg.latest_path),
             "history_path": str(cfg.history_path(now_dt)),
             "checkpoint_path": str(cfg.checkpoint_path),
+            "pack_rank_state_path": str(cfg.pack_rank_state_path),
         },
     )
     send_webhook(cfg, msg, success=True)
