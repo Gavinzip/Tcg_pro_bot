@@ -603,6 +603,15 @@ async def pack_rank(interaction: discord.Interaction, address: str = None):
         username = username[:28]
         return f"{username} · {addr}" if addr else username
 
+    def _addr_label(row: dict) -> str:
+        return _short_hex(str(row.get("address") or "")) or "unknown"
+
+    def _name_suffix(row: dict) -> str:
+        username = str(row.get("username") or "").strip()
+        if not username:
+            return ""
+        return f" ({username[:28]})"
+
     def _rank_text(row: dict, field: str, fallback_idx: int | None = None) -> str:
         val = _parse_int(row.get(field))
         if val is not None and val > 0:
@@ -687,16 +696,16 @@ async def pack_rank(interaction: discord.Interaction, address: str = None):
     ]
 
     if target_row is None:
-        lines.append(f"`{resolved_wallet}` ({wallet_source}) | Opens `0` | Rank `-` | Level `-`")
+        lines.append(f"`{resolved_wallet}` ({wallet_source})")
+        lines.append("🎯 Opens `0` | Rank `-` | Level `-`")
     else:
         your_opens = _parse_int(target_row.get("monthly_gacha_open_count")) or 0
         your_rank = _parse_int(target_row.get("monthly_gacha_open_rank"))
         your_rank_txt = str(your_rank) if (your_rank is not None and your_rank > 0) else "-"
         your_level = _level_text_from_row(target_row)
         your_suffix = _name_suffix(target_row)
-        lines.append(
-            f"`{resolved_wallet}` ({wallet_source}) | Opens `{_format_number(your_opens)}` | Rank `{your_rank_txt}` | {your_level}{your_suffix}"
-        )
+        lines.append(f"`{resolved_wallet}` ({wallet_source})")
+        lines.append(f"🎯 Opens `{_format_number(your_opens)}` | Rank `{your_rank_txt}` | {your_level}{your_suffix}")
         if your_rank is not None and your_rank > 50 and cutoff50 is not None:
             gap = cutoff50 - your_opens
             if gap > 0:
@@ -713,12 +722,11 @@ async def pack_rank(interaction: discord.Interaction, address: str = None):
             for i in range(left, right):
                 row = ranked_rows[i]
                 opens = _parse_int(row.get("monthly_gacha_open_count")) or 0
-                rank_txt = str(_rank_value(row, i + 1))
                 addr = _normalize_wallet_address(str(row.get("address") or ""))
                 marker = "👉" if addr == str(resolved_wallet or "").lower() else "　"
                 name_suffix = _name_suffix(row)
                 lines.append(
-                    f"{marker} `{rank_txt}` {_addr_label(row)} | Opens `{_format_number(opens)}` | {_level_text_from_row(row)}{name_suffix}"
+                    f"{marker} {_addr_label(row)} | Opens `{_format_number(opens)}`{name_suffix}"
                 )
 
     lines.extend(["", "**Top 10**"])
@@ -729,7 +737,7 @@ async def pack_rank(interaction: discord.Interaction, address: str = None):
             opens = _parse_int(row.get("monthly_gacha_open_count")) or 0
             name_suffix = _name_suffix(row)
             lines.append(
-                f"{idx}. `{_rank_text(row, 'monthly_gacha_open_rank', idx)}` {_addr_label(row)} | Opens `{_format_number(opens)}` | {_level_text_from_row(row)}{name_suffix}"
+                f"{idx}. {_addr_label(row)} | Opens `{_format_number(opens)}` | {_level_text_from_row(row)}{name_suffix}"
             )
 
     lines.append("")
