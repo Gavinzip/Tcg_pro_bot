@@ -711,6 +711,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--push-only", action="store_true", help="Skip sync and only push current rankings/market_cache to backup git")
     parser.add_argument("--market-only", action="store_true", help="With --push-only, push only market_cache to backup git")
     parser.add_argument("--full-rebuild", action="store_true")
+    parser.add_argument(
+        "--full-rebuild-all",
+        action="store_true",
+        help="With --full-rebuild, recompute every wallet instead of active-only rebuild.",
+    )
     parser.add_argument("--data-dir", default=os.getenv("RANKING_DATA_DIR", ""))
     parser.add_argument("--workers", type=int, default=max(2, int(os.getenv("RANKING_WORKERS", "8"))))
     parser.add_argument("--activity-page-limit", type=int, default=max(10, int(os.getenv("RANKING_ACTIVITY_PAGE_LIMIT", "50"))))
@@ -793,7 +798,9 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
         tz_name=tz_name,
         tzinfo=tzinfo,
         full_rebuild_days=max(1, int(os.getenv("RANK_SYNC_FULL_REBUILD_DAYS", "7"))),
-        full_rebuild_active_only=_env_bool("RANK_SYNC_FULL_REBUILD_ACTIVE_ONLY", True),
+        full_rebuild_active_only=False
+        if bool(getattr(args, "full_rebuild_all", False))
+        else _env_bool("RANK_SYNC_FULL_REBUILD_ACTIVE_ONLY", True),
         metrics_source=metrics_source,
         onchain_api_url=onchain_api_url,
         onchain_chain_id=onchain_chain_id,

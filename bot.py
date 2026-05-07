@@ -360,21 +360,19 @@ async def ranking_sync_status(interaction: discord.Interaction):
     await interaction.response.send_message(txt, ephemeral=True)
 
 
-@tree.command(name="ranking_rebuild", description="手動全量重算 rankings，並刷新 pack_rank")
+@tree.command(name="ranking_rebuild", description="手動全量重算 ranking（盈虧/交易/排名）")
 async def ranking_rebuild(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
     ranking_ok = await _run_ranking_sync_script(
-        "manual_full_rebuild",
+        "manual_ranking_full_rebuild_all",
         bootstrap_only=False,
         full_rebuild=True,
+        full_rebuild_all=True,
     )
-    pack_rank_ok = False
-    if ranking_ok:
-        pack_rank_ok = await _run_pack_rank_sync_script("manual_after_ranking_full_rebuild")
 
-    if ranking_ok and pack_rank_ok:
+    if ranking_ok:
         await interaction.followup.send(
-            "✅ rankings 已全量重算，pack_rank 已刷新。",
+            "✅ ranking 已全量重算（所有 wallet，含盈虧/交易/排名）。",
             ephemeral=True,
         )
         return
@@ -384,10 +382,6 @@ async def ranking_rebuild(interaction: discord.Interaction):
             ephemeral=True,
         )
         return
-    await interaction.followup.send(
-        "⚠️ rankings 已全量重算，但 pack_rank 刷新失敗，請看伺服器 log。",
-        ephemeral=True,
-    )
 
 
 @tree.command(name="ranking", description="查看各項排名 Top 10（文字版）")

@@ -3842,14 +3842,15 @@ def _nft_row_token_id(row: dict) -> str:
     return str((row or {}).get("tokenID") or (row or {}).get("tokenId") or "").strip()
 
 
-def _fetch_pull_activity_hints(wallet_address: str) -> list[dict]:
-    if PROFILE_PACK_NAME_HINT_MAX_PAGES <= 0:
+def _fetch_pull_activity_hints(wallet_address: str, *, max_pages: int | None = None) -> list[dict]:
+    pages = PROFILE_PACK_NAME_HINT_MAX_PAGES if max_pages is None else max(0, int(max_pages or 0))
+    if pages <= 0:
         return []
 
     hints: list[dict] = []
     seen_cursors: set[str] = set()
     cursor: str | None = None
-    for _ in range(PROFILE_PACK_NAME_HINT_MAX_PAGES):
+    for _ in range(pages):
         page = _trpc_user_activities(wallet_address, cursor=cursor, limit=PROFILE_ACTIVITY_PAGE_LIMIT)
         activities = page.get("activities") if isinstance(page.get("activities"), list) else []
         for row in activities:
@@ -3893,6 +3894,59 @@ def _fetch_pull_activity_hints(wallet_address: str) -> list[dict]:
         cursor = next_cursor
     hints.sort(key=lambda x: int(_parse_int(x.get("timestamp")) or 0))
     return hints
+
+
+def _match_pull_hints_to_payment_rows(payment_rows: list[dict], hints: list[dict]) -> dict[str, dict]:
+    if not payment_rows or not hints:
+        return {}
+
+    window_sec = int(PROFILE_CHAIN_ACTIVITY_MATCH_WINDOW_SEC or PROFILE_CHAIN_DELAYED_MINT_WINDOW_SEC or 0)
+    if window_sec <= 0:
+        return {}
+
+    matched: dict[str, dict] = {}
+    used_hint_ids: set[int] = set()
+    rows = sorted(
+        [x for x in payment_rows if isinstance(x, dict)],
+        key=lambda r: (
+            int(_parse_int((r or {}).get("timeStamp")) or _parse_int((r or {}).get("timestamp")) or 0),
+            str((r or {}).get("hash") or ""),
+        ),
+    )
+    for row in rows:
+        tx_hash = str(row.get("hash") or "").strip().lower()
+        if not tx_hash or tx_hash in matched:
+            continue
+        payment_ts = int(_parse_int(row.get("timeStamp")) or _parse_int(row.get("timestamp")) or 0)
+        payment_amount = _tokentx_usdt_amount(row)
+        if payment_ts <= 0 or payment_amount <= 0:
+            continue
+
+        best: dict | None = None
+        best_score: tuple[int, str] | None = None
+        best_id = 0
+        for hint in hints:
+            if id(hint) in used_hint_ids:
+                continue
+            hint_ts = int(_parse_int((hint or {}).get("timestamp")) or 0)
+            if hint_ts <= 0:
+                continue
+            delta = abs(hint_ts - payment_ts)
+            if delta > window_sec:
+                continue
+            price = _to_decimal((hint or {}).get("price"))
+            if price <= 0 or abs(price - payment_amount) > Decimal("0.000001"):
+                continue
+            score = (delta, str((hint or {}).get("pack_key") or ""))
+            if best_score is None or score < best_score:
+                best_score = score
+                best = hint
+                best_id = id(hint)
+        if best:
+            matched[tx_hash] = best
+            used_hint_ids.add(best_id)
+
+    return matched
 
 
 def _match_delayed_pull_hints(delayed_matches: dict[str, dict], hints: list[dict]) -> dict[str, dict]:
@@ -4804,12 +4858,41 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
             nft_out_txs.add(tx_hash)
     delayed_open_matches = _infer_delayed_open_pack_matches(usdt_rows, nft_rows, wallet_norm, cfg, nft_in_txs)
     delayed_open_tx_hashes = set(delayed_open_matches.keys())
-    delayed_pack_recipients = {
-        str(((match.get("payment") or {}).get("to")) or "").strip().lower()
-        for match in delayed_open_matches.values()
-        if isinstance(match, dict)
-    }
-    delayed_pack_recipients = {x for x in delayed_pack_recipients if x.startswith("0x") and len(x) == 42}
+
+    legacy_payment_candidates: list[dict] = []
+    for row in usdt_rows:
+        if not isinstance(row, dict):
+            continue
+        amount = _tokentx_usdt_amount(row)
+        if amount <= 0:
+            continue
+        tx_hash = str(row.get("hash") or "").strip().lower()
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        if frm != wallet_norm:
+            continue
+        if not to.startswith("0x") or len(to) != 42:
+            continue
+        cls = _classify_onchain_usdt_transfer(
+            row,
+            wallet_norm,
+            cfg,
+            tx_has_nft_in=bool(tx_hash and tx_hash in nft_in_txs),
+            tx_has_nft_out=bool(tx_hash and tx_hash in nft_out_txs),
+        )
+        if cls == "other":
+            legacy_payment_candidates.append(row)
+
+    pull_activity_hints: list[dict] = []
+    official_pull_hint_by_tx: dict[str, dict] = {}
+    if legacy_payment_candidates:
+        try:
+            pull_activity_hints = _fetch_pull_activity_hints(wallet_norm, max_pages=PROFILE_ACTIVITY_MAX_PAGES)
+            official_pull_hint_by_tx = _match_pull_hints_to_payment_rows(legacy_payment_candidates, pull_activity_hints)
+        except Exception as e:
+            print(f"⚠️ legacy pull hint lookup failed for {wallet_norm}: {e}", file=sys.stderr)
+            pull_activity_hints = []
+            official_pull_hint_by_tx = {}
 
     ts_values: list[int] = []
     open_pack_txs: dict[str, dict] = {}
@@ -4831,6 +4914,8 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         if (not row.get("counterparty")) and counterparty:
             row["counterparty"] = counterparty
 
+    contract_pack_name: dict[str, str] = {}
+
     for row in usdt_rows:
         if not isinstance(row, dict):
             continue
@@ -4850,9 +4935,16 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
             tx_has_nft_in=bool(tx_hash and tx_hash in nft_in_txs),
             tx_has_nft_out=bool(tx_hash and tx_hash in nft_out_txs),
         )
-        if cls == "other" and tx_hash in delayed_open_tx_hashes:
+        hint = official_pull_hint_by_tx.get(tx_hash)
+        if cls == "other" and hint:
             cls = "open_pack"
-        elif cls == "other" and frm == wallet_norm and to in delayed_pack_recipients:
+            pack_key = str((hint or {}).get("pack_key") or "").strip().lower()
+            pack_name = str((hint or {}).get("pack_name") or "").strip()
+            if pack_key:
+                to = pack_key
+                if pack_name:
+                    contract_pack_name[pack_key] = pack_name
+        elif cls == "other" and tx_hash in delayed_open_tx_hashes:
             cls = "open_pack"
         if cls == "open_pack":
             _upsert_tx(open_pack_txs, tx_hash, counterparty=to, ts=ts, amount=amount)
@@ -4868,7 +4960,6 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     contract_direct_count: defaultdict[str, int] = defaultdict(int)
     contract_inferred_count: defaultdict[str, int] = defaultdict(int)
     contract_spent_total: defaultdict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    contract_pack_name: dict[str, str] = {}
     pack_price_map = _load_pack_price_map()
     pack_price_map_dirty = False
 
@@ -4882,7 +4973,10 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     delayed_hint_by_token: dict[str, dict] = {}
     if delayed_open_matches:
         try:
-            delayed_hints = _fetch_pull_activity_hints(wallet_norm)
+            delayed_hints = pull_activity_hints or _fetch_pull_activity_hints(
+                wallet_norm,
+                max_pages=PROFILE_ACTIVITY_MAX_PAGES,
+            )
             delayed_hint_by_tx = _match_delayed_pull_hints(delayed_open_matches, delayed_hints)
         except Exception as e:
             print(f"⚠️ delayed pull hint lookup failed for {wallet_norm}: {e}", file=sys.stderr)
@@ -7188,7 +7282,12 @@ def _build_wallet_profile_context(
     history_thread = threading.Thread(target=_history_worker, name="profile-history-worker", daemon=True)
     history_thread.start()
     live_onchain_thread: threading.Thread | None = None
-    if PROFILE_REALTIME_RECALC_ON_PROFILE and PROFILE_REALTIME_METRICS_SOURCE == "onchain" and wallet_norm:
+    if (
+        PROFILE_DATA_MODE != "chain_official"
+        and PROFILE_REALTIME_RECALC_ON_PROFILE
+        and PROFILE_REALTIME_METRICS_SOURCE == "onchain"
+        and wallet_norm
+    ):
         def _live_onchain_worker():
             try:
                 live_onchain_holder["data"] = _profile_compute_onchain_metrics(wallet_norm)
@@ -7390,6 +7489,7 @@ def _build_wallet_profile_context(
     use_live_onchain_metrics = bool(
         PROFILE_REALTIME_RECALC_ON_PROFILE
         and PROFILE_REALTIME_METRICS_SOURCE == "onchain"
+        and PROFILE_DATA_MODE != "chain_official"
         and isinstance(live_onchain_metrics, dict)
         and live_onchain_metrics
     )
@@ -9412,6 +9512,7 @@ async def _run_ranking_sync_script(
     trigger: str,
     bootstrap_only: bool = False,
     full_rebuild: bool = False,
+    full_rebuild_all: bool = False,
     push_only: bool = False,
     market_only: bool = False,
 ) -> bool:
@@ -9440,6 +9541,8 @@ async def _run_ranking_sync_script(
         cmd.append("--bootstrap-only")
     if full_rebuild:
         cmd.append("--full-rebuild")
+    if full_rebuild_all:
+        cmd.append("--full-rebuild-all")
     if push_only:
         cmd.append("--push-only")
     if market_only:
@@ -9449,7 +9552,8 @@ async def _run_ranking_sync_script(
         print(
             "🕒 Ranking sync start "
             f"trigger={trigger} bootstrap_only={1 if bootstrap_only else 0} "
-            f"full_rebuild={1 if full_rebuild else 0} push_only={1 if push_only else 0} market_only={1 if market_only else 0} "
+            f"full_rebuild={1 if full_rebuild else 0} full_rebuild_all={1 if full_rebuild_all else 0} "
+            f"push_only={1 if push_only else 0} market_only={1 if market_only else 0} "
             f"data_dir={rank_data_dir}"
         )
         proc = await asyncio.create_subprocess_exec(
