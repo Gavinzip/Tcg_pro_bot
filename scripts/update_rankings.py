@@ -10,7 +10,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -27,7 +27,7 @@ from onchain_metrics import (
     OnchainConfig,
     analyze_wallet as analyze_wallet_onchain,
     fetch_latest_usdt_tx_hash,
-    scan_pack_open_counts_incremental,
+    scan_wallet_open_counts_by_time_incremental,
 )
 
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
@@ -48,10 +48,6 @@ TOKEN_ACTIVITY_PAGE_LIMIT = max(1, min(50, int(os.getenv("PROFILE_TOKEN_ACTIVITY
 TOKEN_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_TOKEN_ACTIVITY_MAX_PAGES", "20")))
 DEFAULT_HOLDERS_FILE_SERVER = Path("/data/renaiss_sync/snapshots/nft_13_holders.latest.json")
 DEFAULT_HOLDERS_FILE_LOCAL = Path("/Users/gavin/renaiss_project/renaiss_sync_data/snapshots/nft_13_holders.latest.json")
-DEFAULT_ONCHAIN_PACK_CONTRACTS = (
-    "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
-    "0xb2891022648c5fad3721c42c05d8d283d4d53080",
-)
 DEFAULT_MONTHLY_PACK_LAUNCH_START = "2026-05-01T00:00:00+08:00"
 
 _HTTP_SESSION_LOCAL = threading.local()
@@ -759,23 +755,9 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
     onchain_usdt_contract = str(
         os.getenv("ONCHAIN_USDT_CONTRACT", "0x55d398326f99059ff775485246999027b3197955")
     ).strip().lower()
-    onchain_pack_contracts_default = _parse_address_csv(
-        None,
-        default_values=DEFAULT_ONCHAIN_PACK_CONTRACTS,
-    )
-    onchain_pack_contracts_base = _parse_address_csv(
-        os.getenv("ONCHAIN_PACK_CONTRACTS"),
-        default_values=(),
-    )
-    onchain_pack_contracts_extra = _parse_address_csv(
-        os.getenv("ONCHAIN_PACK_CONTRACTS_EXTRA"),
-        default_values=(),
-    )
-    onchain_pack_contracts = _merge_address_tuples(
-        onchain_pack_contracts_default,
-        onchain_pack_contracts_base,
-        onchain_pack_contracts_extra,
-    )
+    # On-chain metrics now detect packs by transaction shape instead of a
+    # contract allowlist: wallet USDT-out + same-tx NFT-in means open pack.
+    onchain_pack_contracts: tuple[str, ...] = ()
     onchain_marketplace_contract = str(
         os.getenv("ONCHAIN_MARKETPLACE_CONTRACT", "0xae3e7268ef5a062946216a44f58a8f685ffd11d0")
     ).strip().lower()
@@ -845,8 +827,6 @@ def validate_config(cfg: RankingConfig) -> None:
     if cfg.metrics_source in ("onchain", "hybrid"):
         if not cfg.onchain_api_key:
             raise RuntimeError("BSCSCAN_API_KEY is required when RANK_METRICS_SOURCE is onchain/hybrid")
-        if not cfg.onchain_pack_contracts:
-            raise RuntimeError("ONCHAIN_PACK_CONTRACTS is empty")
 
 
 def send_webhook(cfg: RankingConfig, message: str, success: bool = True) -> None:
@@ -1088,6 +1068,10 @@ def load_previous_wallets(cfg: RankingConfig) -> dict[str, WalletRecord]:
     return out
 
 
+def _clone_wallet_records(rows: dict[str, WalletRecord]) -> dict[str, WalletRecord]:
+    return {addr: replace(rec) for addr, rec in rows.items()}
+
+
 def load_activity_checkpoints(cfg: RankingConfig) -> dict[str, dict[str, Any]]:
     data = _json_load(cfg.checkpoint_path)
     out: dict[str, dict[str, Any]] = {}
@@ -1207,7 +1191,7 @@ def _build_onchain_cfg(cfg: RankingConfig) -> OnchainConfig:
         chain_id=cfg.onchain_chain_id,
         api_key=cfg.onchain_api_key,
         usdt_contract=cfg.onchain_usdt_contract,
-        pack_contracts=cfg.onchain_pack_contracts,
+        pack_contracts=(),
         marketplace_contract=cfg.onchain_marketplace_contract,
         page_size=cfg.onchain_page_size,
         retries=API_MAX_RETRIES,
@@ -1225,7 +1209,11 @@ def fetch_latest_usdt_tx_hash_for_wallet(onchain_cfg: OnchainConfig, address: st
         return None, False
 
 
-def fetch_all_wallets(cfg: RankingConfig, max_wallets: int | None = None) -> tuple[dict[str, WalletRecord], int]:
+def fetch_all_wallets(
+    cfg: RankingConfig,
+    max_wallets: int | None = None,
+    fallback_wallets: dict[str, WalletRecord] | None = None,
+) -> tuple[dict[str, WalletRecord], int, str]:
     limit = 100
     offset = 0
     total_pages = 0
@@ -1239,69 +1227,89 @@ def fetch_all_wallets(cfg: RankingConfig, max_wallets: int | None = None) -> tup
         flush=True,
     )
 
-    while True:
-        payload = {
-            "limit": limit,
-            "offset": offset,
-            "sortBy": "mintDate",
-            "sortOrder": "desc",
-            "includeOpenCardPackRecords": True,
-        }
-        result = _trpc_collectible_list(payload)
-        total_pages += 1
-        if total_pages == 1 or total_pages % 10 == 0:
-            print(f"[PROGRESS] collectible_pages fetched={total_pages} wallets={len(wallets)}", flush=True)
+    collection_fallback_reason = ""
+    try:
+        while True:
+            payload = {
+                "limit": limit,
+                "offset": offset,
+                "sortBy": "mintDate",
+                "sortOrder": "desc",
+                "includeOpenCardPackRecords": True,
+            }
+            result = _trpc_collectible_list(payload)
+            total_pages += 1
+            if total_pages == 1 or total_pages % 10 == 0:
+                print(f"[PROGRESS] collectible_pages fetched={total_pages} wallets={len(wallets)}", flush=True)
 
-        collection = result.get("collection") or []
-        if not isinstance(collection, list):
-            collection = []
+            collection = result.get("collection") or []
+            if not isinstance(collection, list):
+                collection = []
 
-        for item in collection:
-            if not isinstance(item, dict):
-                continue
-            address = str(item.get("ownerAddress") or "").strip().lower()
-            if not address:
-                continue
-            if holders_only_mode and address not in wallets:
-                # In holders-only mode, keep ranking universe strictly from NFT holders list.
-                continue
+            for item in collection:
+                if not isinstance(item, dict):
+                    continue
+                address = str(item.get("ownerAddress") or "").strip().lower()
+                if not address:
+                    continue
+                if holders_only_mode and address not in wallets:
+                    # In holders-only mode, keep ranking universe strictly from NFT holders list.
+                    continue
 
-            owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
-            username = str(owner.get("username") or "").strip() or None
-            fmv_raw = _to_decimal(item.get("fmvPriceInUSD"))
-            holdings_delta = fmv_raw / Decimal("100") if fmv_raw > 0 else Decimal("0")
+                owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+                username = str(owner.get("username") or "").strip() or None
+                fmv_raw = _to_decimal(item.get("fmvPriceInUSD"))
+                holdings_delta = fmv_raw / Decimal("100") if fmv_raw > 0 else Decimal("0")
 
-            if address not in wallets:
-                wallets[address] = WalletRecord(
-                    address=address,
-                    username=username,
-                    holdings_value_usdt=Decimal("0"),
-                    collectible_count=0,
-                )
+                if address not in wallets:
+                    wallets[address] = WalletRecord(
+                        address=address,
+                        username=username,
+                        holdings_value_usdt=Decimal("0"),
+                        collectible_count=0,
+                    )
 
-            rec = wallets[address]
-            if (not rec.username) and username:
-                rec.username = username
-            rec.holdings_value_usdt += holdings_delta
-            rec.collectible_count += 1
+                rec = wallets[address]
+                if (not rec.username) and username:
+                    rec.username = username
+                rec.holdings_value_usdt += holdings_delta
+                rec.collectible_count += 1
 
-        pagination = result.get("pagination") or {}
-        has_more = bool(pagination.get("hasMore"))
-        if not has_more:
-            break
+            pagination = result.get("pagination") or {}
+            has_more = bool(pagination.get("hasMore"))
+            if not has_more:
+                break
 
-        next_limit = int(pagination.get("limit") or limit)
-        next_offset = int(pagination.get("offset") or offset) + next_limit
-        if next_offset <= offset:
-            break
-        offset = next_offset
+            next_limit = int(pagination.get("limit") or limit)
+            next_offset = int(pagination.get("offset") or offset) + next_limit
+            if next_offset <= offset:
+                break
+            offset = next_offset
+    except Exception as e:  # noqa: BLE001
+        collection_fallback_reason = f"{type(e).__name__}: {e}"
+        fallback_source = fallback_wallets if isinstance(fallback_wallets, dict) else {}
+        if fallback_source:
+            wallets = _clone_wallet_records(fallback_source)
+            print(
+                "[WARN] collectible.list failed; using previous latest wallet snapshot "
+                f"wallets={len(wallets)} pages_before_failure={total_pages} error={collection_fallback_reason}",
+                flush=True,
+            )
+        elif wallets:
+            print(
+                "[WARN] collectible.list failed; using currently loaded holder wallet base "
+                f"wallets={len(wallets)} pages_before_failure={total_pages} error={collection_fallback_reason}",
+                flush=True,
+            )
+        else:
+            raise
 
     if max_wallets is not None and len(wallets) > max_wallets:
         ordered_addrs = sorted(wallets.keys())[:max_wallets]
         wallets = {addr: wallets[addr] for addr in ordered_addrs}
     print(f"[INFO] final wallet_count={len(wallets)} collectible_pages={total_pages}", flush=True)
 
-    return wallets, total_pages
+    return wallets, total_pages, collection_fallback_reason
 
 
 def compute_activity_metrics_for_wallet(
@@ -1577,6 +1585,7 @@ def build_payload(
     finished_at: datetime,
     *,
     collectible_pages: int,
+    collection_fallback_reason: str,
     full_rebuild: bool,
     full_rebuild_reason: str,
     refreshed_wallets: int,
@@ -1666,6 +1675,8 @@ def build_payload(
             "started_at": started_at.isoformat(),
             "updated_at": finished_at.isoformat(),
             "collectible_pages": collectible_pages,
+            "collection_snapshot_fallback": bool(collection_fallback_reason),
+            "collection_snapshot_fallback_reason": collection_fallback_reason,
             "wallet_count": len(records),
             "version": 4,
             "full_rebuild": bool(full_rebuild),
@@ -1683,7 +1694,7 @@ def build_payload(
                 "hunter": "top50",
                 "seeker": "top200",
             },
-            "monthly_gacha_scan_mode": str((monthly_pack_scan_stats or {}).get("scan_mode") or "contract_center"),
+            "monthly_gacha_scan_mode": str((monthly_pack_scan_stats or {}).get("scan_mode") or "wallet_time_incremental"),
             "monthly_gacha_scan_api_calls": int(_to_decimal((monthly_pack_scan_stats or {}).get("api_calls")) or 0),
             "monthly_gacha_scan_rows_scanned": int(_to_decimal((monthly_pack_scan_stats or {}).get("rows_scanned")) or 0),
             "monthly_gacha_scan_reset": bool((monthly_pack_scan_stats or {}).get("reset_applied")),
@@ -1715,7 +1726,11 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     prev_state = _json_load(cfg.state_path)
     prev_checkpoints = load_activity_checkpoints(cfg)
 
-    current_wallets, collectible_pages = fetch_all_wallets(cfg, max_wallets=cfg.max_wallets)
+    current_wallets, collectible_pages, collection_fallback_reason = fetch_all_wallets(
+        cfg,
+        max_wallets=cfg.max_wallets,
+        fallback_wallets=prev_wallets,
+    )
     current_addrs = set(current_wallets.keys())
     prev_addrs = set(prev_wallets.keys())
     removed_wallets = len(prev_addrs - current_addrs)
@@ -1763,10 +1778,10 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     monthly_pack_scan_ok = False
     if pack_rank_onchain_cfg is not None:
         try:
-            pack_rank_prev_state = load_pack_rank_state(cfg)
-            pack_scan = scan_pack_open_counts_incremental(
+            pack_rank_prev_state = {} if full_rebuild else load_pack_rank_state(cfg)
+            pack_scan = scan_wallet_open_counts_by_time_incremental(
                 pack_rank_onchain_cfg,
-                pack_contracts=cfg.onchain_pack_contracts,
+                wallets=sorted(current_addrs),
                 window_start_ts=monthly_pack_window_start_ts,
                 window_end_ts=monthly_pack_window_end_ts,
                 prev_state=pack_rank_prev_state,
@@ -1784,7 +1799,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                     monthly_pack_counts_map[key] = max(0, int(_to_decimal(raw)))
             monthly_pack_scan_ok = True
         except Exception as e:
-            print(f"[WARN] contract-centered monthly pack scan failed: {e}", flush=True)
+            print(f"[WARN] wallet-time monthly pack scan failed: {e}", flush=True)
     latest_activity_map: dict[str, str] = {}
     latest_usdt_tx_map: dict[str, str] = {}
     changed_by_activity: set[str] = set()
@@ -2236,6 +2251,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         started_at,
         finished_at,
         collectible_pages=collectible_pages,
+        collection_fallback_reason=collection_fallback_reason,
         full_rebuild=full_rebuild,
         full_rebuild_reason=full_reason,
         refreshed_wallets=refresh_cnt,
@@ -2251,6 +2267,8 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         payload["meta"]["trigger"] = cfg.trigger
         payload["meta"]["metrics_source"] = cfg.metrics_source
         payload["meta"]["full_rebuild_active_only"] = bool(cfg.full_rebuild_active_only)
+        payload["meta"]["collection_snapshot_fallback"] = bool(collection_fallback_reason)
+        payload["meta"]["collection_snapshot_fallback_reason"] = collection_fallback_reason
 
     _atomic_write_json(cfg.latest_path, payload)
     _atomic_write_json(cfg.history_path(finished_at), payload)
@@ -2264,6 +2282,8 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "metrics_source": cfg.metrics_source,
         "wallet_count": len(records),
         "collectible_pages": collectible_pages,
+        "collection_snapshot_fallback": bool(collection_fallback_reason),
+        "collection_snapshot_fallback_reason": collection_fallback_reason,
         "full_rebuild": full_rebuild,
         "full_rebuild_reason": full_reason,
         "full_rebuild_active_only": bool(cfg.full_rebuild_active_only),
@@ -2294,6 +2314,8 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "metrics_source": cfg.metrics_source,
         "wallet_count": len(records),
         "collectible_pages": collectible_pages,
+        "collection_snapshot_fallback": bool(collection_fallback_reason),
+        "collection_snapshot_fallback_reason": collection_fallback_reason,
         "changed_wallets": len(changed_addrs),
         "changed_by_collection": len(changed_by_collection),
         "changed_by_activity": len(changed_by_activity),
@@ -2412,6 +2434,7 @@ def main() -> int:
     msg = (
         f"trigger={cfg.trigger} metrics_source={result['metrics_source']} "
         f"wallets={result['wallet_count']} collectible_pages={result['collectible_pages']} "
+        f"collection_fallback={1 if result['collection_snapshot_fallback'] else 0} "
         f"changed_wallets={result['changed_wallets']} changed_by_activity={result['changed_by_activity']} "
         f"refreshed_wallets={result['refreshed_wallets']} "
         f"removed_wallets={result['removed_wallets']} full_rebuild={result['full_rebuild']} "
@@ -2432,6 +2455,8 @@ def main() -> int:
             "metrics_source": result["metrics_source"],
             "wallet_count": result["wallet_count"],
             "collectible_pages": result["collectible_pages"],
+            "collection_snapshot_fallback": result["collection_snapshot_fallback"],
+            "collection_snapshot_fallback_reason": result["collection_snapshot_fallback_reason"],
             "changed_wallets": result["changed_wallets"],
             "changed_by_collection": result["changed_by_collection"],
             "changed_by_activity": result["changed_by_activity"],

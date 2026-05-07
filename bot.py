@@ -360,6 +360,36 @@ async def ranking_sync_status(interaction: discord.Interaction):
     await interaction.response.send_message(txt, ephemeral=True)
 
 
+@tree.command(name="ranking_rebuild", description="手動全量重算 rankings，並刷新 pack_rank")
+async def ranking_rebuild(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    ranking_ok = await _run_ranking_sync_script(
+        "manual_full_rebuild",
+        bootstrap_only=False,
+        full_rebuild=True,
+    )
+    pack_rank_ok = False
+    if ranking_ok:
+        pack_rank_ok = await _run_pack_rank_sync_script("manual_after_ranking_full_rebuild")
+
+    if ranking_ok and pack_rank_ok:
+        await interaction.followup.send(
+            "✅ rankings 已全量重算，pack_rank 已刷新。",
+            ephemeral=True,
+        )
+        return
+    if not ranking_ok:
+        await interaction.followup.send(
+            "❌ rankings 全量重算失敗，請看伺服器 log / `/ranking_sync_status`。",
+            ephemeral=True,
+        )
+        return
+    await interaction.followup.send(
+        "⚠️ rankings 已全量重算，但 pack_rank 刷新失敗，請看伺服器 log。",
+        ephemeral=True,
+    )
+
+
 @tree.command(name="ranking", description="查看各項排名 Top 10（文字版）")
 async def ranking(interaction: discord.Interaction):
     latest_path = os.path.join(_rank_sync_data_dir(), "latest.json")

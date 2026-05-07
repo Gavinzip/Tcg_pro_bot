@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone monthly pack-rank sync (contract-centered on-chain scan only)."""
+"""Standalone monthly pack-rank sync (wallet-time on-chain scan)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from onchain_metrics import OnchainConfig, scan_pack_open_counts_incremental
+from onchain_metrics import OnchainConfig, scan_wallet_open_counts_by_time_incremental
 
 try:
     from zoneinfo import ZoneInfo
@@ -22,10 +22,6 @@ except Exception:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
 
-DEFAULT_ONCHAIN_PACK_CONTRACTS = (
-    "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",  # OMEGA
-    "0xb2891022648c5fad3721c42c05d8d283d4d53080",  # RenaCrypt Pack
-)
 DEFAULT_MONTHLY_PACK_LAUNCH_START = "2026-05-01T00:00:00+08:00"
 
 
@@ -138,21 +134,26 @@ def _gacha_level(rank_value: int) -> str:
     return "none"
 
 
-def _build_username_map(rank_data_dir: Path) -> dict[str, str]:
+def _build_wallet_index(rank_data_dir: Path) -> tuple[list[str], dict[str, str]]:
     latest_path = rank_data_dir / "latest.json"
     payload = _json_load(latest_path)
     rows = payload.get("wallets") if isinstance(payload.get("wallets"), list) else []
-    out: dict[str, str] = {}
+    usernames: dict[str, str] = {}
+    wallets: list[str] = []
+    seen: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             continue
         addr = str(row.get("address") or "").strip().lower()
         if not addr.startswith("0x") or len(addr) != 42:
             continue
+        if addr not in seen:
+            seen.add(addr)
+            wallets.append(addr)
         username = str(row.get("username") or "").strip()
         if username:
-            out[addr] = username
-    return out
+            usernames[addr] = username
+    return wallets, usernames
 
 
 @dataclass
@@ -188,7 +189,7 @@ class PackRankConfig:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Standalone monthly pack-rank sync (contract-centered)")
+    parser = argparse.ArgumentParser(description="Standalone monthly pack-rank sync (wallet-time)")
     parser.add_argument("--trigger", default="manual")
     parser.add_argument("--data-dir", default="")
     return parser.parse_args()
@@ -211,14 +212,10 @@ def load_config(args: argparse.Namespace) -> PackRankConfig:
     onchain_usdt_contract = str(
         os.getenv("ONCHAIN_USDT_CONTRACT", "0x55d398326f99059ff775485246999027b3197955")
     ).strip().lower()
-    onchain_pack_contracts_default = _parse_address_csv(None, default_values=DEFAULT_ONCHAIN_PACK_CONTRACTS)
-    onchain_pack_contracts_base = _parse_address_csv(os.getenv("ONCHAIN_PACK_CONTRACTS"), default_values=())
-    onchain_pack_contracts_extra = _parse_address_csv(os.getenv("ONCHAIN_PACK_CONTRACTS_EXTRA"), default_values=())
-    onchain_pack_contracts = _merge_address_tuples(
-        onchain_pack_contracts_default,
-        onchain_pack_contracts_base,
-        onchain_pack_contracts_extra,
-    )
+    # Pack rank no longer uses a fixed pack-contract allowlist. It counts wallet
+    # USDT-out transactions that also receive NFTs in the same tx within the
+    # monthly time window.
+    onchain_pack_contracts: tuple[str, ...] = ()
     onchain_marketplace_contract = str(
         os.getenv("ONCHAIN_MARKETPLACE_CONTRACT", "0xae3e7268ef5a062946216a44f58a8f685ffd11d0")
     ).strip().lower()
@@ -242,8 +239,6 @@ def load_config(args: argparse.Namespace) -> PackRankConfig:
 def validate_config(cfg: PackRankConfig) -> None:
     if not cfg.onchain_api_key:
         raise RuntimeError("BSCSCAN_API_KEY is required for pack_rank sync")
-    if not cfg.onchain_pack_contracts:
-        raise RuntimeError("ONCHAIN_PACK_CONTRACTS is empty")
 
 
 def _build_onchain_cfg(cfg: PackRankConfig) -> OnchainConfig:
@@ -252,7 +247,7 @@ def _build_onchain_cfg(cfg: PackRankConfig) -> OnchainConfig:
         chain_id=cfg.onchain_chain_id,
         api_key=cfg.onchain_api_key,
         usdt_contract=cfg.onchain_usdt_contract,
-        pack_contracts=cfg.onchain_pack_contracts,
+        pack_contracts=(),
         marketplace_contract=cfg.onchain_marketplace_contract,
         page_size=cfg.onchain_page_size,
         retries=max(1, _to_int(os.getenv("API_MAX_RETRIES", "3"), 3)),
@@ -280,9 +275,10 @@ def run_sync(cfg: PackRankConfig) -> dict[str, Any]:
 
     prev_state = _json_load(cfg.state_path)
     onchain_cfg = _build_onchain_cfg(cfg)
-    scan = scan_pack_open_counts_incremental(
+    wallet_universe, username_map = _build_wallet_index(cfg.data_dir)
+    scan = scan_wallet_open_counts_by_time_incremental(
         onchain_cfg,
-        pack_contracts=cfg.onchain_pack_contracts,
+        wallets=wallet_universe,
         window_start_ts=window_start_ts,
         window_end_ts=window_end_ts,
         prev_state=prev_state,
@@ -291,8 +287,6 @@ def run_sync(cfg: PackRankConfig) -> dict[str, Any]:
     wallet_counts_raw = scan.get("wallet_counts") if isinstance(scan.get("wallet_counts"), dict) else {}
     stats = scan.get("stats") if isinstance(scan.get("stats"), dict) else {}
     next_state = scan.get("state") if isinstance(scan.get("state"), dict) else {}
-
-    username_map = _build_username_map(cfg.data_dir)
 
     rows: list[dict[str, Any]] = []
     for address, raw_count in wallet_counts_raw.items():
@@ -329,11 +323,11 @@ def run_sync(cfg: PackRankConfig) -> dict[str, Any]:
             "hunter": "top50",
             "seeker": "top200",
         },
-        "monthly_gacha_scan_mode": str(stats.get("scan_mode") or "contract_center_incremental"),
+        "monthly_gacha_scan_mode": str(stats.get("scan_mode") or "wallet_time_incremental"),
         "monthly_gacha_scan_api_calls": int(_to_int(stats.get("api_calls"), 0)),
         "monthly_gacha_scan_rows_scanned": int(_to_int(stats.get("rows_scanned"), 0)),
         "monthly_gacha_scan_reset": bool(stats.get("reset_applied")),
-        "contracts": list(cfg.onchain_pack_contracts),
+        "wallet_universe_count": len(wallet_universe),
         "wallet_count": len(rows),
         "total_monthly_opens": int(sum(int(r.get("monthly_gacha_open_count") or 0) for r in rows)),
     }
@@ -356,7 +350,7 @@ def run_sync(cfg: PackRankConfig) -> dict[str, Any]:
         "duration_sec": duration_sec,
         "api_calls": int(_to_int(stats.get("api_calls"), 0)),
         "rows_scanned": int(_to_int(stats.get("rows_scanned"), 0)),
-        "scan_mode": str(stats.get("scan_mode") or "contract_center_incremental"),
+        "scan_mode": str(stats.get("scan_mode") or "wallet_time_incremental"),
         "reset_applied": bool(stats.get("reset_applied")),
         "latest_path": str(cfg.latest_path),
         "history_path": str(cfg.history_path),

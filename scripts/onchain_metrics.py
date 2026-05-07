@@ -3,10 +3,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import os
 import time
 from typing import Any
 
 import requests
+
+
+ONCHAIN_DELAYED_MINT_WINDOW_SEC = max(0, int(os.getenv("ONCHAIN_DELAYED_MINT_WINDOW_SEC", "3600")))
 
 
 @dataclass(frozen=True)
@@ -167,6 +171,72 @@ def _fetch_token1155tx_page(
     raise RuntimeError(f"bscscan token1155tx request failed: {last_err}")
 
 
+def _fetch_nfttx_page(
+    cfg: OnchainConfig,
+    wallet: str,
+    action: str,
+    *,
+    page: int,
+    sort: str,
+    startblock: int | None = None,
+    endblock: int | None = None,
+) -> list[dict[str, Any]]:
+    action_norm = str(action or "").strip().lower()
+    if action_norm not in ("tokennfttx", "token1155tx"):
+        raise ValueError(f"unsupported nft action: {action}")
+
+    page_limit = int(max(1, min(1000, cfg.page_size)))
+    params = {
+        "chainid": int(cfg.chain_id),
+        "module": "account",
+        "action": action_norm,
+        "address": str(wallet or "").strip().lower(),
+        "page": int(page),
+        "offset": page_limit,
+        "sort": sort,
+        "apikey": cfg.api_key,
+    }
+    if startblock is not None and int(startblock) > 0:
+        params["startblock"] = int(startblock)
+    if endblock is not None and int(endblock) > 0:
+        params["endblock"] = int(endblock)
+
+    last_err: Exception | None = None
+    for attempt in range(1, max(1, cfg.retries) + 1):
+        try:
+            resp = requests.get(cfg.api_url, params=params, timeout=30)
+            status_code = int(resp.status_code or 0)
+            if status_code >= 500 or status_code == 429:
+                raise requests.HTTPError(f"HTTP {status_code}", response=resp)
+            resp.raise_for_status()
+
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError(f"bscscan {action_norm} invalid response")
+
+            message = str(data.get("message") or "").strip()
+            result = data.get("result")
+
+            if message == "No transactions found":
+                return []
+            if isinstance(result, list):
+                return [x for x in result if isinstance(x, dict)]
+            if isinstance(result, str):
+                lowered = result.lower()
+                if "max rate limit" in lowered or "query timeout" in lowered:
+                    raise RuntimeError(result)
+                if "no transactions found" in lowered:
+                    return []
+            raise RuntimeError(f"bscscan {action_norm} error: {message or result}")
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt < max(1, cfg.retries):
+                time.sleep(max(0.2, cfg.backoff_sec) * (2 ** (attempt - 1)))
+                continue
+            break
+    raise RuntimeError(f"bscscan {action_norm} request failed: {last_err}")
+
+
 def fetch_latest_usdt_tx_hash(cfg: OnchainConfig, wallet: str) -> str:
     rows = _fetch_tokentx_page(cfg, wallet, page=1, sort="desc")
     if not rows:
@@ -204,17 +274,201 @@ def fetch_all_erc1155_transfers(cfg: OnchainConfig, wallet: str, contract: str) 
     return out
 
 
-def _classify_transfer(row: dict[str, Any], wallet: str, cfg: OnchainConfig) -> str:
+def fetch_all_nft_transfers(cfg: OnchainConfig, wallet: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    limit = int(max(1, min(1000, cfg.page_size)))
+    for action in ("tokennfttx", "token1155tx"):
+        page = 1
+        try:
+            while True:
+                rows = _fetch_nfttx_page(cfg, wallet, action, page=page, sort="asc")
+                if not rows:
+                    break
+                out.extend(rows)
+                if len(rows) < limit:
+                    break
+                page += 1
+        except Exception:
+            if action == "token1155tx":
+                continue
+            raise
+    out.sort(key=lambda r: (_row_timestamp(r), _row_block_number(r), _row_tx_index(r), _row_hash(r)))
+    return out
+
+
+def _wallet_nft_tx_sets(nft_rows: list[dict[str, Any]], wallet: str) -> tuple[set[str], set[str]]:
+    wallet_norm = str(wallet or "").strip().lower()
+    nft_in_txs: set[str] = set()
+    nft_out_txs: set[str] = set()
+    for row in nft_rows:
+        if not isinstance(row, dict):
+            continue
+        tx_hash = _row_hash(row)
+        if not tx_hash:
+            continue
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        if to == wallet_norm:
+            nft_in_txs.add(tx_hash)
+        if frm == wallet_norm:
+            nft_out_txs.add(tx_hash)
+    return nft_in_txs, nft_out_txs
+
+
+def _is_zero_chain_address(value: str | None) -> bool:
+    text = str(value or "").strip().lower()
+    return text in ("", "0x0000000000000000000000000000000000000000")
+
+
+def _nft_row_token_id(row: dict[str, Any]) -> str:
+    return str(row.get("tokenID") or row.get("tokenId") or "").strip()
+
+
+def _delayed_open_pack_tx_hashes(
+    cfg: OnchainConfig,
+    wallet: str,
+    usdt_rows: list[dict[str, Any]],
+    nft_rows: list[dict[str, Any]],
+    nft_in_txs: set[str],
+) -> set[str]:
+    window_sec = int(ONCHAIN_DELAYED_MINT_WINDOW_SEC or 0)
+    if window_sec <= 0:
+        return set()
+
+    wallet_norm = str(wallet or "").strip().lower()
+    marketplace_contract = str(cfg.marketplace_contract or "").strip().lower()
+    payment_candidates: list[dict[str, Any]] = []
+    for row in usdt_rows:
+        if not isinstance(row, dict):
+            continue
+        tx_hash = _row_hash(row)
+        if not tx_hash or tx_hash in nft_in_txs:
+            continue
+        if _usdt_amount_from_raw(row.get("value"), row.get("tokenDecimal")) <= 0:
+            continue
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        if frm != wallet_norm:
+            continue
+        if not to.startswith("0x") or len(to) != 42:
+            continue
+        if to == marketplace_contract:
+            continue
+        if _row_timestamp(row) <= 0:
+            continue
+        payment_candidates.append(row)
+
+    if not payment_candidates:
+        return set()
+
+    payment_hashes = {_row_hash(row) for row in payment_candidates}
+    mint_groups_by_tx: dict[str, int] = {}
+    for row in nft_rows:
+        if not isinstance(row, dict):
+            continue
+        tx_hash = _row_hash(row)
+        if not tx_hash or tx_hash in payment_hashes:
+            continue
+        if not _nft_row_token_id(row):
+            continue
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        if to != wallet_norm or not _is_zero_chain_address(frm):
+            continue
+        ts = _row_timestamp(row)
+        if ts <= 0:
+            continue
+        prev = mint_groups_by_tx.get(tx_hash)
+        mint_groups_by_tx[tx_hash] = ts if prev is None else min(prev, ts)
+
+    mint_groups = sorted(mint_groups_by_tx.items(), key=lambda x: (int(x[1]), str(x[0])))
+    if not mint_groups:
+        return set()
+
+    matches: set[str] = set()
+    used_mint_txs: set[str] = set()
+    payment_candidates.sort(key=lambda r: (_row_timestamp(r), _row_block_number(r), _row_tx_index(r), _row_hash(r)))
+    for payment in payment_candidates:
+        pay_hash = _row_hash(payment)
+        pay_ts = _row_timestamp(payment)
+        for mint_hash, mint_ts in mint_groups:
+            if mint_hash in used_mint_txs:
+                continue
+            if mint_ts < pay_ts:
+                continue
+            if mint_ts - pay_ts > window_sec:
+                break
+            used_mint_txs.add(mint_hash)
+            matches.add(pay_hash)
+            break
+    return matches
+
+
+def _open_pack_tx_hashes(
+    cfg: OnchainConfig,
+    wallet: str,
+    usdt_rows: list[dict[str, Any]],
+    nft_rows: list[dict[str, Any]],
+) -> set[str]:
+    wallet_norm = str(wallet or "").strip().lower()
+    nft_in_txs, _nft_out_txs = _wallet_nft_tx_sets(nft_rows, wallet_norm)
+    seen_txs: set[str] = set()
+    marketplace_contract = str(cfg.marketplace_contract or "").strip().lower()
+    pack_contracts = {str(x or "").strip().lower() for x in (cfg.pack_contracts or ())}
+    delayed_txs = _delayed_open_pack_tx_hashes(cfg, wallet_norm, usdt_rows, nft_rows, nft_in_txs)
+    delayed_pack_recipients = {
+        str((row or {}).get("to") or "").strip().lower()
+        for row in usdt_rows
+        if isinstance(row, dict) and _row_hash(row) in delayed_txs
+    }
+    delayed_pack_recipients = {x for x in delayed_pack_recipients if x.startswith("0x") and len(x) == 42}
+
+    for row in usdt_rows:
+        if not isinstance(row, dict):
+            continue
+        tx_hash = _row_hash(row)
+        if not tx_hash or tx_hash in seen_txs:
+            continue
+        amount = _usdt_amount_from_raw(row.get("value"), row.get("tokenDecimal"))
+        if amount <= 0:
+            continue
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        if frm != wallet_norm:
+            continue
+        if to == marketplace_contract:
+            continue
+        if tx_hash in nft_in_txs or tx_hash in delayed_txs or to in delayed_pack_recipients or to in pack_contracts:
+            seen_txs.add(tx_hash)
+    return seen_txs
+
+
+def _classify_transfer(
+    row: dict[str, Any],
+    wallet: str,
+    cfg: OnchainConfig,
+    *,
+    tx_has_nft_in: bool = False,
+    tx_has_nft_out: bool = False,
+) -> str:
     frm = str(row.get("from") or "").strip().lower()
     to = str(row.get("to") or "").strip().lower()
-    if frm == wallet and to in cfg.pack_contracts:
-        return "open_pack"
-    if frm in cfg.pack_contracts and to == wallet:
-        return "buyback"
-    if frm == wallet and to == cfg.marketplace_contract:
+    marketplace_contract = str(cfg.marketplace_contract or "").strip().lower()
+    pack_contracts = {str(x or "").strip().lower() for x in (cfg.pack_contracts or ())}
+
+    if frm == wallet and to == marketplace_contract:
         return "mp_buy"
-    if frm == cfg.marketplace_contract and to == wallet:
+    if frm == marketplace_contract and to == wallet:
         return "mp_sell"
+    if frm == wallet and tx_has_nft_in:
+        return "open_pack"
+    if to == wallet and tx_has_nft_out:
+        return "buyback"
+    # Backward-compatible fallback for old configs with explicit pack contracts.
+    if frm == wallet and to in pack_contracts:
+        return "open_pack"
+    if frm in pack_contracts and to == wallet:
+        return "buyback"
     return "other"
 
 
@@ -465,6 +719,277 @@ def scan_pack_open_counts_incremental(
     }
 
 
+def _fetch_usdt_transfers_in_window(
+    cfg: OnchainConfig,
+    wallet: str,
+    *,
+    window_start_ts: int,
+    window_end_ts: int,
+    startblock: int,
+) -> tuple[list[dict[str, Any]], int, int]:
+    out: list[dict[str, Any]] = []
+    api_calls = 0
+    rows_scanned = 0
+    limit = int(max(1, min(1000, cfg.page_size)))
+    max_pages_per_window = max(1, 10000 // limit)
+    page = 1
+    current_start_block = int(max(0, startblock or 0))
+    max_block_seen = current_start_block
+    stop_on_window_end = False
+
+    while True:
+        if page > max_pages_per_window:
+            next_start_block = int(max(max_block_seen, current_start_block) + 1)
+            if next_start_block <= current_start_block:
+                break
+            current_start_block = next_start_block
+            page = 1
+            continue
+
+        rows = _fetch_tokentx_page(
+            cfg,
+            wallet,
+            page=page,
+            sort="asc",
+            startblock=current_start_block if current_start_block > 0 else None,
+        )
+        api_calls += 1
+        if not rows:
+            break
+        for row in rows:
+            rows_scanned += 1
+            block = _row_block_number(row)
+            if block > max_block_seen:
+                max_block_seen = block
+            ts = _row_timestamp(row)
+            if ts >= int(window_end_ts):
+                stop_on_window_end = True
+                break
+            if ts < int(window_start_ts):
+                continue
+            out.append(row)
+        if stop_on_window_end:
+            break
+        if len(rows) < limit:
+            break
+        page += 1
+
+    return out, api_calls, rows_scanned
+
+
+def _fetch_nft_transfers_in_window(
+    cfg: OnchainConfig,
+    wallet: str,
+    *,
+    window_start_ts: int,
+    window_end_ts: int,
+    startblock: int,
+) -> tuple[list[dict[str, Any]], int, int]:
+    out: list[dict[str, Any]] = []
+    api_calls = 0
+    rows_scanned = 0
+    limit = int(max(1, min(1000, cfg.page_size)))
+    max_pages_per_window = max(1, 10000 // limit)
+
+    for action in ("tokennfttx", "token1155tx"):
+        page = 1
+        current_start_block = int(max(0, startblock or 0))
+        max_block_seen = current_start_block
+        stop_on_window_end = False
+        try:
+            while True:
+                if page > max_pages_per_window:
+                    next_start_block = int(max(max_block_seen, current_start_block) + 1)
+                    if next_start_block <= current_start_block:
+                        break
+                    current_start_block = next_start_block
+                    page = 1
+                    continue
+
+                rows = _fetch_nfttx_page(
+                    cfg,
+                    wallet,
+                    action,
+                    page=page,
+                    sort="asc",
+                    startblock=current_start_block if current_start_block > 0 else None,
+                )
+                api_calls += 1
+                if not rows:
+                    break
+                for row in rows:
+                    rows_scanned += 1
+                    block = _row_block_number(row)
+                    if block > max_block_seen:
+                        max_block_seen = block
+                    ts = _row_timestamp(row)
+                    if ts >= int(window_end_ts):
+                        stop_on_window_end = True
+                        break
+                    if ts < int(window_start_ts):
+                        continue
+                    out.append(row)
+                if stop_on_window_end:
+                    break
+                if len(rows) < limit:
+                    break
+                page += 1
+        except Exception:
+            if action == "token1155tx":
+                continue
+            raise
+
+    out.sort(key=lambda r: (_row_timestamp(r), _row_block_number(r), _row_tx_index(r), _row_hash(r)))
+    return out, api_calls, rows_scanned
+
+
+def _count_open_pack_txs(
+    cfg: OnchainConfig,
+    wallet: str,
+    usdt_rows: list[dict[str, Any]],
+    nft_rows: list[dict[str, Any]],
+) -> int:
+    return len(_open_pack_tx_hashes(cfg, wallet, usdt_rows, nft_rows))
+
+
+def scan_wallet_open_counts_by_time_incremental(
+    cfg: OnchainConfig,
+    *,
+    wallets: list[str] | tuple[str, ...] | set[str],
+    window_start_ts: int,
+    window_end_ts: int,
+    prev_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    wallet_list: list[str] = []
+    seen_wallets: set[str] = set()
+    for raw in list(wallets or ()):
+        addr = str(raw or "").strip().lower()
+        if not addr.startswith("0x") or len(addr) != 42:
+            continue
+        if addr in seen_wallets:
+            continue
+        seen_wallets.add(addr)
+        wallet_list.append(addr)
+
+    start_ts = int(max(0, window_start_ts or 0))
+    end_ts = int(max(start_ts, window_end_ts or 0))
+    prev = prev_state if isinstance(prev_state, dict) else {}
+    prev_window_start = int(_to_decimal(prev.get("window_start_ts")) or 0)
+    reset_applied = prev_window_start != start_ts
+
+    prev_counts: dict[str, int] = {}
+    prev_markers: dict[str, str] = {}
+    if not reset_applied:
+        raw_counts = prev.get("wallet_counts")
+        if isinstance(raw_counts, dict):
+            for addr, raw in raw_counts.items():
+                key = str(addr or "").strip().lower()
+                if key.startswith("0x") and len(key) == 42:
+                    prev_counts[key] = max(0, int(_to_decimal(raw)))
+        raw_markers = prev.get("wallet_latest_usdt_tx")
+        if isinstance(raw_markers, dict):
+            for addr, raw in raw_markers.items():
+                key = str(addr or "").strip().lower()
+                if key.startswith("0x") and len(key) == 42:
+                    prev_markers[key] = str(raw or "").strip().lower()
+
+    api_calls = 0
+    rows_scanned = 0
+    wallet_counts: dict[str, int] = {}
+    next_markers: dict[str, str] = {}
+    to_rescan: list[tuple[str, str]] = []
+    reused_wallets = 0
+    failed_wallets: dict[str, str] = {}
+
+    for wallet in wallet_list:
+        latest_marker = ""
+        latest_ok = True
+        try:
+            latest_marker = fetch_latest_usdt_tx_hash(cfg, wallet)
+            api_calls += 1
+        except Exception as e:  # noqa: BLE001
+            latest_ok = False
+            latest_marker = str(prev_markers.get(wallet) or "")
+            failed_wallets[wallet] = f"latest_usdt: {type(e).__name__}: {e}"
+        if (
+            latest_ok
+            and not reset_applied
+            and wallet in prev_counts
+            and str(prev_markers.get(wallet) or "") == str(latest_marker or "")
+        ):
+            wallet_counts[wallet] = int(prev_counts.get(wallet, 0))
+            next_markers[wallet] = latest_marker
+            reused_wallets += 1
+            continue
+        to_rescan.append((wallet, latest_marker))
+
+    window_start_block = 0
+    if to_rescan and start_ts > 0:
+        try:
+            window_start_block = _fetch_block_number_by_timestamp(cfg, start_ts)
+            api_calls += 1
+        except Exception:
+            window_start_block = 0
+
+    rescanned_wallets = 0
+    for wallet, latest_marker in to_rescan:
+        try:
+            usdt_rows, calls, scanned = _fetch_usdt_transfers_in_window(
+                cfg,
+                wallet,
+                window_start_ts=start_ts,
+                window_end_ts=end_ts,
+                startblock=window_start_block,
+            )
+            api_calls += calls
+            rows_scanned += scanned
+            nft_rows, calls, scanned = _fetch_nft_transfers_in_window(
+                cfg,
+                wallet,
+                window_start_ts=start_ts,
+                window_end_ts=end_ts,
+                startblock=window_start_block,
+            )
+            api_calls += calls
+            rows_scanned += scanned
+            wallet_counts[wallet] = _count_open_pack_txs(cfg, wallet, usdt_rows, nft_rows)
+            if not latest_marker:
+                latest_marker = _row_hash(usdt_rows[-1]) if usdt_rows else ""
+            next_markers[wallet] = latest_marker
+            rescanned_wallets += 1
+        except Exception as e:  # noqa: BLE001
+            wallet_counts[wallet] = int(prev_counts.get(wallet, 0))
+            next_markers[wallet] = str(prev_markers.get(wallet) or latest_marker or "")
+            failed_wallets[wallet] = f"rescan: {type(e).__name__}: {e}"
+
+    state = {
+        "version": 2,
+        "scan_mode": "wallet_time_incremental",
+        "window_start_ts": int(start_ts),
+        "window_end_ts": int(end_ts),
+        "updated_at_ts": int(time.time()),
+        "wallet_counts": wallet_counts,
+        "wallet_latest_usdt_tx": next_markers,
+    }
+    return {
+        "state": state,
+        "wallet_counts": wallet_counts,
+        "stats": {
+            "scan_mode": "wallet_time_incremental",
+            "api_calls": int(api_calls),
+            "rows_scanned": int(rows_scanned),
+            "wallets": int(len(wallet_list)),
+            "rescanned_wallets": int(rescanned_wallets),
+            "reused_wallets": int(reused_wallets),
+            "failed_wallets": int(len(failed_wallets)),
+            "failed_wallet_errors": failed_wallets,
+            "reset_applied": bool(reset_applied),
+            "window_start_ts": int(start_ts),
+            "window_end_ts": int(end_ts),
+        },
+    }
+
+
 def analyze_sbt_wallet(cfg: OnchainConfig, wallet: str, sbt_contract: str) -> dict[str, int]:
     wallet_norm = str(wallet or "").strip().lower()
     contract_norm = str(sbt_contract or "").strip().lower()
@@ -511,6 +1036,9 @@ def analyze_wallet(
         }
 
     transfers = fetch_all_usdt_transfers(cfg, wallet_norm)
+    nft_rows = fetch_all_nft_transfers(cfg, wallet_norm)
+    nft_in_txs, nft_out_txs = _wallet_nft_tx_sets(nft_rows, wallet_norm)
+    open_pack_hashes = _open_pack_tx_hashes(cfg, wallet_norm, transfers, nft_rows)
     pack_spent = Decimal("0")
     buyback_earned = Decimal("0")
     market_buy_spent = Decimal("0")
@@ -521,7 +1049,16 @@ def analyze_wallet(
     trade_sell_tx_count = 0
 
     for row in transfers:
-        cls = _classify_transfer(row, wallet_norm, cfg)
+        tx_hash = _row_hash(row)
+        cls = _classify_transfer(
+            row,
+            wallet_norm,
+            cfg,
+            tx_has_nft_in=bool(tx_hash and tx_hash in nft_in_txs),
+            tx_has_nft_out=bool(tx_hash and tx_hash in nft_out_txs),
+        )
+        if cls == "other" and tx_hash in open_pack_hashes:
+            cls = "open_pack"
         amount = _usdt_amount_from_raw(row.get("value"), row.get("tokenDecimal"))
         if amount <= 0:
             continue

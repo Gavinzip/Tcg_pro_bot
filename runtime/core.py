@@ -638,6 +638,12 @@ PROFILE_API_MAX_RETRIES = max(1, int(os.getenv("PROFILE_API_MAX_RETRIES", "4")))
 PROFILE_API_RETRY_BACKOFF_SEC = max(0.2, float(os.getenv("PROFILE_API_RETRY_BACKOFF_SEC", "0.8")))
 PROFILE_ACTIVITY_PAGE_LIMIT = max(1, min(50, int(os.getenv("PROFILE_ACTIVITY_PAGE_LIMIT", "50"))))
 PROFILE_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_ACTIVITY_MAX_PAGES", "120")))
+PROFILE_PACK_NAME_HINT_MAX_PAGES = max(0, int(os.getenv("PROFILE_PACK_NAME_HINT_MAX_PAGES", "4")))
+PROFILE_CHAIN_DELAYED_MINT_WINDOW_SEC = max(0, int(os.getenv("PROFILE_CHAIN_DELAYED_MINT_WINDOW_SEC", "3600")))
+PROFILE_CHAIN_ACTIVITY_MATCH_WINDOW_SEC = max(
+    0,
+    int(os.getenv("PROFILE_CHAIN_ACTIVITY_MATCH_WINDOW_SEC", str(PROFILE_CHAIN_DELAYED_MINT_WINDOW_SEC or 3600))),
+)
 PROFILE_TOKEN_ACTIVITY_PAGE_LIMIT = max(1, min(50, int(os.getenv("PROFILE_TOKEN_ACTIVITY_PAGE_LIMIT", "50"))))
 PROFILE_TOKEN_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_TOKEN_ACTIVITY_MAX_PAGES", "20")))
 PROFILE_HTTP_POOL_MAXSIZE = max(8, int(os.getenv("PROFILE_HTTP_POOL_MAXSIZE", "48")))
@@ -707,10 +713,6 @@ except Exception:
 PROFILE_RENAISS_CLI_MAX_RETRIES = max(1, int(os.getenv("PROFILE_RENAISS_CLI_MAX_RETRIES", "2")))
 PROFILE_RENAISS_CLI_BIN = str(os.getenv("PROFILE_RENAISS_CLI_BIN", "npx")).strip() or "npx"
 PROFILE_RENAISS_CLI_PACKAGE = str(os.getenv("PROFILE_RENAISS_CLI_PACKAGE", "renaiss")).strip() or "renaiss"
-DEFAULT_ONCHAIN_PACK_CONTRACTS = (
-    "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
-    "0xb2891022648c5fad3721c42c05d8d283d4d53080",
-)
 if PROFILE_REALTIME_RECALC_ON_PROFILE and PROFILE_REALTIME_METRICS_SOURCE == "onchain":
     if _ONCHAIN_ANALYZE_WALLET_FN is None and _ONCHAIN_METRICS_IMPORT_ERROR is not None:
         print(
@@ -951,31 +953,15 @@ def _build_profile_onchain_cfg(*, force: bool = False):
     usdt_contract = str(
         os.getenv("ONCHAIN_USDT_CONTRACT", "0x55d398326f99059ff775485246999027b3197955")
     ).strip().lower()
-    pack_contracts_default = _parse_address_csv(
-        None,
-        default_values=DEFAULT_ONCHAIN_PACK_CONTRACTS,
-    )
-    pack_contracts_base = _parse_address_csv(
-        os.getenv("ONCHAIN_PACK_CONTRACTS"),
-        default_values=(),
-    )
-    pack_contracts_extra = _parse_address_csv(
-        os.getenv("ONCHAIN_PACK_CONTRACTS_EXTRA"),
-        default_values=(),
-    )
-    pack_contracts = _merge_address_tuples(
-        pack_contracts_default,
-        pack_contracts_base,
-        pack_contracts_extra,
-    )
+    # Open-pack detection is inferred from wallet USDT tx + same-tx NFT receipts.
+    # Keep this field empty so legacy env allowlists cannot restrict profile metrics.
+    pack_contracts: tuple[str, ...] = ()
     marketplace_contract = str(
         os.getenv("ONCHAIN_MARKETPLACE_CONTRACT", "0xae3e7268ef5a062946216a44f58a8f685ffd11d0")
     ).strip().lower()
     page_size = max(100, min(10000, int(os.getenv("ONCHAIN_PAGE_SIZE", "10000"))))
     retries = max(1, int(os.getenv("PROFILE_ONCHAIN_RETRIES", os.getenv("PROFILE_API_MAX_RETRIES", "4"))))
     backoff_sec = max(0.2, float(os.getenv("PROFILE_ONCHAIN_BACKOFF_SEC", os.getenv("PROFILE_API_RETRY_BACKOFF_SEC", "0.8"))))
-    if not pack_contracts:
-        return None
     return _ONCHAIN_CONFIG_CLS(
         api_url=api_url,
         chain_id=chain_id,
@@ -3743,6 +3729,242 @@ def _record_pack_unit_price(pack_map: dict, contract_key: str | None, pack_name:
     return changed
 
 
+def _pack_name_is_real(label: str | None, contract_key: str | None = None) -> bool:
+    text = str(label or "").strip()
+    if not text or text.lower() == "unknown pack":
+        return False
+    contract = str(contract_key or "").strip().lower()
+    if contract and text.lower() == f"contract {_short_hex(contract)}".lower():
+        return False
+    if text.lower().startswith("contract 0x"):
+        return False
+    return True
+
+
+def _lookup_pack_name(pack_map: dict, contract_key: str | None) -> str:
+    if not isinstance(pack_map, dict):
+        return ""
+    key = str(contract_key or "").strip().lower()
+    if not key:
+        return ""
+    by_contract = pack_map.get("by_contract") if isinstance(pack_map.get("by_contract"), dict) else {}
+    row = by_contract.get(key)
+    if isinstance(row, dict):
+        label = str(row.get("pack_name") or "").strip()
+        if _pack_name_is_real(label, key):
+            return label
+    return ""
+
+
+def _record_pack_name(pack_map: dict, contract_key: str | None, pack_name: str | None) -> bool:
+    if not isinstance(pack_map, dict):
+        return False
+    key = str(contract_key or "").strip().lower()
+    label = str(pack_name or "").strip()
+    if not key or not _pack_name_is_real(label, key):
+        return False
+    if not isinstance(pack_map.get("by_contract"), dict):
+        pack_map["by_contract"] = {}
+    if not isinstance(pack_map.get("by_pack_name"), dict):
+        pack_map["by_pack_name"] = {}
+    by_contract = pack_map["by_contract"]
+    by_pack_name = pack_map["by_pack_name"]
+    now_iso = datetime.now(timezone.utc).isoformat()
+    changed = False
+
+    prev = by_contract.get(key) if isinstance(by_contract.get(key), dict) else {}
+    next_row = dict(prev)
+    next_row["pack_name"] = label
+    next_row["updated_at"] = now_iso
+    if prev != next_row:
+        by_contract[key] = next_row
+        changed = True
+
+    name_key = _normalize_pack_label_key(label)
+    if name_key:
+        prev_name = by_pack_name.get(name_key) if isinstance(by_pack_name.get(name_key), dict) else {}
+        next_name = dict(prev_name)
+        next_name["pack_name"] = label
+        next_name["contract_key"] = key
+        next_name["updated_at"] = now_iso
+        if prev_name != next_name:
+            by_pack_name[name_key] = next_name
+            changed = True
+    return changed
+
+
+def _fetch_pack_contract_name_hints(wallet_address: str, target_contracts: set[str]) -> dict[str, str]:
+    targets = {
+        str(x or "").strip().lower()
+        for x in (target_contracts or set())
+        if str(x or "").strip().lower().startswith("0x") and len(str(x or "").strip().lower()) == 42
+    }
+    if not targets or PROFILE_PACK_NAME_HINT_MAX_PAGES <= 0:
+        return {}
+
+    hints: dict[str, str] = {}
+    seen_cursors: set[str] = set()
+    cursor: str | None = None
+    for _ in range(PROFILE_PACK_NAME_HINT_MAX_PAGES):
+        page = _trpc_user_activities(wallet_address, cursor=cursor, limit=PROFILE_ACTIVITY_PAGE_LIMIT)
+        activities = page.get("activities") if isinstance(page.get("activities"), list) else []
+        for row in activities:
+            if not isinstance(row, dict):
+                continue
+            row_type = str(row.get("__typename") or "").strip()
+            if row_type not in ("PerpetualPullActivity", "PerpetualReleaseTokenActivity"):
+                continue
+            contract = str(row.get("contractAddress") or "").strip().lower()
+            if contract not in targets or contract in hints:
+                continue
+            label = _pack_label_from_pull_item(row.get("item") if isinstance(row.get("item"), dict) else None)
+            if _pack_name_is_real(label, contract):
+                hints[contract] = label
+        if len(hints) >= len(targets):
+            break
+        next_cursor = page.get("nextCursor")
+        if not next_cursor:
+            break
+        next_cursor = str(next_cursor)
+        if next_cursor in seen_cursors:
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return hints
+
+
+def _is_zero_chain_address(value: str | None) -> bool:
+    text = str(value or "").strip().lower()
+    return text in ("", "0x0000000000000000000000000000000000000000")
+
+
+def _nft_row_token_id(row: dict) -> str:
+    return str((row or {}).get("tokenID") or (row or {}).get("tokenId") or "").strip()
+
+
+def _fetch_pull_activity_hints(wallet_address: str) -> list[dict]:
+    if PROFILE_PACK_NAME_HINT_MAX_PAGES <= 0:
+        return []
+
+    hints: list[dict] = []
+    seen_cursors: set[str] = set()
+    cursor: str | None = None
+    for _ in range(PROFILE_PACK_NAME_HINT_MAX_PAGES):
+        page = _trpc_user_activities(wallet_address, cursor=cursor, limit=PROFILE_ACTIVITY_PAGE_LIMIT)
+        activities = page.get("activities") if isinstance(page.get("activities"), list) else []
+        for row in activities:
+            if not isinstance(row, dict):
+                continue
+            row_type = str(row.get("__typename") or "").strip()
+            if row_type != "PullActivity":
+                continue
+            row_item = row.get("item") if isinstance(row.get("item"), dict) else {}
+            pack_id = str(row.get("packId") or "").strip()
+            pack_label = _pack_label_from_pull_item(row_item)
+            pack_key = f"legacy:{pack_id}" if pack_id else f"legacy-name:{pack_label}"
+            token_id = str(row.get("nftTokenId") or row.get("tokenId") or row_item.get("tokenId") or "").strip()
+            hints.append(
+                {
+                    "pack_key": pack_key.strip().lower(),
+                    "pack_name": pack_label,
+                    "token_id": token_id,
+                    "timestamp": int(_parse_int(row.get("timestamp")) or 0),
+                    "price": _wei_to_usdt(row.get("priceInUsdt")),
+                    "checkout_id": str(row.get("checkoutId") or "").strip(),
+                    "name": str(
+                        row_item.get("collectibleName")
+                        or row_item.get("title")
+                        or row_item.get("name")
+                        or pack_label
+                        or "Unknown Collectible"
+                    ).strip(),
+                    "market_image": str(row_item.get("imageUrl") or "").strip(),
+                    "preview_image": str(row_item.get("collectibleImageUrl") or "").strip(),
+                    "image": str(row_item.get("imageUrl") or row_item.get("collectibleImageUrl") or "").strip(),
+                }
+            )
+        next_cursor = page.get("nextCursor")
+        if not next_cursor:
+            break
+        next_cursor = str(next_cursor)
+        if next_cursor in seen_cursors:
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    hints.sort(key=lambda x: int(_parse_int(x.get("timestamp")) or 0))
+    return hints
+
+
+def _match_delayed_pull_hints(delayed_matches: dict[str, dict], hints: list[dict]) -> dict[str, dict]:
+    if not delayed_matches or not hints:
+        return {}
+
+    token_hint_map: dict[str, list[dict]] = defaultdict(list)
+    for hint in hints:
+        token_id = str((hint or {}).get("token_id") or "").strip()
+        if token_id:
+            token_hint_map[token_id].append(hint)
+
+    matched: dict[str, dict] = {}
+    used_hint_ids: set[int] = set()
+
+    # Token ID is the strongest join between chain mint rows and official legacy PullActivity.
+    for tx_hash, match in sorted(
+        delayed_matches.items(),
+        key=lambda item: int(_parse_int((item[1].get("payment") or {}).get("timeStamp")) or 0),
+    ):
+        mint_rows = [x for x in (match.get("mint_rows") or []) if isinstance(x, dict)]
+        for nft_row in mint_rows:
+            token_id = _nft_row_token_id(nft_row)
+            for hint in token_hint_map.get(token_id) or []:
+                if id(hint) in used_hint_ids:
+                    continue
+                matched[tx_hash] = hint
+                used_hint_ids.add(id(hint))
+                break
+            if tx_hash in matched:
+                break
+
+    # Older rows can occasionally miss token IDs. Fall back to nearest activity timestamp.
+    window_sec = int(PROFILE_CHAIN_ACTIVITY_MATCH_WINDOW_SEC or PROFILE_CHAIN_DELAYED_MINT_WINDOW_SEC or 0)
+    if window_sec <= 0:
+        return matched
+
+    for tx_hash, match in sorted(
+        delayed_matches.items(),
+        key=lambda item: int(_parse_int((item[1].get("payment") or {}).get("timeStamp")) or 0),
+    ):
+        if tx_hash in matched:
+            continue
+        payment = match.get("payment") if isinstance(match.get("payment"), dict) else {}
+        payment_ts = int(_parse_int(payment.get("timeStamp")) or _parse_int(payment.get("timestamp")) or 0)
+        if payment_ts <= 0:
+            continue
+        best: dict | None = None
+        best_score: tuple[int, int] | None = None
+        payment_amount = _tokentx_usdt_amount(payment)
+        for hint in hints:
+            if id(hint) in used_hint_ids:
+                continue
+            hint_ts = int(_parse_int(hint.get("timestamp")) or 0)
+            if hint_ts <= 0:
+                continue
+            delta = abs(hint_ts - payment_ts)
+            if delta > window_sec:
+                continue
+            price = _to_decimal(hint.get("price"))
+            price_mismatch = 0 if price > 0 and payment_amount > 0 and abs(price - payment_amount) <= Decimal("0.000001") else 1
+            score = (price_mismatch, delta)
+            if best_score is None or score < best_score:
+                best_score = score
+                best = hint
+        if best:
+            matched[tx_hash] = best
+            used_hint_ids.add(id(best))
+
+    return matched
+
+
 def _build_wallet_activity_history_legacy(wallet_address: str, profile_lang: str = "en") -> dict:
     lang = _profile_lang_from_locale(profile_lang)
     labels = _profile_history_labels(lang)
@@ -4386,20 +4608,135 @@ def _tokentx_usdt_amount(row: dict) -> Decimal:
     return value / (Decimal(10) ** decimals)
 
 
-def _classify_onchain_usdt_transfer(row: dict, wallet_norm: str, cfg) -> str:
+def _classify_onchain_usdt_transfer(
+    row: dict,
+    wallet_norm: str,
+    cfg,
+    *,
+    tx_has_nft_in: bool = False,
+    tx_has_nft_out: bool = False,
+) -> str:
     frm = str(row.get("from") or "").strip().lower()
     to = str(row.get("to") or "").strip().lower()
     pack_contracts = {str(x or "").strip().lower() for x in (getattr(cfg, "pack_contracts", ()) or ())}
     marketplace_contract = str(getattr(cfg, "marketplace_contract", "") or "").strip().lower()
-    if frm == wallet_norm and to in pack_contracts:
-        return "open_pack"
-    if frm in pack_contracts and to == wallet_norm:
-        return "buyback"
     if frm == wallet_norm and to == marketplace_contract:
         return "mp_buy"
     if frm == marketplace_contract and to == wallet_norm:
         return "mp_sell"
+    if frm == wallet_norm and tx_has_nft_in:
+        return "open_pack"
+    if to == wallet_norm and tx_has_nft_out:
+        return "buyback"
+    # Backward-compatible fallback if cfg.pack_contracts is populated by older callers.
+    if frm == wallet_norm and to in pack_contracts:
+        return "open_pack"
+    if frm in pack_contracts and to == wallet_norm:
+        return "buyback"
     return "other"
+
+
+def _infer_delayed_open_pack_matches(
+    usdt_rows: list[dict],
+    nft_rows: list[dict],
+    wallet_norm: str,
+    cfg,
+    nft_in_txs: set[str],
+) -> dict[str, dict]:
+    window_sec = int(PROFILE_CHAIN_DELAYED_MINT_WINDOW_SEC or 0)
+    if window_sec <= 0:
+        return {}
+
+    marketplace_contract = str(getattr(cfg, "marketplace_contract", "") or "").strip().lower()
+    payment_candidates: list[dict] = []
+    for row in usdt_rows:
+        if not isinstance(row, dict):
+            continue
+        tx_hash = str(row.get("hash") or "").strip().lower()
+        if not tx_hash or tx_hash in nft_in_txs:
+            continue
+        amount = _tokentx_usdt_amount(row)
+        if amount <= 0:
+            continue
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        if frm != wallet_norm:
+            continue
+        if not to.startswith("0x") or len(to) != 42:
+            continue
+        if to == marketplace_contract:
+            continue
+        ts = int(_parse_int(row.get("timeStamp")) or _parse_int(row.get("timestamp")) or 0)
+        if ts <= 0:
+            continue
+        payment_candidates.append(row)
+
+    if not payment_candidates:
+        return {}
+
+    mint_groups_by_tx: dict[str, dict] = {}
+    payment_tx_hashes = {str(x.get("hash") or "").strip().lower() for x in payment_candidates if isinstance(x, dict)}
+    for row in nft_rows:
+        if not isinstance(row, dict):
+            continue
+        tx_hash = str(row.get("hash") or "").strip().lower()
+        if not tx_hash:
+            continue
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        token_id = _nft_row_token_id(row)
+        if to != wallet_norm or not token_id or not _is_zero_chain_address(frm):
+            continue
+        if tx_hash in payment_tx_hashes:
+            continue
+        ts = int(_parse_int(row.get("timeStamp")) or _parse_int(row.get("timestamp")) or 0)
+        if ts <= 0:
+            continue
+        group = mint_groups_by_tx.get(tx_hash)
+        if group is None:
+            group = {"hash": tx_hash, "timestamp": ts, "mint_rows": []}
+            mint_groups_by_tx[tx_hash] = group
+        group["timestamp"] = min(int(group.get("timestamp") or ts), ts)
+        group["mint_rows"].append(row)
+
+    mint_groups = sorted(mint_groups_by_tx.values(), key=lambda x: (int(x.get("timestamp") or 0), str(x.get("hash") or "")))
+    if not mint_groups:
+        return {}
+
+    matches: dict[str, dict] = {}
+    used_mint_txs: set[str] = set()
+    payment_candidates.sort(
+        key=lambda r: (
+            int(_parse_int((r or {}).get("timeStamp")) or _parse_int((r or {}).get("timestamp")) or 0),
+            str((r or {}).get("hash") or ""),
+        )
+    )
+    for payment in payment_candidates:
+        pay_hash = str(payment.get("hash") or "").strip().lower()
+        pay_ts = int(_parse_int(payment.get("timeStamp")) or _parse_int(payment.get("timestamp")) or 0)
+        best_group = None
+        for group in mint_groups:
+            mint_hash = str(group.get("hash") or "")
+            if mint_hash in used_mint_txs:
+                continue
+            mint_ts = int(group.get("timestamp") or 0)
+            if mint_ts < pay_ts:
+                continue
+            if mint_ts - pay_ts > window_sec:
+                break
+            best_group = group
+            break
+        if not best_group:
+            continue
+        mint_hash = str(best_group.get("hash") or "")
+        used_mint_txs.add(mint_hash)
+        matches[pay_hash] = {
+            "payment": payment,
+            "mint_tx": mint_hash,
+            "mint_ts": int(best_group.get("timestamp") or 0),
+            "mint_rows": list(best_group.get("mint_rows") or []),
+        }
+    return matches
 
 
 def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str = "en") -> dict:
@@ -4453,6 +4790,26 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     nft_rows.sort(
         key=lambda r: int(_parse_int((r or {}).get("timeStamp")) or _parse_int((r or {}).get("timestamp")) or 0)
     )
+    nft_in_txs: set[str] = set()
+    nft_out_txs: set[str] = set()
+    for row in nft_rows:
+        tx_hash = str((row or {}).get("hash") or "").strip().lower()
+        if not tx_hash:
+            continue
+        frm = str((row or {}).get("from") or "").strip().lower()
+        to = str((row or {}).get("to") or "").strip().lower()
+        if to == wallet_norm:
+            nft_in_txs.add(tx_hash)
+        if frm == wallet_norm:
+            nft_out_txs.add(tx_hash)
+    delayed_open_matches = _infer_delayed_open_pack_matches(usdt_rows, nft_rows, wallet_norm, cfg, nft_in_txs)
+    delayed_open_tx_hashes = set(delayed_open_matches.keys())
+    delayed_pack_recipients = {
+        str(((match.get("payment") or {}).get("to")) or "").strip().lower()
+        for match in delayed_open_matches.values()
+        if isinstance(match, dict)
+    }
+    delayed_pack_recipients = {x for x in delayed_pack_recipients if x.startswith("0x") and len(x) == 42}
 
     ts_values: list[int] = []
     open_pack_txs: dict[str, dict] = {}
@@ -4486,7 +4843,17 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         tx_hash = str(row.get("hash") or "").strip().lower()
         frm = str(row.get("from") or "").strip().lower()
         to = str(row.get("to") or "").strip().lower()
-        cls = _classify_onchain_usdt_transfer(row, wallet_norm, cfg)
+        cls = _classify_onchain_usdt_transfer(
+            row,
+            wallet_norm,
+            cfg,
+            tx_has_nft_in=bool(tx_hash and tx_hash in nft_in_txs),
+            tx_has_nft_out=bool(tx_hash and tx_hash in nft_out_txs),
+        )
+        if cls == "other" and tx_hash in delayed_open_tx_hashes:
+            cls = "open_pack"
+        elif cls == "other" and frm == wallet_norm and to in delayed_pack_recipients:
+            cls = "open_pack"
         if cls == "open_pack":
             _upsert_tx(open_pack_txs, tx_hash, counterparty=to, ts=ts, amount=amount)
         elif cls == "buyback":
@@ -4502,6 +4869,8 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     contract_inferred_count: defaultdict[str, int] = defaultdict(int)
     contract_spent_total: defaultdict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     contract_pack_name: dict[str, str] = {}
+    pack_price_map = _load_pack_price_map()
+    pack_price_map_dirty = False
 
     release_cards_by_token: dict[str, dict] = {}
     open_pack_tokens_by_tx: defaultdict[str, set[str]] = defaultdict(set)
@@ -4509,6 +4878,26 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     market_buy_tokens_by_tx: defaultdict[str, set[str]] = defaultdict(set)
     withdraw_token_ids: set[str] = set()
     withdraw_targets = _profile_withdraw_target_set()
+    delayed_hint_by_tx: dict[str, dict] = {}
+    delayed_hint_by_token: dict[str, dict] = {}
+    if delayed_open_matches:
+        try:
+            delayed_hints = _fetch_pull_activity_hints(wallet_norm)
+            delayed_hint_by_tx = _match_delayed_pull_hints(delayed_open_matches, delayed_hints)
+        except Exception as e:
+            print(f"⚠️ delayed pull hint lookup failed for {wallet_norm}: {e}", file=sys.stderr)
+            delayed_hint_by_tx = {}
+        for tx_hash, hint in delayed_hint_by_tx.items():
+            if not isinstance(hint, dict):
+                continue
+            pack_key = str(hint.get("pack_key") or "").strip().lower()
+            pack_name = str(hint.get("pack_name") or "").strip()
+            if pack_key and tx_hash in open_pack_txs:
+                open_pack_txs[tx_hash]["counterparty"] = pack_key
+                contract_pack_name[pack_key] = pack_name
+            token_id = str(hint.get("token_id") or "").strip()
+            if token_id:
+                delayed_hint_by_token[token_id] = hint
 
     for row in nft_rows:
         if not isinstance(row, dict):
@@ -4547,13 +4936,45 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         if frm == wallet_norm and to in withdraw_targets:
             withdraw_token_ids.add(token_id)
 
-    effective_open_pack_txs: dict[str, dict] = {}
-    for tx_hash, tx in open_pack_txs.items():
-        if open_pack_tokens_by_tx.get(tx_hash):
-            effective_open_pack_txs[tx_hash] = tx
-    if not effective_open_pack_txs:
-        # Fallback to raw open-pack transfer inference if NFT rows are unavailable.
-        effective_open_pack_txs = dict(open_pack_txs)
+    for tx_hash, match in delayed_open_matches.items():
+        tx = open_pack_txs.get(tx_hash)
+        if not tx:
+            continue
+        pack_key = str(tx.get("counterparty") or "").strip().lower()
+        for row in match.get("mint_rows") or []:
+            if not isinstance(row, dict):
+                continue
+            token_id = _nft_row_token_id(row)
+            if not token_id:
+                continue
+            ts = int(_parse_int(row.get("timeStamp")) or _parse_int(row.get("timestamp")) or 0)
+            if ts > 0:
+                ts_values.append(ts)
+            hint = delayed_hint_by_token.get(token_id) or delayed_hint_by_tx.get(tx_hash) or {}
+            hint_pack_key = str((hint or {}).get("pack_key") or "").strip().lower()
+            hint_pack_name = str((hint or {}).get("pack_name") or "").strip()
+            if hint_pack_key:
+                pack_key = hint_pack_key
+                open_pack_txs[tx_hash]["counterparty"] = pack_key
+                if hint_pack_name:
+                    contract_pack_name[pack_key] = hint_pack_name
+            open_pack_tokens_by_tx[tx_hash].add(token_id)
+            current = release_cards_by_token.get(token_id) or {}
+            current_ts = int(_parse_int(current.get("timestamp_raw")) or 0)
+            if (not current) or ts >= current_ts:
+                release_cards_by_token[token_id] = {
+                    "token_id": token_id,
+                    "name": str((hint or {}).get("name") or row.get("tokenName") or "Unknown Collectible"),
+                    "market_image": str((hint or {}).get("market_image") or "").strip(),
+                    "preview_image": str((hint or {}).get("preview_image") or "").strip(),
+                    "image": str((hint or {}).get("image") or "").strip(),
+                    "timestamp_raw": ts,
+                    "pack_contract": pack_key,
+                    "token_contract": str(row.get("contractAddress") or "").strip().lower(),
+                    "checkout_id": tx_hash,
+                }
+
+    effective_open_pack_txs: dict[str, dict] = dict(open_pack_txs)
 
     for tx in effective_open_pack_txs.values():
         contract = str(tx.get("counterparty") or "").strip().lower()
@@ -4565,8 +4986,35 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         contract_spent_total[contract] += amount
         if amount > 0:
             contract_pull_price_counter[contract][amount] += 1
+
+    unresolved_pack_name_contracts: set[str] = set()
+    for contract in sorted(contract_open_count.keys()):
+        cached_name = _lookup_pack_name(pack_price_map, contract)
+        if cached_name:
+            contract_pack_name[contract] = cached_name
+        else:
+            unresolved_pack_name_contracts.add(contract)
+
+    if unresolved_pack_name_contracts:
+        try:
+            activity_hints = _fetch_pack_contract_name_hints(wallet_norm, unresolved_pack_name_contracts)
+        except Exception as e:
+            print(f"⚠️ pack name hint lookup failed for {wallet_norm}: {e}", file=sys.stderr)
+            activity_hints = {}
+        for contract, label in activity_hints.items():
+            if not _pack_name_is_real(label, contract):
+                continue
+            contract_pack_name[contract] = label
+            pack_price_map_dirty = _record_pack_name(pack_price_map, contract, label) or pack_price_map_dirty
+
+    for contract in sorted(contract_open_count.keys()):
         if contract not in contract_pack_name:
-            contract_pack_name[contract] = f"Contract {_short_hex(contract)}"
+            if contract.startswith("legacy-name:"):
+                contract_pack_name[contract] = contract.split("legacy-name:", 1)[1] or "Legacy Pack"
+            elif contract.startswith("legacy:"):
+                contract_pack_name[contract] = f"Legacy Pack {_short_hex(contract.split('legacy:', 1)[1])}"
+            else:
+                contract_pack_name[contract] = f"Contract {_short_hex(contract)}"
 
     token_latest_values: dict[str, tuple[int, Decimal]] = {}
     token_buy_cost_by_ts: dict[str, tuple[int, Decimal]] = {}
@@ -4665,11 +5113,24 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     all_contracts = sorted(contract_open_count.keys())
     for contract in all_contracts:
         unit_price = _pick_contract_unit_price(contract_pull_price_counter.get(contract) or Counter())
+        pack_name = contract_pack_name.get(contract) or f"Contract {_short_hex(contract)}"
+        if unit_price > 0:
+            pack_price_map_dirty = _record_pack_unit_price(
+                pack_price_map,
+                contract_key=contract,
+                pack_name=pack_name,
+                unit_price=unit_price,
+            ) or pack_price_map_dirty
+        elif _pack_name_is_real(pack_name, contract):
+            pack_price_map_dirty = _record_pack_name(pack_price_map, contract, pack_name) or pack_price_map_dirty
+        is_legacy_pack = contract.startswith("legacy")
+        contract_full = "-" if is_legacy_pack else contract
+        contract_short = "-" if is_legacy_pack else _short_hex(contract)
         contract_rows.append(
             {
-                "pack_name": contract_pack_name.get(contract) or f"Contract {_short_hex(contract)}",
-                "contract": contract,
-                "contract_short": _short_hex(contract),
+                "pack_name": pack_name,
+                "contract": contract_full,
+                "contract_short": contract_short,
                 "open_count": int(contract_open_count.get(contract, 0)),
                 "direct_count": int(contract_direct_count.get(contract, 0)),
                 "inferred_count": int(contract_inferred_count.get(contract, 0)),
@@ -4681,6 +5142,8 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     contract_rows.sort(key=lambda x: (_to_decimal(x.get("spent_total_raw")), int(x.get("open_count") or 0)), reverse=True)
     for row in contract_rows:
         row.pop("spent_total_raw", None)
+    if pack_price_map_dirty:
+        _save_pack_price_map(pack_price_map)
 
     opened_pack_ids = set(effective_open_pack_txs.keys())
     activity_rows = []
