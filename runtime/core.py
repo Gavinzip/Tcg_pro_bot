@@ -939,6 +939,23 @@ def _profile_withdraw_target_set() -> set[str]:
     return out
 
 
+PROFILE_DEFAULT_PACK_CONTRACTS = (
+    "0xaab5f5fa75437a6e9e7004c12c9c56cda4b4885a",
+    "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
+    "0xb2891022648c5fad3721c42c05d8d283d4d53080",
+)
+
+
+def _profile_onchain_pack_contracts() -> tuple[str, ...]:
+    return _merge_address_tuples(
+        PROFILE_DEFAULT_PACK_CONTRACTS,
+        _parse_address_csv(os.getenv("ONCHAIN_PACK_CONTRACTS"), default_values=()),
+        _parse_address_csv(os.getenv("ONCHAIN_PACK_CONTRACTS_EXTRA"), default_values=()),
+        _parse_address_csv(os.getenv("PROFILE_ONCHAIN_PACK_CONTRACTS"), default_values=()),
+        _parse_address_csv(os.getenv("PROFILE_ONCHAIN_PACK_CONTRACTS_EXTRA"), default_values=()),
+    )
+
+
 def _build_profile_onchain_cfg(*, force: bool = False):
     if (not force) and (not PROFILE_REALTIME_RECALC_ON_PROFILE):
         return None
@@ -954,9 +971,7 @@ def _build_profile_onchain_cfg(*, force: bool = False):
     usdt_contract = str(
         os.getenv("ONCHAIN_USDT_CONTRACT", "0x55d398326f99059ff775485246999027b3197955")
     ).strip().lower()
-    # Open-pack detection is inferred from wallet USDT tx + same-tx NFT receipts.
-    # Keep this field empty so legacy env allowlists cannot restrict profile metrics.
-    pack_contracts: tuple[str, ...] = ()
+    pack_contracts = _profile_onchain_pack_contracts()
     marketplace_contract = str(
         os.getenv("ONCHAIN_MARKETPLACE_CONTRACT", "0xae3e7268ef5a062946216a44f58a8f685ffd11d0")
     ).strip().lower()
@@ -3769,6 +3784,25 @@ def _known_onchain_pack_contracts_from_map(pack_map: dict) -> set[str]:
     return out
 
 
+def _record_pack_contract_hint(pack_map: dict, contract_key: str | None) -> bool:
+    if not isinstance(pack_map, dict):
+        return False
+    key = str(contract_key or "").strip().lower()
+    if not (key.startswith("0x") and len(key) == 42):
+        return False
+    if not isinstance(pack_map.get("by_contract"), dict):
+        pack_map["by_contract"] = {}
+    by_contract = pack_map["by_contract"]
+    prev = by_contract.get(key) if isinstance(by_contract.get(key), dict) else {}
+    next_row = dict(prev)
+    next_row["is_pack_contract"] = True
+    next_row["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if prev == next_row:
+        return False
+    by_contract[key] = next_row
+    return True
+
+
 def _record_pack_name(pack_map: dict, contract_key: str | None, pack_name: str | None) -> bool:
     if not isinstance(pack_map, dict):
         return False
@@ -3885,6 +3919,7 @@ def _fetch_pull_activity_hints(wallet_address: str, *, max_pages: int | None = N
                 {
                     "pack_key": pack_key.strip().lower(),
                     "pack_name": pack_label,
+                    "contract_address": contract,
                     "token_id": token_id,
                     "timestamp": int(_parse_int(row.get("timestamp")) or 0),
                     "price": _wei_to_usdt(row.get("priceInUsdt")),
@@ -4912,6 +4947,23 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
             print(f"⚠️ legacy pull hint lookup failed for {wallet_norm}: {e}", file=sys.stderr)
             pull_activity_hints = []
             official_pull_hint_by_tx = {}
+
+    payment_hint_row_by_tx = {
+        str((row or {}).get("hash") or "").strip().lower(): row
+        for row in payment_hint_candidates
+        if isinstance(row, dict) and str((row or {}).get("hash") or "").strip()
+    }
+    for tx_hash, hint in official_pull_hint_by_tx.items():
+        payment_row = payment_hint_row_by_tx.get(str(tx_hash or "").strip().lower()) or {}
+        payment_to = str(payment_row.get("to") or "").strip().lower()
+        hint_contract = str((hint or {}).get("contract_address") or "").strip().lower()
+        for learned_contract in (hint_contract, payment_to):
+            if not (learned_contract.startswith("0x") and len(learned_contract) == 42):
+                continue
+            if learned_contract in (wallet_norm, marketplace_contract):
+                continue
+            known_pack_contracts.add(learned_contract)
+            pack_price_map_dirty = _record_pack_contract_hint(pack_price_map, learned_contract) or pack_price_map_dirty
 
     ts_values: list[int] = []
     open_pack_txs: dict[str, dict] = {}
