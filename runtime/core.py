@@ -734,8 +734,6 @@ PROFILE_CARD_WITHDRAW_ADDRESS = str(
 PROFILE_CARD_WITHDRAW_ADDRESS_EXTRA = str(
     os.getenv("PROFILE_CARD_WITHDRAW_ADDRESS_EXTRA", "0x72a004654Cef4694a6377f5b019d0489bA8A6c9E")
 ).strip().lower()
-# SellActivity amount is gross (pre-fee) in current upstream data; convert to net received.
-PROFILE_MARKET_SELL_GROSS_DIVISOR = Decimal(os.getenv("PROFILE_MARKET_SELL_GROSS_DIVISOR", "1.02"))
 PROFILE_BSC_RPC_URL = str(os.getenv("PROFILE_BSC_RPC_URL", "https://bsc-dataseed.binance.org")).strip() or "https://bsc-dataseed.binance.org"
 _WALLET_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _TRANSPARENT_CARD_IMAGE = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="
@@ -3759,6 +3757,18 @@ def _lookup_pack_name(pack_map: dict, contract_key: str | None) -> str:
     return ""
 
 
+def _known_onchain_pack_contracts_from_map(pack_map: dict) -> set[str]:
+    if not isinstance(pack_map, dict):
+        return set()
+    by_contract = pack_map.get("by_contract") if isinstance(pack_map.get("by_contract"), dict) else {}
+    out: set[str] = set()
+    for key in by_contract.keys():
+        contract = str(key or "").strip().lower()
+        if contract.startswith("0x") and len(contract) == 42:
+            out.add(contract)
+    return out
+
+
 def _record_pack_name(pack_map: dict, contract_key: str | None, pack_name: str | None) -> bool:
     if not isinstance(pack_map, dict):
         return False
@@ -3860,12 +3870,16 @@ def _fetch_pull_activity_hints(wallet_address: str, *, max_pages: int | None = N
             if not isinstance(row, dict):
                 continue
             row_type = str(row.get("__typename") or "").strip()
-            if row_type != "PullActivity":
+            if row_type not in ("PullActivity", "PerpetualPullActivity"):
                 continue
             row_item = row.get("item") if isinstance(row.get("item"), dict) else {}
+            contract = str(row.get("contractAddress") or "").strip().lower()
             pack_id = str(row.get("packId") or "").strip()
             pack_label = _pack_label_from_pull_item(row_item)
-            pack_key = f"legacy:{pack_id}" if pack_id else f"legacy-name:{pack_label}"
+            if row_type == "PerpetualPullActivity" and contract.startswith("0x") and len(contract) == 42:
+                pack_key = contract
+            else:
+                pack_key = f"legacy:{pack_id}" if pack_id else f"legacy-name:{pack_label}"
             token_id = str(row.get("nftTokenId") or row.get("tokenId") or row_item.get("tokenId") or "").strip()
             hints.append(
                 {
@@ -4203,8 +4217,7 @@ def _build_wallet_activity_history_legacy(wallet_address: str, profile_lang: str
                 if token_hint:
                     _remember_token_cost(token_buy_cost_by_ts, token_hint, amount, ts)
             if asker == wallet_norm:
-                divisor = PROFILE_MARKET_SELL_GROSS_DIVISOR if PROFILE_MARKET_SELL_GROSS_DIVISOR > 0 else Decimal("1")
-                trade_earned_total += (amount / divisor)
+                trade_earned_total += amount
         elif row_type == "TransferActivity":
             target = str(row.get("to") or "").strip().lower()
             if target not in _profile_withdraw_target_set():
@@ -4859,10 +4872,19 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
             nft_in_txs.add(tx_hash)
         if frm == wallet_norm:
             nft_out_txs.add(tx_hash)
+    pack_price_map = _load_pack_price_map()
+    pack_price_map_dirty = False
+    known_pack_contracts = _known_onchain_pack_contracts_from_map(pack_price_map)
+    known_pack_contracts.update(
+        str(x or "").strip().lower()
+        for x in (getattr(cfg, "pack_contracts", ()) or ())
+        if str(x or "").strip().lower().startswith("0x") and len(str(x or "").strip().lower()) == 42
+    )
     delayed_open_matches = _infer_delayed_open_pack_matches(usdt_rows, nft_rows, wallet_norm, cfg, nft_in_txs)
     delayed_open_tx_hashes = set(delayed_open_matches.keys())
 
-    legacy_payment_candidates: list[dict] = []
+    payment_hint_candidates: list[dict] = []
+    marketplace_contract = str(getattr(cfg, "marketplace_contract", "") or "").strip().lower()
     for row in usdt_rows:
         if not isinstance(row, dict):
             continue
@@ -4876,22 +4898,16 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
             continue
         if not to.startswith("0x") or len(to) != 42:
             continue
-        cls = _classify_onchain_usdt_transfer(
-            row,
-            wallet_norm,
-            cfg,
-            tx_has_nft_in=bool(tx_hash and tx_hash in nft_in_txs),
-            tx_has_nft_out=bool(tx_hash and tx_hash in nft_out_txs),
-        )
-        if cls == "other":
-            legacy_payment_candidates.append(row)
+        if to == marketplace_contract:
+            continue
+        payment_hint_candidates.append(row)
 
     pull_activity_hints: list[dict] = []
     official_pull_hint_by_tx: dict[str, dict] = {}
-    if legacy_payment_candidates:
+    if payment_hint_candidates:
         try:
             pull_activity_hints = _fetch_pull_activity_hints(wallet_norm, max_pages=PROFILE_ACTIVITY_MAX_PAGES)
-            official_pull_hint_by_tx = _match_pull_hints_to_payment_rows(legacy_payment_candidates, pull_activity_hints)
+            official_pull_hint_by_tx = _match_pull_hints_to_payment_rows(payment_hint_candidates, pull_activity_hints)
         except Exception as e:
             print(f"⚠️ legacy pull hint lookup failed for {wallet_norm}: {e}", file=sys.stderr)
             pull_activity_hints = []
@@ -4931,15 +4947,13 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         tx_hash = str(row.get("hash") or "").strip().lower()
         frm = str(row.get("from") or "").strip().lower()
         to = str(row.get("to") or "").strip().lower()
-        cls = _classify_onchain_usdt_transfer(
-            row,
-            wallet_norm,
-            cfg,
-            tx_has_nft_in=bool(tx_hash and tx_hash in nft_in_txs),
-            tx_has_nft_out=bool(tx_hash and tx_hash in nft_out_txs),
-        )
         hint = official_pull_hint_by_tx.get(tx_hash)
-        if cls == "other" and hint:
+        cls = "other"
+        if frm == wallet_norm and to == marketplace_contract:
+            cls = "mp_buy"
+        elif frm == marketplace_contract and to == wallet_norm:
+            cls = "mp_sell"
+        elif hint:
             cls = "open_pack"
             pack_key = str((hint or {}).get("pack_key") or "").strip().lower()
             pack_name = str((hint or {}).get("pack_name") or "").strip()
@@ -4947,8 +4961,10 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
                 to = pack_key
                 if pack_name:
                     contract_pack_name[pack_key] = pack_name
-        elif cls == "other" and tx_hash in delayed_open_tx_hashes:
+        elif frm == wallet_norm and to in known_pack_contracts:
             cls = "open_pack"
+        elif frm in known_pack_contracts and to == wallet_norm:
+            cls = "buyback"
         if cls == "open_pack":
             _upsert_tx(open_pack_txs, tx_hash, counterparty=to, ts=ts, amount=amount)
         elif cls == "buyback":
@@ -4963,8 +4979,6 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     contract_direct_count: defaultdict[str, int] = defaultdict(int)
     contract_inferred_count: defaultdict[str, int] = defaultdict(int)
     contract_spent_total: defaultdict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    pack_price_map = _load_pack_price_map()
-    pack_price_map_dirty = False
 
     release_cards_by_token: dict[str, dict] = {}
     open_pack_tokens_by_tx: defaultdict[str, set[str]] = defaultdict(set)
@@ -5199,8 +5213,7 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     pack_spent_total = sum((_to_decimal(v.get("amount")) for v in effective_open_pack_txs.values()), Decimal("0"))
     trade_spent_total = sum((_to_decimal(v.get("amount")) for v in market_buy_txs.values()), Decimal("0"))
     buyback_earned_total = sum((_to_decimal(v.get("amount")) for v in buyback_txs.values()), Decimal("0"))
-    divisor = PROFILE_MARKET_SELL_GROSS_DIVISOR if PROFILE_MARKET_SELL_GROSS_DIVISOR > 0 else Decimal("1")
-    trade_earned_total = sum((_to_decimal(v.get("amount")) / divisor for v in market_sell_txs.values()), Decimal("0"))
+    trade_earned_total = sum((_to_decimal(v.get("amount")) for v in market_sell_txs.values()), Decimal("0"))
     total_spent = pack_spent_total + trade_spent_total
     total_earned = buyback_earned_total + trade_earned_total
     net_total = total_earned - total_spent + card_withdraw_total
