@@ -4953,6 +4953,8 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
             cls = "mp_buy"
         elif frm == marketplace_contract and to == wallet_norm:
             cls = "mp_sell"
+        elif to == wallet_norm and tx_hash in nft_out_txs:
+            cls = "buyback"
         elif hint:
             cls = "open_pack"
             pack_key = str((hint or {}).get("pack_key") or "").strip().lower()
