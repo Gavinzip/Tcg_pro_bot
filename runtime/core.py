@@ -9515,10 +9515,12 @@ async def _run_ranking_sync_script(
     full_rebuild_all: bool = False,
     push_only: bool = False,
     market_only: bool = False,
+    skip_is_success: bool = True,
 ) -> bool:
     global RANK_SYNC_SCRIPT_LOCK
     if not RANK_SYNC_ENABLE:
-        return True
+        print(f"⏭️ Ranking sync skipped trigger={trigger} reason=disabled")
+        return bool(skip_is_success)
     if not os.path.exists(RANK_SYNC_SCRIPT_PATH):
         print(f"⚠️ Ranking sync script not found: {RANK_SYNC_SCRIPT_PATH}")
         return False
@@ -9526,7 +9528,7 @@ async def _run_ranking_sync_script(
         RANK_SYNC_SCRIPT_LOCK = asyncio.Lock()
     if RANK_SYNC_SCRIPT_LOCK.locked():
         print(f"⏭️ Ranking sync skipped trigger={trigger} reason=already_running")
-        return True
+        return bool(skip_is_success)
 
     rank_data_dir = _rank_sync_data_dir()
     cmd = [

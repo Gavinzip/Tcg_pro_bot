@@ -363,16 +363,45 @@ async def ranking_sync_status(interaction: discord.Interaction):
 @tree.command(name="ranking_rebuild", description="手動全量重算 ranking（盈虧/交易/排名）")
 async def ranking_rebuild(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
+    if not _core.RANK_SYNC_ENABLE:
+        await interaction.followup.send(
+            "⚠️ ranking sync 目前是關閉狀態，這次沒有開始重算。",
+            ephemeral=True,
+        )
+        return
+    if _core.RANK_SYNC_SCRIPT_LOCK is not None and _core.RANK_SYNC_SCRIPT_LOCK.locked():
+        await interaction.followup.send(
+            "⏳ ranking sync 已經在執行中，這次沒有另外開一個全量重算。請稍後用 `/ranking_sync_status` 看進度。",
+            ephemeral=True,
+        )
+        return
+
     ranking_ok = await _run_ranking_sync_script(
         "manual_ranking_full_rebuild_all",
         bootstrap_only=False,
         full_rebuild=True,
         full_rebuild_all=True,
+        skip_is_success=False,
     )
 
     if ranking_ok:
+        status_info = ""
+        try:
+            with open(_rank_sync_status_path(), "r", encoding="utf-8") as f:
+                status = json.load(f)
+            extra = status.get("extra") if isinstance(status.get("extra"), dict) else {}
+            duration_sec = extra.get("duration_sec", "n/a")
+            refreshed_wallets = extra.get("refreshed_wallets", "n/a")
+            wallet_count = extra.get("wallet_count", "n/a")
+            full_rebuild = extra.get("full_rebuild", "n/a")
+            status_info = (
+                f"\nWallets: `{wallet_count}` | Refreshed: `{refreshed_wallets}` | "
+                f"Full Rebuild: `{full_rebuild}` | Duration: `{duration_sec}` 秒"
+            )
+        except Exception:
+            status_info = ""
         await interaction.followup.send(
-            "✅ ranking 已全量重算（所有 wallet，含盈虧/交易/排名）。",
+            f"✅ ranking 已全量重算（所有 wallet，含盈虧/交易/排名）。{status_info}",
             ephemeral=True,
         )
         return
