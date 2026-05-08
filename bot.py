@@ -317,7 +317,14 @@ async def ranking_sync_status(interaction: discord.Interaction):
         if (_core.RANK_SYNC_SCRIPT_LOCK is not None and _core.RANK_SYNC_SCRIPT_LOCK.locked())
         else {}
     )
+    pending_manual_rebuild = bool(getattr(_core, "RANK_SYNC_PENDING_MANUAL_REBUILD", False))
+    pending_manual_rebuild_at = str(getattr(_core, "RANK_SYNC_PENDING_MANUAL_REBUILD_AT", "") or "")
     if isinstance(current_job, dict) and current_job:
+        pending_line = (
+            f"\nPending Manual Full Rebuild: `true` | Requested At: `{pending_manual_rebuild_at or 'unknown'}`"
+            if pending_manual_rebuild
+            else ""
+        )
         await interaction.response.send_message(
             "⏳ Rankings 同步狀態：**執行中**\n"
             f"Trigger: `{current_job.get('trigger', 'unknown')}`\n"
@@ -325,6 +332,16 @@ async def ranking_sync_status(interaction: discord.Interaction):
             f"Full Rebuild: `{current_job.get('full_rebuild', 'n/a')}` | "
             f"Full Rebuild All: `{current_job.get('full_rebuild_all', 'n/a')}`\n"
             f"Data Dir: `{current_job.get('data_dir', _rank_sync_data_dir())}`\n"
+            f"Status File: `{status_path}`\n"
+            f"Latest Snapshot: `{latest_path}`"
+            f"{pending_line}",
+            ephemeral=True,
+        )
+        return
+    if pending_manual_rebuild:
+        await interaction.response.send_message(
+            "⏳ Rankings 同步狀態：**已排隊全量重算**\n"
+            f"Pending Manual Full Rebuild: `true` | Requested At: `{pending_manual_rebuild_at or 'unknown'}`\n"
             f"Status File: `{status_path}`\n"
             f"Latest Snapshot: `{latest_path}`",
             ephemeral=True,
@@ -399,8 +416,17 @@ async def ranking_rebuild(interaction: discord.Interaction):
         )
         return
     if _core.RANK_SYNC_SCRIPT_LOCK is not None and _core.RANK_SYNC_SCRIPT_LOCK.locked():
+        queued = _core._queue_manual_ranking_full_rebuild("discord:/ranking_rebuild")
+        current_job = queued.get("current_job") if isinstance(queued.get("current_job"), dict) else {}
+        already = bool(queued.get("already_pending"))
         await interaction.followup.send(
-            "⏳ ranking sync 已經在執行中，這次沒有另外開一個全量重算。請稍後用 `/ranking_sync_status` 看進度。",
+            (
+                "⏳ ranking sync 正在執行中，已排隊全量重算；目前這個 job 結束後會自動接著跑。\n"
+                f"Current Trigger: `{current_job.get('trigger', 'unknown')}`\n"
+                f"Queued At: `{queued.get('requested_at', 'unknown')}`\n"
+                f"Already Pending: `{already}`\n"
+                "請稍後用 `/ranking_sync_status` 看進度。"
+            ),
             ephemeral=True,
         )
         return

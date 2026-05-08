@@ -1217,6 +1217,48 @@ def fetch_latest_activity_id_for_wallet(address: str) -> tuple[str | None, bool]
         return None, False
 
 
+def fetch_legacy_open_pack_hints_for_wallet(address: str, page_limit: int, max_pages: int) -> list[dict[str, Any]]:
+    wallet_norm = str(address or "").strip().lower()
+    if not wallet_norm:
+        return []
+    hints: list[dict[str, Any]] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    for _ in range(max(1, int(max_pages or 1))):
+        page = _trpc_user_activities(wallet_norm, cursor=cursor, limit=page_limit)
+        rows = page.get("activities") or []
+        if not isinstance(rows, list):
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("__typename") or "").strip() != "PullActivity":
+                continue
+            price = _wei_to_usdt(row.get("priceInUsdt"))
+            ts = _parse_int(row.get("timestamp")) or 0
+            if price <= 0 or ts <= 0:
+                continue
+            row_item = row.get("item") if isinstance(row.get("item"), dict) else {}
+            pack_id = str(row.get("packId") or "").strip()
+            pack_label = _pack_label_from_pull_item(row_item)
+            hints.append(
+                {
+                    "timestamp": int(ts),
+                    "price": price,
+                    "pack_key": f"legacy:{pack_id}" if pack_id else f"legacy-name:{pack_label}",
+                }
+            )
+        next_cursor = page.get("nextCursor")
+        if not next_cursor:
+            break
+        next_cursor = str(next_cursor)
+        if next_cursor in seen_cursors:
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return hints
+
+
 def _build_onchain_cfg(cfg: RankingConfig) -> OnchainConfig:
     return OnchainConfig(
         api_url=cfg.onchain_api_url,
@@ -2087,7 +2129,17 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             try:
                 if use_onchain_metrics:
                     assert onchain_cfg is not None
-                    chain_metrics = analyze_wallet_onchain(onchain_cfg, rec.address)
+                    legacy_open_pack_hints = fetch_legacy_open_pack_hints_for_wallet(
+                        rec.address,
+                        cfg.activity_page_limit,
+                        cfg.activity_max_pages,
+                    )
+                    chain_metrics = analyze_wallet_onchain(
+                        onchain_cfg,
+                        rec.address,
+                        legacy_open_pack_hints=legacy_open_pack_hints,
+                        use_delayed_recipient_heuristic=False,
+                    )
                     prev_day_keys = sorted(prev_day_keys_map.get(rec.address) or set()) if prev is not None else []
                     activity_day_keys = list(prev_day_keys)
                     latest_activity_id = prev_cp

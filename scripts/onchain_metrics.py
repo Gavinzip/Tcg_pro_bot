@@ -404,24 +404,113 @@ def _delayed_open_pack_tx_hashes(
     return matches
 
 
+def _match_legacy_pull_hints_to_payment_rows(
+    cfg: OnchainConfig,
+    wallet: str,
+    usdt_rows: list[dict[str, Any]],
+    nft_in_txs: set[str],
+    nft_out_txs: set[str],
+    legacy_open_pack_hints: list[dict[str, Any]] | None,
+) -> set[str]:
+    hints = [x for x in (legacy_open_pack_hints or []) if isinstance(x, dict)]
+    window_sec = int(ONCHAIN_DELAYED_MINT_WINDOW_SEC or 0)
+    if not hints or window_sec <= 0:
+        return set()
+
+    wallet_norm = str(wallet or "").strip().lower()
+    rows = sorted(
+        [x for x in usdt_rows if isinstance(x, dict)],
+        key=lambda r: (_row_timestamp(r), _row_block_number(r), _row_tx_index(r), _row_hash(r)),
+    )
+    hints_sorted = sorted(
+        hints,
+        key=lambda h: (
+            int(_to_decimal((h or {}).get("timestamp")) or 0),
+            str((h or {}).get("pack_key") or ""),
+        ),
+    )
+    matched: set[str] = set()
+    used_hint_indexes: set[int] = set()
+    for row in rows:
+        tx_hash = _row_hash(row)
+        if not tx_hash or tx_hash in matched:
+            continue
+        amount = _usdt_amount_from_raw(row.get("value"), row.get("tokenDecimal"))
+        if amount <= 0:
+            continue
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        if frm != wallet_norm:
+            continue
+        if to == str(cfg.marketplace_contract or "").strip().lower():
+            continue
+        cls = _classify_transfer(
+            row,
+            wallet_norm,
+            cfg,
+            tx_has_nft_in=bool(tx_hash and tx_hash in nft_in_txs),
+            tx_has_nft_out=bool(tx_hash and tx_hash in nft_out_txs),
+        )
+        if cls != "other":
+            continue
+        row_ts = _row_timestamp(row)
+        if row_ts <= 0:
+            continue
+
+        best_idx: int | None = None
+        best_delta: int | None = None
+        for idx, hint in enumerate(hints_sorted):
+            if idx in used_hint_indexes:
+                continue
+            hint_ts = int(_to_decimal(hint.get("timestamp")) or 0)
+            if hint_ts <= 0:
+                continue
+            delta = abs(hint_ts - row_ts)
+            if delta > window_sec:
+                continue
+            price = _to_decimal(hint.get("price"))
+            if price <= 0 or abs(price - amount) > Decimal("0.000001"):
+                continue
+            if best_delta is None or delta < best_delta:
+                best_idx = idx
+                best_delta = delta
+        if best_idx is not None:
+            used_hint_indexes.add(best_idx)
+            matched.add(tx_hash)
+    return matched
+
+
 def _open_pack_tx_hashes(
     cfg: OnchainConfig,
     wallet: str,
     usdt_rows: list[dict[str, Any]],
     nft_rows: list[dict[str, Any]],
+    *,
+    legacy_open_pack_hints: list[dict[str, Any]] | None = None,
+    use_delayed_recipient_heuristic: bool = True,
 ) -> set[str]:
     wallet_norm = str(wallet or "").strip().lower()
-    nft_in_txs, _nft_out_txs = _wallet_nft_tx_sets(nft_rows, wallet_norm)
+    nft_in_txs, nft_out_txs = _wallet_nft_tx_sets(nft_rows, wallet_norm)
     seen_txs: set[str] = set()
     marketplace_contract = str(cfg.marketplace_contract or "").strip().lower()
     pack_contracts = {str(x or "").strip().lower() for x in (cfg.pack_contracts or ())}
     delayed_txs = _delayed_open_pack_tx_hashes(cfg, wallet_norm, usdt_rows, nft_rows, nft_in_txs)
-    delayed_pack_recipients = {
-        str((row or {}).get("to") or "").strip().lower()
-        for row in usdt_rows
-        if isinstance(row, dict) and _row_hash(row) in delayed_txs
-    }
-    delayed_pack_recipients = {x for x in delayed_pack_recipients if x.startswith("0x") and len(x) == 42}
+    legacy_hint_txs = _match_legacy_pull_hints_to_payment_rows(
+        cfg,
+        wallet_norm,
+        usdt_rows,
+        nft_in_txs,
+        nft_out_txs,
+        legacy_open_pack_hints,
+    )
+    delayed_pack_recipients: set[str] = set()
+    if use_delayed_recipient_heuristic:
+        delayed_pack_recipients = {
+            str((row or {}).get("to") or "").strip().lower()
+            for row in usdt_rows
+            if isinstance(row, dict) and _row_hash(row) in delayed_txs
+        }
+        delayed_pack_recipients = {x for x in delayed_pack_recipients if x.startswith("0x") and len(x) == 42}
 
     for row in usdt_rows:
         if not isinstance(row, dict):
@@ -438,7 +527,13 @@ def _open_pack_tx_hashes(
             continue
         if to == marketplace_contract:
             continue
-        if tx_hash in nft_in_txs or tx_hash in delayed_txs or to in delayed_pack_recipients or to in pack_contracts:
+        if (
+            tx_hash in nft_in_txs
+            or tx_hash in delayed_txs
+            or tx_hash in legacy_hint_txs
+            or to in delayed_pack_recipients
+            or to in pack_contracts
+        ):
             seen_txs.add(tx_hash)
     return seen_txs
 
@@ -1021,6 +1116,9 @@ def analyze_sbt_wallet(cfg: OnchainConfig, wallet: str, sbt_contract: str) -> di
 def analyze_wallet(
     cfg: OnchainConfig,
     wallet: str,
+    *,
+    legacy_open_pack_hints: list[dict[str, Any]] | None = None,
+    use_delayed_recipient_heuristic: bool = True,
 ) -> dict[str, Decimal]:
     wallet_norm = str(wallet or "").strip().lower()
     if not wallet_norm:
@@ -1038,7 +1136,14 @@ def analyze_wallet(
     transfers = fetch_all_usdt_transfers(cfg, wallet_norm)
     nft_rows = fetch_all_nft_transfers(cfg, wallet_norm)
     nft_in_txs, nft_out_txs = _wallet_nft_tx_sets(nft_rows, wallet_norm)
-    open_pack_hashes = _open_pack_tx_hashes(cfg, wallet_norm, transfers, nft_rows)
+    open_pack_hashes = _open_pack_tx_hashes(
+        cfg,
+        wallet_norm,
+        transfers,
+        nft_rows,
+        legacy_open_pack_hints=legacy_open_pack_hints,
+        use_delayed_recipient_heuristic=use_delayed_recipient_heuristic,
+    )
     pack_spent = Decimal("0")
     buyback_earned = Decimal("0")
     market_buy_spent = Decimal("0")

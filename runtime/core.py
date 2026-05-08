@@ -194,6 +194,8 @@ RANK_SYNC_STARTUP_DONE = False
 RANK_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
 RANK_SYNC_SCRIPT_LOCK: asyncio.Lock | None = None
 RANK_SYNC_CURRENT_JOB: dict[str, object] = {}
+RANK_SYNC_PENDING_MANUAL_REBUILD = False
+RANK_SYNC_PENDING_MANUAL_REBUILD_AT = ""
 RANK_SYNC_TZ = str(os.getenv("RANK_SYNC_TZ", "Asia/Taipei")).strip() or "Asia/Taipei"
 RANK_SYNC_COMPARE_ON_STARTUP = _env_true("RANK_SYNC_COMPARE_ON_STARTUP", False)
 RANK_SYNC_HOUR = max(0, min(23, int(os.getenv("RANK_SYNC_HOUR", "6"))))
@@ -9518,7 +9520,7 @@ async def _run_ranking_sync_script(
     market_only: bool = False,
     skip_is_success: bool = True,
 ) -> bool:
-    global RANK_SYNC_SCRIPT_LOCK, RANK_SYNC_CURRENT_JOB
+    global RANK_SYNC_SCRIPT_LOCK, RANK_SYNC_CURRENT_JOB, RANK_SYNC_PENDING_MANUAL_REBUILD, RANK_SYNC_PENDING_MANUAL_REBUILD_AT
     if not RANK_SYNC_ENABLE:
         print(f"⏭️ Ranking sync skipped trigger={trigger} reason=disabled")
         return bool(skip_is_success)
@@ -9551,6 +9553,7 @@ async def _run_ranking_sync_script(
     if market_only:
         cmd.append("--market-only")
 
+    success = False
     async with RANK_SYNC_SCRIPT_LOCK:
         RANK_SYNC_CURRENT_JOB = {
             "trigger": trigger,
@@ -9585,11 +9588,41 @@ async def _run_ranking_sync_script(
                 print(err, file=sys.stderr)
             if proc.returncode != 0:
                 print(f"❌ Ranking sync failed trigger={trigger} rc={proc.returncode}")
-                return False
-            print(f"✅ Ranking sync done trigger={trigger}")
-            return True
+                success = False
+            else:
+                print(f"✅ Ranking sync done trigger={trigger}")
+                success = True
         finally:
             RANK_SYNC_CURRENT_JOB = {}
+    should_run_pending = bool(RANK_SYNC_PENDING_MANUAL_REBUILD) and trigger != "manual_ranking_full_rebuild_all"
+    if should_run_pending:
+        requested_at = RANK_SYNC_PENDING_MANUAL_REBUILD_AT
+        RANK_SYNC_PENDING_MANUAL_REBUILD = False
+        RANK_SYNC_PENDING_MANUAL_REBUILD_AT = ""
+        print(f"🕒 Running queued manual ranking full rebuild requested_at={requested_at}")
+        await _run_ranking_sync_script(
+            "manual_ranking_full_rebuild_all",
+            bootstrap_only=False,
+            full_rebuild=True,
+            full_rebuild_all=True,
+            skip_is_success=False,
+        )
+    return success
+
+
+def _queue_manual_ranking_full_rebuild(reason: str = "manual") -> dict[str, object]:
+    global RANK_SYNC_PENDING_MANUAL_REBUILD, RANK_SYNC_PENDING_MANUAL_REBUILD_AT
+    already_pending = bool(RANK_SYNC_PENDING_MANUAL_REBUILD)
+    if not RANK_SYNC_PENDING_MANUAL_REBUILD_AT:
+        RANK_SYNC_PENDING_MANUAL_REBUILD_AT = datetime.now(_safe_tzinfo(RANK_SYNC_TZ)).isoformat()
+    RANK_SYNC_PENDING_MANUAL_REBUILD = True
+    return {
+        "queued": True,
+        "already_pending": already_pending,
+        "requested_at": RANK_SYNC_PENDING_MANUAL_REBUILD_AT,
+        "reason": reason,
+        "current_job": dict(RANK_SYNC_CURRENT_JOB or {}),
+    }
 
 
 async def _run_pack_rank_sync_script(trigger: str) -> bool:
