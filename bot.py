@@ -312,6 +312,24 @@ async def sync_status(interaction: discord.Interaction):
 async def ranking_sync_status(interaction: discord.Interaction):
     status_path = _rank_sync_status_path()
     latest_path = os.path.join(_rank_sync_data_dir(), "latest.json")
+    current_job = (
+        getattr(_core, "RANK_SYNC_CURRENT_JOB", {}) or {}
+        if (_core.RANK_SYNC_SCRIPT_LOCK is not None and _core.RANK_SYNC_SCRIPT_LOCK.locked())
+        else {}
+    )
+    if isinstance(current_job, dict) and current_job:
+        await interaction.response.send_message(
+            "⏳ Rankings 同步狀態：**執行中**\n"
+            f"Trigger: `{current_job.get('trigger', 'unknown')}`\n"
+            f"Started At: `{current_job.get('started_at', 'unknown')}`\n"
+            f"Full Rebuild: `{current_job.get('full_rebuild', 'n/a')}` | "
+            f"Full Rebuild All: `{current_job.get('full_rebuild_all', 'n/a')}`\n"
+            f"Data Dir: `{current_job.get('data_dir', _rank_sync_data_dir())}`\n"
+            f"Status File: `{status_path}`\n"
+            f"Latest Snapshot: `{latest_path}`",
+            ephemeral=True,
+        )
+        return
     if not os.path.exists(status_path):
         await interaction.response.send_message(
             f"⚠️ 尚無 rankings 同步狀態檔：`{status_path}`\n請先等待啟動 bootstrap / compare 或整點同步執行。",
@@ -336,6 +354,17 @@ async def ranking_sync_status(interaction: discord.Interaction):
     updated_at = str(status.get("updated_at") or "unknown")
     message = str(status.get("message") or "").strip()
     extra = status.get("extra") if isinstance(status.get("extra"), dict) else {}
+    if trigger == "market_auto_push" or bool(extra.get("market_only")):
+        await interaction.response.send_message(
+            "⚠️ 目前的 ranking status 檔是舊的 market push 狀態，不是 ranking 重算狀態。\n"
+            f"Trigger: `{trigger}`\n"
+            f"Updated At: `{updated_at}`\n"
+            f"Status File: `{status_path}`\n"
+            f"Latest Snapshot: `{latest_path}`\n"
+            "請重新執行 `/ranking_rebuild`，或等真正的 ranking sync 完成後再查。",
+            ephemeral=True,
+        )
+        return
     wallet_count = extra.get("wallet_count", "n/a")
     pages = extra.get("collectible_pages", "n/a")
     changed_wallets = extra.get("changed_wallets", "n/a")

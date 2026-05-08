@@ -680,6 +680,10 @@ class RankingConfig:
         return self.data_dir / "state" / "ranking_status.json"
 
     @property
+    def market_status_path(self) -> Path:
+        return self.data_dir / "state" / "market_push_status.json"
+
+    @property
     def checkpoint_path(self) -> Path:
         return self.data_dir / "state" / "activity_checkpoints.json"
 
@@ -859,8 +863,9 @@ def send_webhook(cfg: RankingConfig, message: str, success: bool = True) -> None
         pass
 
 
-def write_status(
+def _write_status_to_path(
     cfg: RankingConfig,
+    path: Path,
     *,
     success: bool,
     message: str,
@@ -876,7 +881,27 @@ def write_status(
     }
     if extra:
         payload["extra"] = extra
-    _atomic_write_json(cfg.status_path, payload)
+    _atomic_write_json(path, payload)
+
+
+def write_status(
+    cfg: RankingConfig,
+    *,
+    success: bool,
+    message: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    _write_status_to_path(cfg, cfg.status_path, success=success, message=message, extra=extra)
+
+
+def write_market_status(
+    cfg: RankingConfig,
+    *,
+    success: bool,
+    message: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    _write_status_to_path(cfg, cfg.market_status_path, success=success, message=message, extra=extra)
 
 
 def ensure_repo(cfg: RankingConfig) -> Path:
@@ -2408,7 +2433,8 @@ def main() -> int:
             f"{latest_field}"
         )
         print(f"[OK] {msg}")
-        write_status(
+        status_writer = write_market_status if args.market_only else write_status
+        status_writer(
             cfg,
             success=True,
             message=msg,
@@ -2500,15 +2526,20 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as e:  # noqa: BLE001
         cfg = None
+        args = None
         try:
-            cfg = load_config(parse_args())
+            args = parse_args()
+            cfg = load_config(args)
         except Exception:
             cfg = None
         err = f"{type(e).__name__}: {e}"
         print(f"[ERROR] {err}")
         if cfg is not None:
             try:
-                write_status(cfg, success=False, message=err, extra=None)
+                if args is not None and bool(getattr(args, "push_only", False)) and bool(getattr(args, "market_only", False)):
+                    write_market_status(cfg, success=False, message=err, extra=None)
+                else:
+                    write_status(cfg, success=False, message=err, extra=None)
             except Exception:
                 pass
             send_webhook(cfg, err, success=False)

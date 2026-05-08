@@ -193,6 +193,7 @@ RANK_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "update_rankings.py")
 RANK_SYNC_STARTUP_DONE = False
 RANK_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
 RANK_SYNC_SCRIPT_LOCK: asyncio.Lock | None = None
+RANK_SYNC_CURRENT_JOB: dict[str, object] = {}
 RANK_SYNC_TZ = str(os.getenv("RANK_SYNC_TZ", "Asia/Taipei")).strip() or "Asia/Taipei"
 RANK_SYNC_COMPARE_ON_STARTUP = _env_true("RANK_SYNC_COMPARE_ON_STARTUP", False)
 RANK_SYNC_HOUR = max(0, min(23, int(os.getenv("RANK_SYNC_HOUR", "6"))))
@@ -9517,7 +9518,7 @@ async def _run_ranking_sync_script(
     market_only: bool = False,
     skip_is_success: bool = True,
 ) -> bool:
-    global RANK_SYNC_SCRIPT_LOCK
+    global RANK_SYNC_SCRIPT_LOCK, RANK_SYNC_CURRENT_JOB
     if not RANK_SYNC_ENABLE:
         print(f"⏭️ Ranking sync skipped trigger={trigger} reason=disabled")
         return bool(skip_is_success)
@@ -9551,31 +9552,44 @@ async def _run_ranking_sync_script(
         cmd.append("--market-only")
 
     async with RANK_SYNC_SCRIPT_LOCK:
-        print(
-            "🕒 Ranking sync start "
-            f"trigger={trigger} bootstrap_only={1 if bootstrap_only else 0} "
-            f"full_rebuild={1 if full_rebuild else 0} full_rebuild_all={1 if full_rebuild_all else 0} "
-            f"push_only={1 if push_only else 0} market_only={1 if market_only else 0} "
-            f"data_dir={rank_data_dir}"
-        )
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=BASE_DIR,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out_b, err_b = await proc.communicate()
-        out = (out_b or b"").decode("utf-8", errors="replace").strip()
-        err = (err_b or b"").decode("utf-8", errors="replace").strip()
-        if out:
-            print(out)
-        if err:
-            print(err, file=sys.stderr)
-        if proc.returncode != 0:
-            print(f"❌ Ranking sync failed trigger={trigger} rc={proc.returncode}")
-            return False
-        print(f"✅ Ranking sync done trigger={trigger}")
-        return True
+        RANK_SYNC_CURRENT_JOB = {
+            "trigger": trigger,
+            "started_at": datetime.now(_safe_tzinfo(RANK_SYNC_TZ)).isoformat(),
+            "bootstrap_only": bool(bootstrap_only),
+            "full_rebuild": bool(full_rebuild),
+            "full_rebuild_all": bool(full_rebuild_all),
+            "push_only": bool(push_only),
+            "market_only": bool(market_only),
+            "data_dir": rank_data_dir,
+        }
+        try:
+            print(
+                "🕒 Ranking sync start "
+                f"trigger={trigger} bootstrap_only={1 if bootstrap_only else 0} "
+                f"full_rebuild={1 if full_rebuild else 0} full_rebuild_all={1 if full_rebuild_all else 0} "
+                f"push_only={1 if push_only else 0} market_only={1 if market_only else 0} "
+                f"data_dir={rank_data_dir}"
+            )
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=BASE_DIR,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out_b, err_b = await proc.communicate()
+            out = (out_b or b"").decode("utf-8", errors="replace").strip()
+            err = (err_b or b"").decode("utf-8", errors="replace").strip()
+            if out:
+                print(out)
+            if err:
+                print(err, file=sys.stderr)
+            if proc.returncode != 0:
+                print(f"❌ Ranking sync failed trigger={trigger} rc={proc.returncode}")
+                return False
+            print(f"✅ Ranking sync done trigger={trigger}")
+            return True
+        finally:
+            RANK_SYNC_CURRENT_JOB = {}
 
 
 async def _run_pack_rank_sync_script(trigger: str) -> bool:
@@ -9649,13 +9663,34 @@ async def _market_auto_push_market_cache(reason: str, force: bool = False) -> bo
         now2 = time.time()
         if (not force) and (now2 - MARKET_AUTO_PUSH_LAST_TS < MARKET_AUTO_PUSH_COOLDOWN_SEC):
             return False
-        ok = await _run_ranking_sync_script(
+        if not os.path.exists(RANK_SYNC_SCRIPT_PATH):
+            print(f"⚠️ market auto push script not found: {RANK_SYNC_SCRIPT_PATH}")
+            return False
+        cmd = [
+            sys.executable,
+            RANK_SYNC_SCRIPT_PATH,
+            "--trigger",
             "market_auto_push",
-            bootstrap_only=False,
-            full_rebuild=False,
-            push_only=True,
-            market_only=True,
+            "--data-dir",
+            _rank_sync_data_dir(),
+            "--push-only",
+            "--market-only",
+        ]
+        print(f"🕒 market auto push start reason={reason}")
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=BASE_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        out_b, err_b = await proc.communicate()
+        out = (out_b or b"").decode("utf-8", errors="replace").strip()
+        err = (err_b or b"").decode("utf-8", errors="replace").strip()
+        if out:
+            print(out)
+        if err:
+            print(err, file=sys.stderr)
+        ok = proc.returncode == 0
         MARKET_AUTO_PUSH_LAST_TS = time.time()
         if ok:
             print(f"✅ market auto push done reason={reason}")
