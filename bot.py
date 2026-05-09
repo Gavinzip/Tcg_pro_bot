@@ -811,7 +811,7 @@ async def pack_rank(interaction: discord.Interaction, address: str = None):
         lines.append("🏅 **Level:** `-`")
         lines.append("📊 **Rank:** `-`")
         lines.append("🎰 **Opens:** `0`")
-        lines.append("🎯 **To Lv.2 (Top50):** `-`")
+        lines.append("🎯 **To Lv.3 (Top10):** `-`")
     else:
         your_opens = _parse_int(target_row.get("monthly_gacha_open_count")) or 0
         your_rank = _parse_int(target_row.get("monthly_gacha_open_rank"))
@@ -822,14 +822,16 @@ async def pack_rank(interaction: discord.Interaction, address: str = None):
         lines.append(f"🏅 **Level:** `{your_level}`{your_suffix}")
         lines.append(f"📊 **Rank:** `#{your_rank_txt}`")
         lines.append(f"🎰 **Opens:** `{_format_number(your_opens)}`")
-        if your_rank is not None and your_rank > 50 and cutoff50 is not None:
-            gap = cutoff50 - your_opens
-            if gap > 0:
-                lines.append(f"🎯 **To Lv.2 (Top50):** `+{_format_number(gap)}` opens")
-            else:
-                lines.append("🎯 **To Lv.2 (Top50):** `0` (tie-break not in Top50 yet)")
-        else:
+        if your_rank is not None and your_rank > 0 and your_rank <= 10:
             lines.append("🎯 **To Lv.2 (Top50):** `0`")
+        elif cutoff10 is not None:
+            gap = cutoff10 - your_opens
+            if gap > 0:
+                lines.append(f"🎯 **To Lv.3 (Top10):** `+{_format_number(gap)}` opens")
+            else:
+                lines.append("🎯 **To Lv.3 (Top10):** `0` (tie-break not in Top10 yet)")
+        else:
+            lines.append("🎯 **To Lv.3 (Top10):** `-`")
 
         target_idx_row = ranked_index.get(str(resolved_wallet or "").lower())
         if target_idx_row is not None:
