@@ -406,6 +406,145 @@ async def ranking_sync_status(interaction: discord.Interaction):
     await interaction.response.send_message(txt, ephemeral=True)
 
 
+def _parse_iso_datetime(text: str) -> datetime | None:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+async def _resolve_notify_channel(channel_id: int):
+    if int(channel_id or 0) <= 0:
+        return None
+    channel = client.get_channel(int(channel_id))
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(int(channel_id))
+        except Exception:
+            return None
+    if channel is None or not hasattr(channel, "send"):
+        return None
+    return channel
+
+
+async def _send_ranking_rebuild_result_notice(
+    channel_id: int,
+    user_id: int,
+    *,
+    forced_success: bool | None = None,
+    queued: bool = False,
+) -> None:
+    channel = await _resolve_notify_channel(channel_id)
+    if channel is None:
+        return
+
+    status_path = _rank_sync_status_path()
+    latest_path = os.path.join(_rank_sync_data_dir(), "latest.json")
+    status: dict = {}
+    try:
+        if os.path.exists(status_path):
+            with open(status_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                status = loaded
+    except Exception:
+        status = {}
+
+    success = bool(status.get("success")) if forced_success is None else bool(forced_success)
+    trigger = str(status.get("trigger") or "unknown")
+    updated_at = str(status.get("updated_at") or "unknown")
+    message = str(status.get("message") or "").strip()
+    extra = status.get("extra") if isinstance(status.get("extra"), dict) else {}
+    wallet_count = extra.get("wallet_count", "n/a")
+    refreshed_wallets = extra.get("refreshed_wallets", "n/a")
+    changed_wallets = extra.get("changed_wallets", "n/a")
+    duration_sec = extra.get("duration_sec", "n/a")
+    full_rebuild = extra.get("full_rebuild", "n/a")
+    phase = "排隊中的" if queued else "本次"
+    txt = (
+        f"{'✅' if success else '❌'} <@{int(user_id)}> {phase} `ranking_rebuild` 已結束。\n"
+        f"Trigger: `{trigger}`\n"
+        f"Updated At: `{updated_at}`\n"
+        f"Wallets: `{wallet_count}` | Refreshed: `{refreshed_wallets}` | Changed: `{changed_wallets}`\n"
+        f"Full Rebuild: `{full_rebuild}` | Duration: `{duration_sec}`\n"
+        f"Latest Snapshot: `{latest_path}`"
+    )
+    if message:
+        txt += f"\nMessage: `{message[:900]}`"
+    try:
+        await channel.send(txt)
+    except Exception:
+        return
+
+
+async def _run_ranking_rebuild_background(channel_id: int, user_id: int) -> None:
+    ok = await _run_ranking_sync_script(
+        "manual_ranking_full_rebuild_all",
+        bootstrap_only=False,
+        full_rebuild=True,
+        full_rebuild_all=True,
+        skip_is_success=False,
+    )
+    await _send_ranking_rebuild_result_notice(
+        channel_id,
+        user_id,
+        forced_success=bool(ok),
+        queued=False,
+    )
+
+
+async def _watch_queued_ranking_rebuild_background(
+    channel_id: int,
+    user_id: int,
+    requested_at: str,
+) -> None:
+    requested_dt = _parse_iso_datetime(requested_at)
+    timeout_sec = 6 * 60 * 60
+    started = int(time.time())
+    while (int(time.time()) - started) < timeout_sec:
+        await asyncio.sleep(8)
+        lock_running = bool(_core.RANK_SYNC_SCRIPT_LOCK is not None and _core.RANK_SYNC_SCRIPT_LOCK.locked())
+        pending_manual = bool(getattr(_core, "RANK_SYNC_PENDING_MANUAL_REBUILD", False))
+        status = {}
+        try:
+            status_path = _rank_sync_status_path()
+            if os.path.exists(status_path):
+                with open(status_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    status = loaded
+        except Exception:
+            status = {}
+
+        trigger = str(status.get("trigger") or "").strip()
+        updated_dt = _parse_iso_datetime(str(status.get("updated_at") or ""))
+        if trigger != "manual_ranking_full_rebuild_all":
+            continue
+        if requested_dt is not None and updated_dt is not None and updated_dt < requested_dt:
+            continue
+        if lock_running or pending_manual:
+            continue
+        await _send_ranking_rebuild_result_notice(
+            channel_id,
+            user_id,
+            queued=True,
+        )
+        return
+
+    channel = await _resolve_notify_channel(channel_id)
+    if channel is None:
+        return
+    try:
+        await channel.send(
+            f"⚠️ <@{int(user_id)}> 這次排隊中的 `ranking_rebuild` 超過 6 小時仍未完成，請用 `/ranking_sync_status` 檢查目前狀態。"
+        )
+    except Exception:
+        return
+
+
 @tree.command(name="ranking_rebuild", description="手動全量重算 ranking（盈虧/交易/排名）")
 async def ranking_rebuild(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -415,57 +554,39 @@ async def ranking_rebuild(interaction: discord.Interaction):
             ephemeral=True,
         )
         return
+    channel_id = int(interaction.channel_id or 0)
+    user_id = int(interaction.user.id or 0)
     if _core.RANK_SYNC_SCRIPT_LOCK is not None and _core.RANK_SYNC_SCRIPT_LOCK.locked():
         queued = _core._queue_manual_ranking_full_rebuild("discord:/ranking_rebuild")
         current_job = queued.get("current_job") if isinstance(queued.get("current_job"), dict) else {}
         already = bool(queued.get("already_pending"))
+        requested_at = str(queued.get("requested_at") or "")
+        if not already:
+            asyncio.create_task(
+                _watch_queued_ranking_rebuild_background(
+                    channel_id,
+                    user_id,
+                    requested_at,
+                )
+            )
         await interaction.followup.send(
             (
                 "⏳ ranking sync 正在執行中，已排隊全量重算；目前這個 job 結束後會自動接著跑。\n"
                 f"Current Trigger: `{current_job.get('trigger', 'unknown')}`\n"
-                f"Queued At: `{queued.get('requested_at', 'unknown')}`\n"
+                f"Queued At: `{requested_at or 'unknown'}`\n"
                 f"Already Pending: `{already}`\n"
-                "請稍後用 `/ranking_sync_status` 看進度。"
+                "完成後會在本頻道再發一則完成訊息；你也可以用 `/ranking_sync_status` 看進度。"
             ),
             ephemeral=True,
         )
         return
 
-    ranking_ok = await _run_ranking_sync_script(
-        "manual_ranking_full_rebuild_all",
-        bootstrap_only=False,
-        full_rebuild=True,
-        full_rebuild_all=True,
-        skip_is_success=False,
+    asyncio.create_task(_run_ranking_rebuild_background(channel_id, user_id))
+    await interaction.followup.send(
+        "⏳ 已開始背景全量重算 ranking（所有 wallet，含盈虧/交易/排名）。\n完成後會在本頻道補發結果訊息；你也可以用 `/ranking_sync_status` 追蹤。",
+        ephemeral=True,
     )
-
-    if ranking_ok:
-        status_info = ""
-        try:
-            with open(_rank_sync_status_path(), "r", encoding="utf-8") as f:
-                status = json.load(f)
-            extra = status.get("extra") if isinstance(status.get("extra"), dict) else {}
-            duration_sec = extra.get("duration_sec", "n/a")
-            refreshed_wallets = extra.get("refreshed_wallets", "n/a")
-            wallet_count = extra.get("wallet_count", "n/a")
-            full_rebuild = extra.get("full_rebuild", "n/a")
-            status_info = (
-                f"\nWallets: `{wallet_count}` | Refreshed: `{refreshed_wallets}` | "
-                f"Full Rebuild: `{full_rebuild}` | Duration: `{duration_sec}` 秒"
-            )
-        except Exception:
-            status_info = ""
-        await interaction.followup.send(
-            f"✅ ranking 已全量重算（所有 wallet，含盈虧/交易/排名）。{status_info}",
-            ephemeral=True,
-        )
-        return
-    if not ranking_ok:
-        await interaction.followup.send(
-            "❌ rankings 全量重算失敗，請看伺服器 log / `/ranking_sync_status`。",
-            ephemeral=True,
-        )
-        return
+    return
 
 
 @tree.command(name="ranking", description="查看各項排名 Top 10（文字版）")
