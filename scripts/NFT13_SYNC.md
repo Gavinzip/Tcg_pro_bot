@@ -3,13 +3,14 @@
 This project includes:
 
 - `scripts/sync_nft13_incremental.py`
-- `bot.py` startup bootstrap + daily scheduled sync (`12:00 Asia/Taipei`)
+- `bot.py` startup bootstrap + daily scheduled sync (`NFT_SYNC_HOUR:NFT_SYNC_MINUTE`, default `06:00 Asia/Taipei`)
 - `/sync_status` slash command to inspect latest sync result
 
 ## Core behavior
 
-- Incremental fetch from Moralis owners endpoint.
-- Stops immediately when it hits the first duplicate holder record.
+- Uses BSC/BscScan API logs, not Moralis.
+- Reads ERC1155 `TransferSingle` / `TransferBatch` logs for the configured NFT contract.
+- Rebuilds or incrementally updates the current holder balances for `NFT_TOKEN_ID`.
 - Writes:
   - latest: `SYNC_DATA_DIR/snapshots/nft_<token_id>_holders.latest.json`
   - daily history: `SYNC_DATA_DIR/snapshots/history/YYYY-MM-DD.json`
@@ -21,11 +22,14 @@ This project includes:
 
 - `APP_ENV=server|local`
 - `SYNC_DATA_DIR=/data/renaiss_sync` (server) or `./data/renaiss_sync` (local)
-- `MORALIS_API_KEY=...`
-- `MORALIS_CHAIN=bsc`
+- `BSCSCAN_API_KEY=...`
+- `BSCSCAN_API_URL=https://api.etherscan.io/v2/api`
+- `BSCSCAN_CHAIN_ID=56`
 - `NFT_CONTRACT=0x7d1b7db704d722295fbaa284008f526634673dbf`
 - `NFT_TOKEN_ID=13`
-- `MORALIS_PAGE_LIMIT=20`
+- `NFT_SYNC_START_BLOCK=72800000`
+- `NFT_SYNC_BLOCK_CHUNK=200000`
+- `NFT_SYNC_LOG_PAGE_LIMIT=1000`
 - `BACKUP_GIT_ENABLED=1`
 - `BACKUP_GIT_REPO=git@github.com:Gavinzip/renaiss_data.git`
 - `BACKUP_GIT_BRANCH=main`
@@ -50,10 +54,16 @@ Run incremental sync once:
 python scripts/sync_nft13_incremental.py --trigger manual
 ```
 
+Full rebuild from `NFT_SYNC_START_BLOCK`:
+
+```bash
+python scripts/sync_nft13_incremental.py --trigger manual_full --full-rebuild
+```
+
 ## Discord command
 
 - Use `/sync_status` to read:
   - last success/failure
   - trigger source (`startup` / `daily` / `manual`)
-  - new rows/pages/holders
+  - scanned blocks / log count / matched token events / holder count
   - latest snapshot path

@@ -20,7 +20,9 @@ except Exception:  # pragma: no cover
 import requests
 from dotenv import load_dotenv
 
-MORALIS_OWNERS_URL_TMPL = "https://deep-index.moralis.io/api/v2.2/nft/{contract}/{token_id}/owners"
+TRANSFER_SINGLE_TOPIC = "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62"
+TRANSFER_BATCH_TOPIC = "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb"
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -65,17 +67,98 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _json_load(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     return data if isinstance(data, dict) else {}
 
 
-def _holder_key(row: dict[str, Any]) -> str:
-    owner = str(row.get("owner_of") or "").strip().lower()
-    token_id = str(row.get("token_id") or "").strip()
-    block_number = str(row.get("block_number") or "").strip()
-    amount = str(row.get("amount") or "").strip()
-    return f"{owner}|{token_id}|{block_number}|{amount}"
+def _parse_int(value: Any, default: int = 0) -> int:
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return default
+    try:
+        if text.lower().startswith("0x"):
+            return int(text, 16)
+        return int(text)
+    except Exception:
+        return default
+
+
+def _clean_hex(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    return text
+
+
+def _topic_to_address(topic: Any) -> str:
+    text = _clean_hex(topic)
+    if len(text) < 40:
+        return ""
+    return "0x" + text[-40:]
+
+
+def _word_to_int(word: str) -> int:
+    word = _clean_hex(word)
+    if not word:
+        return 0
+    return int(word[-64:].rjust(64, "0"), 16)
+
+
+def _split_words(data: Any) -> list[str]:
+    text = _clean_hex(data)
+    if not text:
+        return []
+    if len(text) % 64 != 0:
+        text = text.rjust(((len(text) + 63) // 64) * 64, "0")
+    return [text[i : i + 64] for i in range(0, len(text), 64)]
+
+
+def _decode_transfer_single(data: Any) -> tuple[int, int] | None:
+    words = _split_words(data)
+    if len(words) < 2:
+        return None
+    return _word_to_int(words[0]), _word_to_int(words[1])
+
+
+def _decode_dynamic_uint_array(words: list[str], offset_word: str) -> list[int]:
+    offset_bytes = _word_to_int(offset_word)
+    start = offset_bytes // 32
+    if start < 0 or start >= len(words):
+        return []
+    length = _word_to_int(words[start])
+    out: list[int] = []
+    for i in range(length):
+        idx = start + 1 + i
+        if idx >= len(words):
+            break
+        out.append(_word_to_int(words[idx]))
+    return out
+
+
+def _decode_transfer_batch(data: Any) -> tuple[list[int], list[int]] | None:
+    words = _split_words(data)
+    if len(words) < 4:
+        return None
+    ids = _decode_dynamic_uint_array(words, words[0])
+    values = _decode_dynamic_uint_array(words, words[1])
+    if not ids or len(ids) != len(values):
+        return None
+    return ids, values
+
+
+def _event_sort_key(row: dict[str, Any]) -> tuple[int, int, int]:
+    return (
+        _parse_int(row.get("blockNumber")),
+        _parse_int(row.get("transactionIndex")),
+        _parse_int(row.get("logIndex")),
+    )
 
 
 @dataclass
@@ -83,11 +166,14 @@ class SyncConfig:
     app_env: str
     test_mode: bool
     data_dir: Path
-    moralis_api_key: str
-    moralis_chain: str
+    bsc_api_url: str
+    bsc_chain_id: int
+    bsc_api_key: str
     contract: str
     token_id: str
-    page_limit: int
+    start_block: int
+    block_chunk_size: int
+    log_page_limit: int
     api_max_retries: int
     api_backoff_sec: float
     bootstrap_from_git: bool
@@ -97,6 +183,10 @@ class SyncConfig:
     backup_git_dir: Path
     webhook_url: str
     base_dir: Path
+
+    @property
+    def token_id_int(self) -> int:
+        return _parse_int(self.token_id)
 
     @property
     def snapshot_latest_path(self) -> Path:
@@ -125,8 +215,8 @@ class SyncConfig:
 
 
 def load_config() -> SyncConfig:
-    load_dotenv()
     base_dir = Path(__file__).resolve().parents[1]
+    load_dotenv(dotenv_path=base_dir / ".env")
     app_env = str(os.getenv("APP_ENV", "local")).strip().lower() or "local"
     default_data_dir = "/data/renaiss_sync" if app_env == "server" else "./data/renaiss_sync"
     data_dir = Path(os.getenv("SYNC_DATA_DIR", default_data_dir)).expanduser().resolve()
@@ -139,13 +229,17 @@ def load_config() -> SyncConfig:
         app_env=app_env,
         test_mode=test_mode,
         data_dir=data_dir,
-        moralis_api_key=str(os.getenv("MORALIS_API_KEY", "")).strip(),
-        moralis_chain=str(os.getenv("MORALIS_CHAIN", "bsc")).strip() or "bsc",
+        bsc_api_url=str(os.getenv("BSCSCAN_API_URL", "https://api.etherscan.io/v2/api")).strip()
+        or "https://api.etherscan.io/v2/api",
+        bsc_chain_id=max(1, int(os.getenv("BSCSCAN_CHAIN_ID", "56"))),
+        bsc_api_key=str(os.getenv("BSCSCAN_API_KEY", "")).strip(),
         contract=str(
             os.getenv("NFT_CONTRACT", "0x7d1b7db704d722295fbaa284008f526634673dbf")
         ).strip().lower(),
         token_id=str(os.getenv("NFT_TOKEN_ID", "13")).strip(),
-        page_limit=max(1, min(100, int(os.getenv("MORALIS_PAGE_LIMIT", "20")))),
+        start_block=max(0, int(os.getenv("NFT_SYNC_START_BLOCK", "72800000"))),
+        block_chunk_size=max(100, int(os.getenv("NFT_SYNC_BLOCK_CHUNK", "200000"))),
+        log_page_limit=max(1, min(1000, int(os.getenv("NFT_SYNC_LOG_PAGE_LIMIT", "1000")))),
         api_max_retries=max(1, int(os.getenv("PROFILE_API_MAX_RETRIES", "4"))),
         api_backoff_sec=max(0.2, float(os.getenv("PROFILE_API_RETRY_BACKOFF_SEC", "0.8"))),
         bootstrap_from_git=bootstrap_from_git,
@@ -169,8 +263,10 @@ def load_config() -> SyncConfig:
 def validate_config(cfg: SyncConfig, require_api_key: bool = True) -> None:
     if not cfg.contract.startswith("0x") or len(cfg.contract) != 42:
         raise RuntimeError("NFT_CONTRACT invalid")
-    if require_api_key and not cfg.moralis_api_key:
-        raise RuntimeError("MORALIS_API_KEY is required")
+    if _parse_int(cfg.token_id, -1) < 0:
+        raise RuntimeError("NFT_TOKEN_ID invalid")
+    if require_api_key and not cfg.bsc_api_key:
+        raise RuntimeError("BSCSCAN_API_KEY is required")
     if cfg.backup_git_enabled and not cfg.backup_git_repo:
         raise RuntimeError("BACKUP_GIT_REPO is required when BACKUP_GIT_ENABLED=1")
 
@@ -213,7 +309,9 @@ def write_status(
         "message": message,
         "app_env": cfg.app_env,
         "test_mode": cfg.test_mode,
-        "chain": cfg.moralis_chain,
+        "provider": "bscscan_logs",
+        "chain_id": cfg.bsc_chain_id,
+        "contract": cfg.contract,
         "token_id": cfg.token_id,
     }
     if extra:
@@ -314,147 +412,354 @@ def initialize_from_baseline_if_needed(cfg: SyncConfig) -> bool:
     return True
 
 
-def fetch_moralis_page(cfg: SyncConfig, cursor: str | None = None) -> dict[str, Any]:
-    url = MORALIS_OWNERS_URL_TMPL.format(contract=cfg.contract, token_id=cfg.token_id)
-    params: dict[str, Any] = {"chain": cfg.moralis_chain, "limit": cfg.page_limit}
-    if cursor:
-        params["cursor"] = cursor
-    headers = {"X-API-Key": cfg.moralis_api_key}
-
+def _bsc_get(cfg: SyncConfig, params: dict[str, Any]) -> dict[str, Any]:
+    query = dict(params)
+    query.setdefault("chainid", cfg.bsc_chain_id)
+    query["apikey"] = cfg.bsc_api_key
     last_err: Exception | None = None
     for attempt in range(1, cfg.api_max_retries + 1):
         try:
-            resp = requests.get(url, params=params, headers=headers, timeout=30)
-            status = int(resp.status_code or 0)
-            if status == 429 or status >= 500:
-                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp = requests.get(cfg.bsc_api_url, params=query, timeout=30)
+            status_code = int(resp.status_code or 0)
+            if status_code == 429 or status_code >= 500:
+                raise requests.HTTPError(f"HTTP {status_code}", response=resp)
             resp.raise_for_status()
             data = resp.json()
             if not isinstance(data, dict):
-                raise RuntimeError("Moralis response is not object")
+                raise RuntimeError("BSC API response is not object")
+            result = data.get("result")
+            message = str(data.get("message") or "").lower()
+            status = str(data.get("status") or "").strip()
+            if status == "0" and isinstance(result, str):
+                lowered = result.lower()
+                if "no records" in lowered or "no transactions" in lowered:
+                    return data
+                if "rate limit" in lowered or "timeout" in lowered or "busy" in lowered:
+                    raise RuntimeError(result)
+                raise RuntimeError(result)
+            if status == "0" and isinstance(result, list) and not result and "no records" not in message:
+                raise RuntimeError(str(data.get("message") or "BSC API returned status 0"))
             return data
         except Exception as e:  # noqa: BLE001
             last_err = e
-            status = None
-            if isinstance(e, requests.RequestException) and getattr(e, "response", None) is not None:
-                status = int(e.response.status_code or 0)
-            retryable = status in (408, 409, 425, 429) or (status is not None and status >= 500) or status is None
-            if retryable and attempt < cfg.api_max_retries:
+            if attempt < cfg.api_max_retries:
                 time.sleep(cfg.api_backoff_sec * (2 ** (attempt - 1)))
                 continue
             break
-    raise RuntimeError(f"Moralis owners request failed: {last_err}")
+    raise RuntimeError(f"BSC API request failed: {last_err}")
 
 
-def incremental_sync(cfg: SyncConfig) -> dict[str, Any]:
-    if not cfg.snapshot_latest_path.exists():
-        raise RuntimeError(f"Latest snapshot missing: {cfg.snapshot_latest_path}")
+def fetch_latest_block(cfg: SyncConfig) -> int:
+    data = _bsc_get(cfg, {"module": "proxy", "action": "eth_blockNumber"})
+    result = str(data.get("result") or "").strip()
+    if not result:
+        raise RuntimeError("eth_blockNumber missing result")
+    return _parse_int(result)
 
-    current = _json_load(cfg.snapshot_latest_path)
-    old_holders = current.get("holders") or current.get("result") or []
-    if not isinstance(old_holders, list):
-        old_holders = []
 
-    old_keys = {_holder_key(x) for x in old_holders if isinstance(x, dict)}
-    new_rows: list[dict[str, Any]] = []
-    seen_new_keys: set[str] = set()
-    seen_cursors: set[str] = set()
-
-    stop_on_duplicate = False
-    pages = 0
-    cursor: str | None = None
-    last_page_data: dict[str, Any] = {}
-
-    while True:
-        page_data = fetch_moralis_page(cfg, cursor=cursor)
-        pages += 1
-        last_page_data = page_data
-
-        rows = page_data.get("result") or []
-        if not isinstance(rows, list):
-            rows = []
-
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            key = _holder_key(row)
-            if not key:
-                continue
-            if key in old_keys:
-                stop_on_duplicate = True
-                break
-            if key in seen_new_keys:
-                continue
-            seen_new_keys.add(key)
-            new_rows.append(row)
-
-        if stop_on_duplicate:
-            break
-
-        next_cursor = page_data.get("cursor")
-        if not next_cursor:
-            break
-        next_cursor = str(next_cursor)
-        if next_cursor in seen_cursors:
-            break
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-
-    merged_holders = new_rows + old_holders
-    unique_holders: list[dict[str, Any]] = []
-    seen_merged: set[str] = set()
-    for row in merged_holders:
-        if not isinstance(row, dict):
-            continue
-        key = _holder_key(row)
-        if not key or key in seen_merged:
-            continue
-        seen_merged.add(key)
-        unique_holders.append(row)
-
-    total_records = int(last_page_data.get("total") or current.get("total_records") or len(unique_holders))
-    total_records = max(total_records, len(unique_holders))
-
-    out_payload = {
-        "contract": cfg.contract,
-        "token_id": cfg.token_id,
-        "chain": cfg.moralis_chain,
-        "total_records": total_records,
-        "holders": unique_holders,
-        "meta": {
-            "updated_at": _now_tpe().isoformat(),
-            "new_rows": len(new_rows),
-            "pages_fetched": pages,
-            "stop_on_duplicate": stop_on_duplicate,
-            "page_limit": cfg.page_limit,
-        },
-    }
-    _atomic_write_json(cfg.snapshot_latest_path, out_payload)
-    _atomic_write_json(cfg.history_path, out_payload)
-    _atomic_write_json(
-        cfg.state_path,
+def _fetch_logs_page(
+    cfg: SyncConfig,
+    *,
+    from_block: int,
+    to_block: int,
+    topic0: str,
+    page: int,
+) -> list[dict[str, Any]]:
+    data = _bsc_get(
+        cfg,
         {
-            "updated_at": _now_tpe().isoformat(),
-            "new_rows": len(new_rows),
-            "pages_fetched": pages,
-            "stop_on_duplicate": stop_on_duplicate,
-            "holder_count": len(unique_holders),
+            "module": "logs",
+            "action": "getLogs",
+            "fromBlock": int(from_block),
+            "toBlock": int(to_block),
+            "address": cfg.contract,
+            "topic0": topic0,
+            "page": int(page),
+            "offset": int(cfg.log_page_limit),
         },
     )
+    result = data.get("result")
+    if isinstance(result, list):
+        return [x for x in result if isinstance(x, dict)]
+    if isinstance(result, str) and "no records" in result.lower():
+        return []
+    raise RuntimeError(f"getLogs invalid result: {result}")
 
+
+def _fetch_logs_range_adaptive(
+    cfg: SyncConfig,
+    *,
+    from_block: int,
+    to_block: int,
+    topic0: str,
+) -> list[dict[str, Any]]:
+    try:
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            rows = _fetch_logs_page(
+                cfg,
+                from_block=from_block,
+                to_block=to_block,
+                topic0=topic0,
+                page=page,
+            )
+            if not rows:
+                break
+            out.extend(rows)
+            if len(rows) < cfg.log_page_limit:
+                break
+            page += 1
+        return out
+    except Exception:
+        if from_block >= to_block:
+            raise
+        mid = (from_block + to_block) // 2
+        return _fetch_logs_range_adaptive(
+            cfg,
+            from_block=from_block,
+            to_block=mid,
+            topic0=topic0,
+        ) + _fetch_logs_range_adaptive(
+            cfg,
+            from_block=mid + 1,
+            to_block=to_block,
+            topic0=topic0,
+        )
+
+
+def _load_snapshot_balances(path: Path, token_id: str) -> tuple[dict[str, int], dict[str, int], int]:
+    data = _json_load(path)
+    rows = data.get("holders") or data.get("result") or data.get("rows") or []
+    if not isinstance(rows, list):
+        rows = []
+    balances: dict[str, int] = {}
+    holder_blocks: dict[str, int] = {}
+    max_block = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_token = str(row.get("token_id") or row.get("tokenID") or row.get("tokenId") or token_id).strip()
+        if row_token and row_token != str(token_id):
+            continue
+        owner = str(row.get("owner_of") or row.get("ownerAddress") or row.get("owner_address") or row.get("address") or row.get("wallet") or "").strip().lower()
+        if not owner.startswith("0x") or len(owner) != 42:
+            continue
+        amount = _parse_int(row.get("amount"), 1)
+        if amount <= 0:
+            continue
+        block_number = _parse_int(row.get("block_number") or row.get("blockNumber"))
+        balances[owner] = balances.get(owner, 0) + amount
+        if block_number > 0:
+            holder_blocks[owner] = max(holder_blocks.get(owner, 0), block_number)
+            max_block = max(max_block, block_number)
+    return balances, holder_blocks, max_block
+
+
+def _load_last_scanned_block(cfg: SyncConfig, snapshot_max_block: int) -> int:
+    state = _json_load(cfg.state_path)
+    for key in ("last_scanned_block", "end_block"):
+        value = _parse_int(state.get(key))
+        if value > 0:
+            return value
+    snapshot = _json_load(cfg.snapshot_latest_path)
+    meta = snapshot.get("meta") if isinstance(snapshot.get("meta"), dict) else {}
+    for key in ("last_scanned_block", "end_block"):
+        value = _parse_int(meta.get(key))
+        if value > 0:
+            return value
+    return snapshot_max_block
+
+
+def _apply_delta(balances: dict[str, int], holder_blocks: dict[str, int], owner: str, delta: int, block_number: int) -> None:
+    owner = str(owner or "").strip().lower()
+    if not owner.startswith("0x") or len(owner) != 42 or owner == ZERO_ADDRESS or delta == 0:
+        return
+    new_balance = int(balances.get(owner, 0)) + int(delta)
+    if new_balance <= 0:
+        balances.pop(owner, None)
+        holder_blocks.pop(owner, None)
+        return
+    balances[owner] = new_balance
+    if block_number > 0:
+        holder_blocks[owner] = block_number
+
+
+def _apply_transfer_event(
+    cfg: SyncConfig,
+    row: dict[str, Any],
+    balances: dict[str, int],
+    holder_blocks: dict[str, int],
+) -> int:
+    topics = row.get("topics") if isinstance(row.get("topics"), list) else []
+    if len(topics) < 4:
+        return 0
+    topic0 = str(topics[0] or "").strip().lower()
+    from_addr = _topic_to_address(topics[2])
+    to_addr = _topic_to_address(topics[3])
+    block_number = _parse_int(row.get("blockNumber"))
+    matched = 0
+
+    if topic0 == TRANSFER_SINGLE_TOPIC:
+        decoded = _decode_transfer_single(row.get("data"))
+        if decoded is None:
+            return 0
+        event_token_id, amount = decoded
+        if event_token_id != cfg.token_id_int or amount <= 0:
+            return 0
+        _apply_delta(balances, holder_blocks, from_addr, -amount, block_number)
+        _apply_delta(balances, holder_blocks, to_addr, amount, block_number)
+        return 1
+
+    if topic0 == TRANSFER_BATCH_TOPIC:
+        decoded_batch = _decode_transfer_batch(row.get("data"))
+        if decoded_batch is None:
+            return 0
+        ids, values = decoded_batch
+        for event_token_id, amount in zip(ids, values):
+            if event_token_id != cfg.token_id_int or amount <= 0:
+                continue
+            _apply_delta(balances, holder_blocks, from_addr, -amount, block_number)
+            _apply_delta(balances, holder_blocks, to_addr, amount, block_number)
+            matched += 1
+    return matched
+
+
+def _scan_and_apply_logs(
+    cfg: SyncConfig,
+    *,
+    start_block: int,
+    end_block: int,
+    balances: dict[str, int],
+    holder_blocks: dict[str, int],
+) -> dict[str, int]:
+    if start_block > end_block:
+        return {"ranges": 0, "events": 0, "matched_events": 0}
+    ranges = 0
+    events = 0
+    matched_events = 0
+    cursor = max(0, start_block)
+    while cursor <= end_block:
+        chunk_end = min(end_block, cursor + cfg.block_chunk_size - 1)
+        chunk_logs: list[dict[str, Any]] = []
+        for topic in (TRANSFER_SINGLE_TOPIC, TRANSFER_BATCH_TOPIC):
+            rows = _fetch_logs_range_adaptive(cfg, from_block=cursor, to_block=chunk_end, topic0=topic)
+            chunk_logs.extend(rows)
+        chunk_logs.sort(key=_event_sort_key)
+        for row in chunk_logs:
+            matched_events += _apply_transfer_event(cfg, row, balances, holder_blocks)
+        ranges += 1
+        events += len(chunk_logs)
+        print(
+            f"[PROGRESS] bsc_logs range={cursor}-{chunk_end} logs={len(chunk_logs)} matched={matched_events}",
+            flush=True,
+        )
+        cursor = chunk_end + 1
+    return {"ranges": ranges, "events": events, "matched_events": matched_events}
+
+
+def _holders_payload(
+    cfg: SyncConfig,
+    *,
+    balances: dict[str, int],
+    holder_blocks: dict[str, int],
+    start_block: int,
+    end_block: int,
+    latest_block: int,
+    scan_stats: dict[str, int],
+    full_rebuild: bool,
+) -> dict[str, Any]:
+    holders: list[dict[str, Any]] = []
+    for owner in sorted(balances):
+        amount = int(balances.get(owner, 0))
+        if amount <= 0:
+            continue
+        holders.append(
+            {
+                "amount": str(amount),
+                "token_id": str(cfg.token_id),
+                "token_address": cfg.contract,
+                "contract_type": "ERC1155",
+                "owner_of": owner,
+                "block_number": str(holder_blocks.get(owner, end_block if end_block > 0 else latest_block)),
+                "name": None,
+                "symbol": None,
+                "metadata": None,
+            }
+        )
     return {
-        "new_rows": len(new_rows),
-        "pages_fetched": pages,
-        "stop_on_duplicate": stop_on_duplicate,
-        "holder_count": len(unique_holders),
-        "total_records": total_records,
+        "contract": cfg.contract,
+        "token_id": cfg.token_id,
+        "chain": "bsc",
+        "provider": "bscscan_logs",
+        "total_records": len(holders),
+        "holders": holders,
+        "meta": {
+            "updated_at": _now_tpe().isoformat(),
+            "full_rebuild": bool(full_rebuild),
+            "start_block": int(start_block),
+            "end_block": int(end_block),
+            "latest_block": int(latest_block),
+            "last_scanned_block": int(end_block),
+            "block_chunk_size": int(cfg.block_chunk_size),
+            "log_page_limit": int(cfg.log_page_limit),
+            **scan_stats,
+        },
     }
+
+
+def sync_from_bsc_logs(cfg: SyncConfig, *, full_rebuild: bool = False) -> dict[str, Any]:
+    latest_block = fetch_latest_block(cfg)
+    if full_rebuild or not cfg.snapshot_latest_path.exists():
+        balances: dict[str, int] = {}
+        holder_blocks: dict[str, int] = {}
+        start_block = cfg.start_block
+    else:
+        balances, holder_blocks, snapshot_max_block = _load_snapshot_balances(cfg.snapshot_latest_path, cfg.token_id)
+        last_scanned = _load_last_scanned_block(cfg, snapshot_max_block)
+        start_block = max(cfg.start_block, last_scanned + 1)
+
+    end_block = latest_block
+    scan_stats = _scan_and_apply_logs(
+        cfg,
+        start_block=start_block,
+        end_block=end_block,
+        balances=balances,
+        holder_blocks=holder_blocks,
+    )
+    payload = _holders_payload(
+        cfg,
+        balances=balances,
+        holder_blocks=holder_blocks,
+        start_block=start_block,
+        end_block=end_block,
+        latest_block=latest_block,
+        scan_stats=scan_stats,
+        full_rebuild=full_rebuild,
+    )
+    _atomic_write_json(cfg.snapshot_latest_path, payload)
+    _atomic_write_json(cfg.history_path, payload)
+    state = {
+        "updated_at": _now_tpe().isoformat(),
+        "provider": "bscscan_logs",
+        "holder_count": len(payload["holders"]),
+        "total_records": int(payload["total_records"]),
+        "start_block": int(start_block),
+        "end_block": int(end_block),
+        "latest_block": int(latest_block),
+        "last_scanned_block": int(end_block),
+        "full_rebuild": bool(full_rebuild),
+        **scan_stats,
+    }
+    _atomic_write_json(cfg.state_path, state)
+    return state
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Sync NFT token holders incrementally and backup to git")
+    p = argparse.ArgumentParser(description="Sync NFT token holders from BSC ERC1155 logs and backup to git")
     p.add_argument("--trigger", default="manual")
     p.add_argument("--bootstrap-only", action="store_true")
+    p.add_argument("--full-rebuild", action="store_true", help="Replay ERC1155 logs from NFT_SYNC_START_BLOCK")
     return p.parse_args()
 
 
@@ -479,9 +784,7 @@ def main() -> int:
     if args.bootstrap_only:
         bootstrap_commit = "skip"
         if initialized and cfg.backup_git_enabled:
-            commit_message = (
-                f"bootstrap nft_{cfg.token_id} {_now_tpe_str()}"
-            )
+            commit_message = f"bootstrap nft_{cfg.token_id} {_now_tpe_str()}"
             bootstrap_commit = git_push_snapshots(cfg, commit_message=commit_message)
         msg = (
             f"trigger={args.trigger} bootstrap_only=1 bootstrapped={bootstrapped} "
@@ -504,21 +807,23 @@ def main() -> int:
         send_webhook(cfg, msg, success=True)
         return 0
 
-    result = incremental_sync(cfg)
-    new_rows = int(result["new_rows"])
+    result = sync_from_bsc_logs(cfg, full_rebuild=bool(args.full_rebuild))
+    matched_events = int(result.get("matched_events") or 0)
+    holder_count = int(result.get("holder_count") or 0)
 
     commit_hash = "git-disabled"
-    if cfg.backup_git_enabled and (new_rows > 0 or initialized):
+    if cfg.backup_git_enabled and (matched_events > 0 or initialized or args.full_rebuild):
         commit_message = (
             f"sync nft_{cfg.token_id} {_now_tpe_str()} "
-            f"+{new_rows} trigger={args.trigger}"
+            f"matched={matched_events} trigger={args.trigger}"
         )
         commit_hash = git_push_snapshots(cfg, commit_message=commit_message)
 
     msg = (
-        f"trigger={args.trigger} chain={cfg.moralis_chain} token_id={cfg.token_id} "
-        f"new_rows={new_rows} pages={result['pages_fetched']} stop_on_duplicate={result['stop_on_duplicate']} "
-        f"holders={result['holder_count']} total_records={result['total_records']} commit={commit_hash}"
+        f"trigger={args.trigger} provider=bscscan_logs chain_id={cfg.bsc_chain_id} token_id={cfg.token_id} "
+        f"blocks={result['start_block']}-{result['end_block']} logs={result['events']} "
+        f"matched={matched_events} holders={holder_count} total_records={result['total_records']} "
+        f"commit={commit_hash}"
     )
     print(f"[OK] {msg}")
     write_status(
@@ -526,14 +831,7 @@ def main() -> int:
         success=True,
         trigger=args.trigger,
         message=msg,
-        extra={
-            "new_rows": new_rows,
-            "pages_fetched": result["pages_fetched"],
-            "stop_on_duplicate": result["stop_on_duplicate"],
-            "holder_count": result["holder_count"],
-            "total_records": result["total_records"],
-            "commit": commit_hash,
-        },
+        extra={**result, "commit": commit_hash},
     )
     send_webhook(cfg, msg, success=True)
     return 0

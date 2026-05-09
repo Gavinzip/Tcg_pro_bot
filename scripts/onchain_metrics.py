@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 import os
 import time
@@ -24,6 +24,7 @@ class OnchainConfig:
     page_size: int
     retries: int
     backoff_sec: float
+    withdraw_addresses: tuple[str, ...] = ()
 
 
 def _to_decimal(v: Any) -> Decimal:
@@ -1136,6 +1137,23 @@ def analyze_wallet(
     transfers = fetch_all_usdt_transfers(cfg, wallet_norm)
     nft_rows = fetch_all_nft_transfers(cfg, wallet_norm)
     nft_in_txs, nft_out_txs = _wallet_nft_tx_sets(nft_rows, wallet_norm)
+    withdraw_targets = {
+        str(x or "").strip().lower()
+        for x in (getattr(cfg, "withdraw_addresses", ()) or ())
+        if str(x or "").strip().lower().startswith("0x") and len(str(x or "").strip().lower()) == 42
+    }
+    withdraw_token_ids: set[str] = set()
+    if withdraw_targets:
+        for row in nft_rows:
+            if not isinstance(row, dict):
+                continue
+            frm = str(row.get("from") or "").strip().lower()
+            to = str(row.get("to") or "").strip().lower()
+            if frm != wallet_norm or to not in withdraw_targets:
+                continue
+            token_id = str(row.get("tokenID") or row.get("tokenId") or "").strip()
+            if token_id:
+                withdraw_token_ids.add(token_id)
     open_pack_hashes = _open_pack_tx_hashes(
         cfg,
         wallet_norm,
@@ -1144,6 +1162,24 @@ def analyze_wallet(
         legacy_open_pack_hints=legacy_open_pack_hints,
         use_delayed_recipient_heuristic=use_delayed_recipient_heuristic,
     )
+    effective_pack_contracts = {str(x or "").strip().lower() for x in (cfg.pack_contracts or ())}
+    marketplace_contract = str(cfg.marketplace_contract or "").strip().lower()
+    for row in transfers:
+        if not isinstance(row, dict):
+            continue
+        tx_hash = _row_hash(row)
+        if not tx_hash or tx_hash not in open_pack_hashes:
+            continue
+        frm = str(row.get("from") or "").strip().lower()
+        to = str(row.get("to") or "").strip().lower()
+        if frm != wallet_norm:
+            continue
+        if not (to.startswith("0x") and len(to) == 42):
+            continue
+        if to in (wallet_norm, marketplace_contract):
+            continue
+        effective_pack_contracts.add(to)
+    effective_cfg = replace(cfg, pack_contracts=tuple(sorted(effective_pack_contracts)))
     pack_spent = Decimal("0")
     buyback_earned = Decimal("0")
     market_buy_spent = Decimal("0")
@@ -1158,7 +1194,7 @@ def analyze_wallet(
         cls = _classify_transfer(
             row,
             wallet_norm,
-            cfg,
+            effective_cfg,
             tx_has_nft_in=bool(tx_hash and tx_hash in nft_in_txs),
             tx_has_nft_out=bool(tx_hash and tx_hash in nft_out_txs),
         )
@@ -1194,6 +1230,7 @@ def analyze_wallet(
         "total_spent_usdt": total_spent,
         "total_earned_usdt": total_earned,
         "cash_net_usdt": cash_net,
+        "withdraw_token_ids": sorted(withdraw_token_ids),
         "open_pack_tx_count": Decimal(open_pack_tx_count),
         "buyback_tx_count": Decimal(buyback_tx_count),
         "trade_buy_tx_count": Decimal(trade_buy_tx_count),

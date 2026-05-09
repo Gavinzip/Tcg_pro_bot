@@ -201,6 +201,7 @@ RANK_SYNC_COMPARE_ON_STARTUP = _env_true("RANK_SYNC_COMPARE_ON_STARTUP", False)
 RANK_SYNC_HOUR = max(0, min(23, int(os.getenv("RANK_SYNC_HOUR", "6"))))
 RANK_SYNC_MINUTE = max(0, min(59, int(os.getenv("RANK_SYNC_MINUTE", "0"))))
 RANK_SYNC_INTERVAL_MINUTES = max(1, int(os.getenv("RANK_SYNC_INTERVAL_MINUTES", "10")))
+RANK_SYNC_INTERVAL_ENABLE = _env_true("RANK_SYNC_INTERVAL_ENABLE", False)
 RANK_SYNC_WEEKLY_FULL_ENABLE = _env_true("RANK_SYNC_WEEKLY_FULL_ENABLE", True)
 RANK_SYNC_WEEKLY_FULL_WEEKDAY = max(0, min(6, int(os.getenv("RANK_SYNC_WEEKLY_FULL_WEEKDAY", "6"))))
 RANK_SYNC_RUN_TIME = dt_time(hour=RANK_SYNC_HOUR, minute=RANK_SYNC_MINUTE, tzinfo=_safe_tzinfo(RANK_SYNC_TZ))
@@ -988,6 +989,7 @@ def _build_profile_onchain_cfg(*, force: bool = False):
         page_size=page_size,
         retries=retries,
         backoff_sec=backoff_sec,
+        withdraw_addresses=tuple(sorted(_profile_withdraw_target_set())),
     )
 
 
@@ -4917,6 +4919,15 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     )
     delayed_open_matches = _infer_delayed_open_pack_matches(usdt_rows, nft_rows, wallet_norm, cfg, nft_in_txs)
     delayed_open_tx_hashes = set(delayed_open_matches.keys())
+    for match in delayed_open_matches.values():
+        payment = match.get("payment") if isinstance(match, dict) and isinstance(match.get("payment"), dict) else {}
+        payment_to = str(payment.get("to") or "").strip().lower()
+        if not (payment_to.startswith("0x") and len(payment_to) == 42):
+            continue
+        if payment_to in (wallet_norm, str(getattr(cfg, "marketplace_contract", "") or "").strip().lower()):
+            continue
+        known_pack_contracts.add(payment_to)
+        pack_price_map_dirty = _record_pack_contract_hint(pack_price_map, payment_to) or pack_price_map_dirty
 
     payment_hint_candidates: list[dict] = []
     marketplace_contract = str(getattr(cfg, "marketplace_contract", "") or "").strip().lower()
@@ -9896,7 +9907,7 @@ async def on_ready():
                         f"bootstrap_ok={1 if bootstrap_ok else 0} compare_ok={1 if compare_ok else 0}"
                     )
                 RANK_SYNC_STARTUP_DONE = True
-        if not ranking_interval_sync_job.is_running():
+        if RANK_SYNC_INTERVAL_ENABLE and not ranking_interval_sync_job.is_running():
             ranking_interval_sync_job.start()
         if not ranking_daily_sync_job.is_running():
             ranking_daily_sync_job.start()

@@ -37,17 +37,17 @@ RENAISS_TOKEN_ACTIVITY_URL = "https://www.renaiss.xyz/api/trpc/activity.getSubgr
 RENAISS_SBT_BADGES_URL = "https://www.renaiss.xyz/api/trpc/sbt.getUserBadges"
 
 WEI_DECIMAL = Decimal("1000000000000000000")
-SELL_GROSS_DIVISOR = Decimal(os.getenv("PROFILE_MARKET_SELL_GROSS_DIVISOR", "1.02"))
 PROFILE_CARD_WITHDRAW_ADDRESS = str(
     os.getenv("PROFILE_CARD_WITHDRAW_ADDRESS", "0x341Edb3EdC1E45612E5704F29eC8d26fBb4072b4")
+).strip().lower()
+PROFILE_CARD_WITHDRAW_ADDRESS_EXTRA = str(
+    os.getenv("PROFILE_CARD_WITHDRAW_ADDRESS_EXTRA", "0x72a004654Cef4694a6377f5b019d0489bA8A6c9E")
 ).strip().lower()
 API_MAX_RETRIES = max(1, int(os.getenv("PROFILE_API_MAX_RETRIES", "4")))
 API_RETRY_BACKOFF_SEC = max(0.2, float(os.getenv("PROFILE_API_RETRY_BACKOFF_SEC", "0.8")))
 HTTP_POOL_MAXSIZE = max(8, int(os.getenv("PROFILE_HTTP_POOL_MAXSIZE", "48")))
 TOKEN_ACTIVITY_PAGE_LIMIT = max(1, min(50, int(os.getenv("PROFILE_TOKEN_ACTIVITY_PAGE_LIMIT", "50"))))
 TOKEN_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_TOKEN_ACTIVITY_MAX_PAGES", "20")))
-DEFAULT_HOLDERS_FILE_SERVER = Path("/data/renaiss_sync/snapshots/nft_13_holders.latest.json")
-DEFAULT_HOLDERS_FILE_LOCAL = Path("/Users/gavin/renaiss_project/renaiss_sync_data/snapshots/nft_13_holders.latest.json")
 DEFAULT_MONTHLY_PACK_LAUNCH_START = "2026-05-01T00:00:00+08:00"
 
 _HTTP_SESSION_LOCAL = threading.local()
@@ -79,6 +79,36 @@ def _parse_address_csv(raw: str | None, *, default_values: tuple[str, ...] = ())
     return tuple(values)
 
 
+DEFAULT_ONCHAIN_PACK_CONTRACTS = (
+    "0xaab5f5fa75437a6e9e7004c12c9c56cda4b4885a",
+    "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
+    "0xb2891022648c5fad3721c42c05d8d283d4d53080",
+)
+
+
+def _ranking_onchain_pack_contracts() -> tuple[str, ...]:
+    return _merge_address_tuples(
+        DEFAULT_ONCHAIN_PACK_CONTRACTS,
+        _parse_address_csv(os.getenv("ONCHAIN_PACK_CONTRACTS"), default_values=()),
+        _parse_address_csv(os.getenv("ONCHAIN_PACK_CONTRACTS_EXTRA"), default_values=()),
+        _parse_address_csv(os.getenv("RANK_ONCHAIN_PACK_CONTRACTS"), default_values=()),
+        _parse_address_csv(os.getenv("RANK_ONCHAIN_PACK_CONTRACTS_EXTRA"), default_values=()),
+    )
+
+
+def _withdraw_target_set() -> set[str]:
+    out = set(
+        _merge_address_tuples(
+            (
+                PROFILE_CARD_WITHDRAW_ADDRESS,
+                PROFILE_CARD_WITHDRAW_ADDRESS_EXTRA,
+            ),
+            _parse_address_csv(os.getenv("PROFILE_CARD_WITHDRAW_ADDRESSES"), default_values=()),
+        )
+    )
+    return {x for x in out if x.startswith("0x") and len(x) == 42}
+
+
 def _merge_address_tuples(*groups: tuple[str, ...]) -> tuple[str, ...]:
     out: list[str] = []
     seen: set[str] = set()
@@ -92,6 +122,13 @@ def _merge_address_tuples(*groups: tuple[str, ...]) -> tuple[str, ...]:
             seen.add(a)
             out.append(a)
     return tuple(out)
+
+
+def _default_holders_file(app_env: str) -> Path:
+    token_id = str(os.getenv("NFT_TOKEN_ID", "13")).strip() or "13"
+    default_sync_dir = "/data/renaiss_sync" if app_env == "server" else "./data/renaiss_sync"
+    sync_data_dir = Path(os.getenv("SYNC_DATA_DIR", default_sync_dir)).expanduser().resolve()
+    return sync_data_dir / "snapshots" / f"nft_{token_id}_holders.latest.json"
 
 
 def _safe_tzinfo(name: str):
@@ -601,6 +638,20 @@ def _fetch_card_withdraw_value_by_token_id(token_id: str) -> Decimal:
     return value
 
 
+def _card_withdraw_total_from_token_ids(token_ids: Any) -> Decimal:
+    if not isinstance(token_ids, (list, tuple, set)):
+        return Decimal("0")
+    seen: set[str] = set()
+    total = Decimal("0")
+    for raw in token_ids:
+        tid = str(raw or "").strip()
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        total += _to_decimal(_fetch_card_withdraw_value_by_token_id(tid))
+    return total
+
+
 @dataclass
 class WalletRecord:
     address: str
@@ -722,7 +773,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--data-dir", default=os.getenv("RANKING_DATA_DIR", ""))
     parser.add_argument("--workers", type=int, default=max(2, int(os.getenv("RANKING_WORKERS", "8"))))
-    parser.add_argument("--activity-page-limit", type=int, default=max(10, int(os.getenv("RANKING_ACTIVITY_PAGE_LIMIT", "50"))))
+    parser.add_argument(
+        "--activity-page-limit",
+        type=int,
+        default=max(10, min(50, int(os.getenv("RANKING_ACTIVITY_PAGE_LIMIT", "50")))),
+    )
     parser.add_argument("--activity-max-pages", type=int, default=max(1, int(os.getenv("RANKING_ACTIVITY_MAX_PAGES", os.getenv("PROFILE_ACTIVITY_MAX_PAGES", "120")))))
     parser.add_argument("--max-wallets", type=int, default=None, help="Only for testing; limit wallets to process")
     return parser.parse_args()
@@ -744,14 +799,9 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
     checkpoint_flush_every = max(1, int(os.getenv("RANK_SYNC_CHECKPOINT_FLUSH_EVERY", "50")))
 
     holders_file_raw = str(os.getenv("RANK_SYNC_HOLDERS_FILE", "")).strip()
-    if holders_file_raw:
-        holders_file = Path(holders_file_raw).expanduser()
-    elif app_env == "server":
-        holders_file = DEFAULT_HOLDERS_FILE_SERVER
-    else:
-        holders_file = DEFAULT_HOLDERS_FILE_LOCAL if DEFAULT_HOLDERS_FILE_LOCAL.exists() else Path("./nft_13_holders.json")
+    holders_file = Path(holders_file_raw).expanduser() if holders_file_raw else _default_holders_file(app_env)
 
-    wallet_source = str(os.getenv("RANK_SYNC_WALLET_SOURCE", "auto")).strip().lower() or "auto"
+    wallet_source = str(os.getenv("RANK_SYNC_WALLET_SOURCE", "holders_file")).strip().lower() or "holders_file"
     if wallet_source not in ("holders_file", "collectible", "auto"):
         raise RuntimeError("RANK_SYNC_WALLET_SOURCE must be holders_file, collectible, or auto")
     metrics_source = str(os.getenv("RANK_METRICS_SOURCE", "hybrid")).strip().lower() or "hybrid"
@@ -764,9 +814,7 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
     onchain_usdt_contract = str(
         os.getenv("ONCHAIN_USDT_CONTRACT", "0x55d398326f99059ff775485246999027b3197955")
     ).strip().lower()
-    # On-chain metrics now detect packs by transaction shape instead of a
-    # contract allowlist: wallet USDT-out + same-tx NFT-in means open pack.
-    onchain_pack_contracts: tuple[str, ...] = ()
+    onchain_pack_contracts = _ranking_onchain_pack_contracts()
     onchain_marketplace_contract = str(
         os.getenv("ONCHAIN_MARKETPLACE_CONTRACT", "0xae3e7268ef5a062946216a44f58a8f685ffd11d0")
     ).strip().lower()
@@ -784,8 +832,11 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
             selected_holders_file = holders_file
             wallet_source = "holders_file"
         else:
-            selected_holders_file = None
-            wallet_source = "collectible"
+            raise RuntimeError(
+                f"holders file not readable: {holders_file}; "
+                "ranking wallet universe must come from NFT holder snapshot. "
+                "Run scripts/sync_nft13_incremental.py first or set RANK_SYNC_WALLET_SOURCE=collectible only for debug."
+            )
 
     return RankingConfig(
         app_env=app_env,
@@ -794,7 +845,7 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
         full_rebuild_requested=bool(args.full_rebuild),
         data_dir=Path(data_dir_raw).expanduser().resolve(),
         workers=max(1, int(args.workers)),
-        activity_page_limit=max(1, int(args.activity_page_limit)),
+        activity_page_limit=max(1, min(50, int(args.activity_page_limit))),
         activity_max_pages=max(1, int(args.activity_max_pages)),
         failed_retry_rounds=max(0, int(os.getenv("RANK_SYNC_FAILED_RETRY_ROUNDS", "3"))),
         failed_retry_sleep_sec=max(0.5, float(os.getenv("RANK_SYNC_FAILED_RETRY_SLEEP_SEC", "3"))),
@@ -1232,7 +1283,8 @@ def fetch_legacy_open_pack_hints_for_wallet(address: str, page_limit: int, max_p
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            if str(row.get("__typename") or "").strip() != "PullActivity":
+            row_type = str(row.get("__typename") or "").strip()
+            if row_type not in ("PullActivity", "PerpetualPullActivity"):
                 continue
             price = _wei_to_usdt(row.get("priceInUsdt"))
             ts = _parse_int(row.get("timestamp")) or 0
@@ -1245,7 +1297,14 @@ def fetch_legacy_open_pack_hints_for_wallet(address: str, page_limit: int, max_p
                 {
                     "timestamp": int(ts),
                     "price": price,
-                    "pack_key": f"legacy:{pack_id}" if pack_id else f"legacy-name:{pack_label}",
+                    "pack_key": (
+                        str(row.get("contractAddress") or "").strip().lower()
+                        if row_type == "PerpetualPullActivity"
+                        and str(row.get("contractAddress") or "").strip().lower().startswith("0x")
+                        and len(str(row.get("contractAddress") or "").strip().lower()) == 42
+                        else f"legacy:{pack_id}" if pack_id else f"legacy-name:{pack_label}"
+                    ),
+                    "contract_address": str(row.get("contractAddress") or "").strip().lower(),
                 }
             )
         next_cursor = page.get("nextCursor")
@@ -1265,11 +1324,12 @@ def _build_onchain_cfg(cfg: RankingConfig) -> OnchainConfig:
         chain_id=cfg.onchain_chain_id,
         api_key=cfg.onchain_api_key,
         usdt_contract=cfg.onchain_usdt_contract,
-        pack_contracts=(),
+        pack_contracts=cfg.onchain_pack_contracts,
         marketplace_contract=cfg.onchain_marketplace_contract,
         page_size=cfg.onchain_page_size,
         retries=API_MAX_RETRIES,
         backoff_sec=API_RETRY_BACKOFF_SEC,
+        withdraw_addresses=tuple(sorted(_withdraw_target_set())),
     )
 
 
@@ -1491,11 +1551,10 @@ def compute_activity_metrics_for_wallet(
                 if bidder == wallet_norm:
                     trade_spent_total += amount
                 if asker == wallet_norm:
-                    divisor = SELL_GROSS_DIVISOR if SELL_GROSS_DIVISOR > 0 else Decimal("1")
-                    trade_earned_total += amount / divisor
+                    trade_earned_total += amount
             elif row_type == "TransferActivity":
                 target = str(row.get("to") or "").strip().lower()
-                if target != PROFILE_CARD_WITHDRAW_ADDRESS:
+                if target not in _withdraw_target_set():
                     continue
                 token_id = str(row.get("tokenId") or row_item.get("tokenId") or "").strip()
                 tx_hash = str(row.get("txHash") or "").strip().lower()
@@ -2179,6 +2238,9 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                                     if str(x or "").strip()
                                 }
                             )
+                    card_withdraw_total = _card_withdraw_total_from_token_ids(
+                        chain_metrics.get("withdraw_token_ids")
+                    )
                     return (
                         rec.address,
                         {
@@ -2187,14 +2249,12 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                             "trade_spent_usdt": chain_metrics.get("trade_spent_usdt", Decimal("0")),
                             "trade_earned_usdt": chain_metrics.get("trade_earned_usdt", Decimal("0")),
                             "buyback_earned_usdt": chain_metrics.get("buyback_earned_usdt", Decimal("0")),
-                            "card_withdraw_total_usdt": (
-                                prev.card_withdraw_total_usdt if prev is not None else Decimal("0")
-                            ),
+                            "card_withdraw_total_usdt": card_withdraw_total,
                             "total_spent_usdt": chain_metrics.get("total_spent_usdt", Decimal("0")),
                             "total_earned_usdt": chain_metrics.get("total_earned_usdt", Decimal("0")),
                             "cash_net_usdt": (
                                 _to_decimal(chain_metrics.get("cash_net_usdt"))
-                                + (prev.card_withdraw_total_usdt if prev is not None else Decimal("0"))
+                                + card_withdraw_total
                             ),
                             "latest_activity_id": latest_activity_id,
                             "stop_reached": stop_reached,
