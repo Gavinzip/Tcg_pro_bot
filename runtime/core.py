@@ -506,6 +506,11 @@ _PACK_PRICE_MAP_CACHE: dict[str, object] = {
     "mtime": -1.0,
     "data": {},
 }
+_PACK_NAME_MAP_CACHE: dict[str, object] = {
+    "path": "",
+    "mtime": -1.0,
+    "data": {},
+}
 
 
 def _load_rankings_wallet_map() -> dict[str, dict]:
@@ -764,6 +769,10 @@ PROFILE_PREPARED_CARD_CACHE_DIR = os.path.join(BASE_DIR, "templates", "profile",
 PACK_PRICE_MAP_PATH = (
     str(os.getenv("PACK_PRICE_MAP_PATH", os.path.join(BASE_DIR, "data", "pack_price_map.json"))).strip()
     or os.path.join(BASE_DIR, "data", "pack_price_map.json")
+)
+PACK_NAME_MAP_PATH = (
+    str(os.getenv("PACK_NAME_MAP_PATH", os.path.join(BASE_DIR, "data", "pack_name_map.json"))).strip()
+    or os.path.join(BASE_DIR, "data", "pack_name_map.json")
 )
 _HTTP_SESSION_LOCAL = threading.local()
 _PROFILE_BACKGROUND_FILES = {
@@ -3679,6 +3688,75 @@ def _save_pack_price_map(pack_map: dict) -> None:
         return
 
 
+def _default_pack_name_map() -> dict:
+    return {
+        "version": 1,
+        "updated_at": "",
+        "by_contract": {},
+        "by_pack_name": {},
+    }
+
+
+def _load_pack_name_map() -> dict:
+    path = PACK_NAME_MAP_PATH
+    default_data = _default_pack_name_map()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return default_data
+
+    if (
+        _PACK_NAME_MAP_CACHE.get("path") == path
+        and _PACK_NAME_MAP_CACHE.get("mtime") == mtime
+        and isinstance(_PACK_NAME_MAP_CACHE.get("data"), dict)
+    ):
+        data_cached = _PACK_NAME_MAP_CACHE.get("data") or {}
+        if isinstance(data_cached.get("by_contract"), dict) and isinstance(data_cached.get("by_pack_name"), dict):
+            return data_cached  # type: ignore[return-value]
+        return default_data
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return default_data
+    if not isinstance(data, dict):
+        return default_data
+    if not isinstance(data.get("by_contract"), dict):
+        data["by_contract"] = {}
+    if not isinstance(data.get("by_pack_name"), dict):
+        data["by_pack_name"] = {}
+    _PACK_NAME_MAP_CACHE["path"] = path
+    _PACK_NAME_MAP_CACHE["mtime"] = mtime
+    _PACK_NAME_MAP_CACHE["data"] = data
+    return data
+
+
+def _save_pack_name_map(pack_map: dict) -> None:
+    if not isinstance(pack_map, dict):
+        return
+    by_contract = pack_map.get("by_contract") if isinstance(pack_map.get("by_contract"), dict) else {}
+    by_pack_name = pack_map.get("by_pack_name") if isinstance(pack_map.get("by_pack_name"), dict) else {}
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "by_contract": by_contract,
+        "by_pack_name": by_pack_name,
+    }
+    path = PACK_NAME_MAP_PATH
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
+        _PACK_NAME_MAP_CACHE["path"] = path
+        _PACK_NAME_MAP_CACHE["mtime"] = os.path.getmtime(path)
+        _PACK_NAME_MAP_CACHE["data"] = payload
+    except Exception:
+        return
+
+
 def _pack_price_entry_to_decimal(entry) -> Decimal:
     if isinstance(entry, dict):
         return _to_decimal(entry.get("unit_price"))
@@ -3863,7 +3941,9 @@ def _fetch_pack_contract_name_hints(wallet_address: str, target_contracts: set[s
             if not isinstance(row, dict):
                 continue
             row_type = str(row.get("__typename") or "").strip()
-            if row_type not in ("PerpetualPullActivity", "PerpetualReleaseTokenActivity"):
+            # Pack display name must come from pull events only.
+            # Release events may carry collectible titles (card names), which would pollute pack names.
+            if row_type not in ("PerpetualPullActivity",):
                 continue
             contract = str(row.get("contractAddress") or "").strip().lower()
             if contract not in targets or contract in hints:
@@ -4912,8 +4992,10 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         if frm == wallet_norm:
             nft_out_txs.add(tx_hash)
     pack_price_map = _load_pack_price_map()
+    pack_name_map = _load_pack_name_map()
     pack_price_map_dirty = False
-    known_pack_contracts = _known_onchain_pack_contracts_from_map(pack_price_map)
+    pack_name_map_dirty = False
+    known_pack_contracts: set[str] = set()
     known_pack_contracts.update(
         str(x or "").strip().lower()
         for x in (getattr(cfg, "pack_contracts", ()) or ())
@@ -4928,8 +5010,8 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
             continue
         if payment_to in (wallet_norm, str(getattr(cfg, "marketplace_contract", "") or "").strip().lower()):
             continue
-        known_pack_contracts.add(payment_to)
-        pack_price_map_dirty = _record_pack_contract_hint(pack_price_map, payment_to) or pack_price_map_dirty
+        # Keep goblin-style money classification deterministic:
+        # delayed matches are handled by tx-hash check, not by learning unknown recipients as pack contracts.
 
     payment_hint_candidates: list[dict] = []
     marketplace_contract = str(getattr(cfg, "marketplace_contract", "") or "").strip().lower()
@@ -4970,13 +5052,14 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         payment_row = payment_hint_row_by_tx.get(str(tx_hash or "").strip().lower()) or {}
         payment_to = str(payment_row.get("to") or "").strip().lower()
         hint_contract = str((hint or {}).get("contract_address") or "").strip().lower()
-        for learned_contract in (hint_contract, payment_to):
-            if not (learned_contract.startswith("0x") and len(learned_contract) == 42):
-                continue
-            if learned_contract in (wallet_norm, marketplace_contract):
-                continue
-            known_pack_contracts.add(learned_contract)
-            pack_price_map_dirty = _record_pack_contract_hint(pack_price_map, learned_contract) or pack_price_map_dirty
+        # Only trust explicit on-chain contract hints; never auto-learn recipient address directly.
+        learned_contract = hint_contract
+        if not (learned_contract.startswith("0x") and len(learned_contract) == 42):
+            continue
+        if learned_contract in (wallet_norm, marketplace_contract):
+            continue
+        known_pack_contracts.add(learned_contract)
+        pack_price_map_dirty = _record_pack_contract_hint(pack_price_map, learned_contract) or pack_price_map_dirty
 
     ts_values: list[int] = []
     open_pack_txs: dict[str, dict] = {}
@@ -5028,6 +5111,8 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
                 to = pack_key
                 if pack_name:
                     contract_pack_name[pack_key] = pack_name
+        elif tx_hash in delayed_open_tx_hashes:
+            cls = "open_pack"
         elif frm == wallet_norm and to in known_pack_contracts:
             cls = "open_pack"
         elif frm in known_pack_contracts and to == wallet_norm:
@@ -5167,7 +5252,7 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
 
     unresolved_pack_name_contracts: set[str] = set()
     for contract in sorted(contract_open_count.keys()):
-        cached_name = _lookup_pack_name(pack_price_map, contract)
+        cached_name = _lookup_pack_name(pack_name_map, contract)
         if cached_name:
             contract_pack_name[contract] = cached_name
         else:
@@ -5183,7 +5268,7 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
             if not _pack_name_is_real(label, contract):
                 continue
             contract_pack_name[contract] = label
-            pack_price_map_dirty = _record_pack_name(pack_price_map, contract, label) or pack_price_map_dirty
+            pack_name_map_dirty = _record_pack_name(pack_name_map, contract, label) or pack_name_map_dirty
 
     for contract in sorted(contract_open_count.keys()):
         if contract not in contract_pack_name:
@@ -5298,8 +5383,8 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
                 pack_name=pack_name,
                 unit_price=unit_price,
             ) or pack_price_map_dirty
-        elif _pack_name_is_real(pack_name, contract):
-            pack_price_map_dirty = _record_pack_name(pack_price_map, contract, pack_name) or pack_price_map_dirty
+        if _pack_name_is_real(pack_name, contract):
+            pack_name_map_dirty = _record_pack_name(pack_name_map, contract, pack_name) or pack_name_map_dirty
         is_legacy_pack = contract.startswith("legacy")
         contract_full = "-" if is_legacy_pack else contract
         contract_short = "-" if is_legacy_pack else _short_hex(contract)
@@ -5321,6 +5406,8 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         row.pop("spent_total_raw", None)
     if pack_price_map_dirty:
         _save_pack_price_map(pack_price_map)
+    if pack_name_map_dirty:
+        _save_pack_name_map(pack_name_map)
 
     opened_pack_ids = set(effective_open_pack_txs.keys())
     activity_rows = []
