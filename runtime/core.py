@@ -211,6 +211,8 @@ PACK_RANK_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "update_pack_rank
 PACK_RANK_SYNC_STARTUP_DONE = False
 PACK_RANK_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
 PACK_RANK_SYNC_SCRIPT_LOCK: asyncio.Lock | None = None
+PACK_RANK_SYNC_CURRENT_JOB: dict[str, object] = {}
+PACK_RANK_SYNC_CURRENT_PROC: asyncio.subprocess.Process | None = None
 PACK_RANK_SYNC_INTERVAL_MINUTES = max(1, int(os.getenv("PACK_RANK_SYNC_INTERVAL_MINUTES", "10")))
 
 
@@ -9704,7 +9706,7 @@ def _queue_manual_ranking_full_rebuild(reason: str = "manual") -> dict[str, obje
 
 
 async def _run_pack_rank_sync_script(trigger: str, full_rebuild: bool = False) -> bool:
-    global PACK_RANK_SYNC_SCRIPT_LOCK
+    global PACK_RANK_SYNC_SCRIPT_LOCK, PACK_RANK_SYNC_CURRENT_JOB, PACK_RANK_SYNC_CURRENT_PROC
     if not PACK_RANK_SYNC_ENABLE:
         return True
     if not os.path.exists(PACK_RANK_SYNC_SCRIPT_PATH):
@@ -9728,29 +9730,82 @@ async def _run_pack_rank_sync_script(trigger: str, full_rebuild: bool = False) -
     if full_rebuild:
         cmd.append("--full-rebuild")
 
+    success = False
     async with PACK_RANK_SYNC_SCRIPT_LOCK:
-        print(
-            "🕒 Pack rank sync start "
-            f"trigger={trigger} full_rebuild={1 if full_rebuild else 0} data_dir={rank_data_dir}"
-        )
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=BASE_DIR,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out_b, err_b = await proc.communicate()
-        out = (out_b or b"").decode("utf-8", errors="replace").strip()
-        err = (err_b or b"").decode("utf-8", errors="replace").strip()
-        if out:
-            print(out)
-        if err:
-            print(err, file=sys.stderr)
-        if proc.returncode != 0:
-            print(f"❌ Pack rank sync failed trigger={trigger} rc={proc.returncode}")
-            return False
-        print(f"✅ Pack rank sync done trigger={trigger}")
-        return True
+        PACK_RANK_SYNC_CURRENT_JOB = {
+            "trigger": trigger,
+            "started_at": datetime.now(_safe_tzinfo(RANK_SYNC_TZ)).isoformat(),
+            "full_rebuild": bool(full_rebuild),
+            "data_dir": rank_data_dir,
+        }
+        try:
+            print(
+                "🕒 Pack rank sync start "
+                f"trigger={trigger} full_rebuild={1 if full_rebuild else 0} data_dir={rank_data_dir}"
+            )
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=BASE_DIR,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            PACK_RANK_SYNC_CURRENT_PROC = proc
+            out_b, err_b = await proc.communicate()
+            out = (out_b or b"").decode("utf-8", errors="replace").strip()
+            err = (err_b or b"").decode("utf-8", errors="replace").strip()
+            if out:
+                print(out)
+            if err:
+                print(err, file=sys.stderr)
+            if proc.returncode != 0:
+                print(f"❌ Pack rank sync failed trigger={trigger} rc={proc.returncode}")
+                success = False
+            else:
+                print(f"✅ Pack rank sync done trigger={trigger}")
+                success = True
+        finally:
+            PACK_RANK_SYNC_CURRENT_PROC = None
+            PACK_RANK_SYNC_CURRENT_JOB = {}
+    return success
+
+
+async def _force_stop_pack_rank_sync(reason: str = "manual_force") -> dict[str, object]:
+    global PACK_RANK_SYNC_CURRENT_PROC, PACK_RANK_SYNC_CURRENT_JOB
+    proc = PACK_RANK_SYNC_CURRENT_PROC
+    job = dict(PACK_RANK_SYNC_CURRENT_JOB or {})
+    if proc is None or proc.returncode is not None:
+        return {
+            "stopped": False,
+            "state": "not_running",
+            "reason": reason,
+            "job": job,
+            "returncode": None if proc is None else int(proc.returncode),
+        }
+
+    try:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=20)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+        rc = proc.returncode
+        print(f"🛑 Pack rank sync force-stopped reason={reason} rc={rc}")
+        return {
+            "stopped": True,
+            "state": "terminated",
+            "reason": reason,
+            "job": job,
+            "returncode": int(rc) if rc is not None else None,
+        }
+    except Exception as e:
+        return {
+            "stopped": False,
+            "state": "error",
+            "reason": reason,
+            "job": job,
+            "error": str(e),
+        }
 
 
 def _rank_sync_should_weekly_full_rebuild_today() -> bool:

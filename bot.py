@@ -899,7 +899,8 @@ async def pack_rank(interaction: discord.Interaction, address: str = None):
 
 
 @tree.command(name="pack_rank_rebuild", description="手動全量重建 pack_rank（本月開包排行）")
-async def pack_rank_rebuild(interaction: discord.Interaction):
+@app_commands.describe(force="true 時會先中止目前 pack_rank sync，再強制全量重建")
+async def pack_rank_rebuild(interaction: discord.Interaction, force: bool = False):
     await interaction.response.defer(ephemeral=True, thinking=True)
     if not _core.PACK_RANK_SYNC_ENABLE:
         await interaction.followup.send(
@@ -908,11 +909,33 @@ async def pack_rank_rebuild(interaction: discord.Interaction):
         )
         return
     if _core.PACK_RANK_SYNC_SCRIPT_LOCK is not None and _core.PACK_RANK_SYNC_SCRIPT_LOCK.locked():
-        await interaction.followup.send(
-            "⏳ pack_rank sync 正在執行中，這次沒有另外開全量重建。請稍後再試。",
-            ephemeral=True,
-        )
-        return
+        if not force:
+            await interaction.followup.send(
+                "⏳ pack_rank sync 正在執行中，這次沒有另外開全量重建。"
+                "若要直接中止目前工作並重建，請改用 `/pack_rank_rebuild force:true`。",
+                ephemeral=True,
+            )
+            return
+
+        stop_info = await _core._force_stop_pack_rank_sync("discord:/pack_rank_rebuild force")
+        if not bool(stop_info.get("stopped")):
+            await interaction.followup.send(
+                "❌ 嘗試強制中止目前 pack_rank sync 失敗，請稍後再試或查看伺服器 log。",
+                ephemeral=True,
+            )
+            return
+
+        # Wait for lock release after process termination.
+        for _ in range(30):
+            if _core.PACK_RANK_SYNC_SCRIPT_LOCK is None or not _core.PACK_RANK_SYNC_SCRIPT_LOCK.locked():
+                break
+            await asyncio.sleep(0.2)
+        if _core.PACK_RANK_SYNC_SCRIPT_LOCK is not None and _core.PACK_RANK_SYNC_SCRIPT_LOCK.locked():
+            await interaction.followup.send(
+                "❌ 已送出中止，但目前 lock 尚未釋放，請 5-10 秒後再試。",
+                ephemeral=True,
+            )
+            return
 
     ok = await _run_pack_rank_sync_script("manual_pack_rank_full_rebuild", full_rebuild=True)
     if not ok:
