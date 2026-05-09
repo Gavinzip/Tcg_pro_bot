@@ -14,7 +14,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from onchain_metrics import OnchainConfig, scan_wallet_open_counts_by_time_incremental
+from onchain_metrics import OnchainConfig, scan_pack_open_counts_incremental
 
 try:
     from zoneinfo import ZoneInfo
@@ -23,6 +23,10 @@ except Exception:  # pragma: no cover
 
 
 DEFAULT_MONTHLY_PACK_LAUNCH_START = "2026-05-01T00:00:00+08:00"
+DEFAULT_PACK_RANK_CONTRACTS = (
+    "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
+    "0xb2891022648c5fad3721c42c05d8d283d4d53080",
+)
 
 
 def _safe_tzinfo(name: str):
@@ -134,26 +138,34 @@ def _gacha_level(rank_value: int) -> str:
     return "none"
 
 
-def _build_wallet_index(rank_data_dir: Path) -> tuple[list[str], dict[str, str]]:
-    latest_path = rank_data_dir / "latest.json"
+def _pack_rank_contracts(prev_state: dict[str, Any] | None = None) -> tuple[str, ...]:
+    state_contracts: tuple[str, ...] = ()
+    if isinstance(prev_state, dict):
+        raw_contracts = prev_state.get("contracts")
+        if isinstance(raw_contracts, list):
+            state_contracts = tuple(str(x or "").strip().lower() for x in raw_contracts)
+    return _merge_address_tuples(
+        DEFAULT_PACK_RANK_CONTRACTS,
+        state_contracts,
+        _parse_address_csv(os.getenv("PACK_RANK_CONTRACTS"), default_values=()),
+        _parse_address_csv(os.getenv("PACK_RANK_CONTRACTS_EXTRA"), default_values=()),
+    )
+
+
+def _username_map_from_pack_rank_latest(latest_path: Path) -> dict[str, str]:
     payload = _json_load(latest_path)
     rows = payload.get("wallets") if isinstance(payload.get("wallets"), list) else []
     usernames: dict[str, str] = {}
-    wallets: list[str] = []
-    seen: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             continue
         addr = str(row.get("address") or "").strip().lower()
         if not addr.startswith("0x") or len(addr) != 42:
             continue
-        if addr not in seen:
-            seen.add(addr)
-            wallets.append(addr)
         username = str(row.get("username") or "").strip()
         if username:
             usernames[addr] = username
-    return wallets, usernames
+    return usernames
 
 
 @dataclass
@@ -192,6 +204,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Standalone monthly pack-rank sync (wallet-time)")
     parser.add_argument("--trigger", default="manual")
     parser.add_argument("--data-dir", default="")
+    parser.add_argument("--full-rebuild", action="store_true", help="Ignore pack_rank_state and rescan this month")
     return parser.parse_args()
 
 
@@ -212,9 +225,6 @@ def load_config(args: argparse.Namespace) -> PackRankConfig:
     onchain_usdt_contract = str(
         os.getenv("ONCHAIN_USDT_CONTRACT", "0x55d398326f99059ff775485246999027b3197955")
     ).strip().lower()
-    # Pack rank no longer uses a fixed pack-contract allowlist. It counts wallet
-    # USDT-out transactions that also receive NFTs in the same tx within the
-    # monthly time window.
     onchain_pack_contracts: tuple[str, ...] = ()
     onchain_marketplace_contract = str(
         os.getenv("ONCHAIN_MARKETPLACE_CONTRACT", "0xae3e7268ef5a062946216a44f58a8f685ffd11d0")
@@ -267,18 +277,21 @@ def write_status(cfg: PackRankConfig, *, success: bool, message: str, extra: dic
     _atomic_write_json(cfg.status_path, payload)
 
 
-def run_sync(cfg: PackRankConfig) -> dict[str, Any]:
+def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, Any]:
     started_at = datetime.now(tz=cfg.tzinfo)
     window_start, window_end = _monthly_pack_rank_window(started_at, cfg.tzinfo)
     window_start_ts = int(window_start.astimezone(timezone.utc).timestamp())
     window_end_ts = int(window_end.astimezone(timezone.utc).timestamp())
 
-    prev_state = _json_load(cfg.state_path)
+    prev_state = {} if full_rebuild else _json_load(cfg.state_path)
     onchain_cfg = _build_onchain_cfg(cfg)
-    wallet_universe, username_map = _build_wallet_index(cfg.data_dir)
-    scan = scan_wallet_open_counts_by_time_incremental(
+    pack_contracts = _pack_rank_contracts(prev_state)
+    if not pack_contracts:
+        raise RuntimeError("PACK_RANK_CONTRACTS is empty")
+    username_map = _username_map_from_pack_rank_latest(cfg.latest_path)
+    scan = scan_pack_open_counts_incremental(
         onchain_cfg,
-        wallets=wallet_universe,
+        pack_contracts=pack_contracts,
         window_start_ts=window_start_ts,
         window_end_ts=window_end_ts,
         prev_state=prev_state,
@@ -316,6 +329,7 @@ def run_sync(cfg: PackRankConfig) -> dict[str, Any]:
         "updated_at": finished_at.isoformat(),
         "version": 1,
         "trigger": cfg.trigger,
+        "full_rebuild": bool(full_rebuild),
         "monthly_gacha_window_start": window_start.isoformat(),
         "monthly_gacha_window_end": window_end.isoformat(),
         "monthly_gacha_level_rules": {
@@ -327,7 +341,8 @@ def run_sync(cfg: PackRankConfig) -> dict[str, Any]:
         "monthly_gacha_scan_api_calls": int(_to_int(stats.get("api_calls"), 0)),
         "monthly_gacha_scan_rows_scanned": int(_to_int(stats.get("rows_scanned"), 0)),
         "monthly_gacha_scan_reset": bool(stats.get("reset_applied")),
-        "wallet_universe_count": len(wallet_universe),
+        "pack_contracts": list(pack_contracts),
+        "pack_contract_count": len(pack_contracts),
         "wallet_count": len(rows),
         "total_monthly_opens": int(sum(int(r.get("monthly_gacha_open_count") or 0) for r in rows)),
     }
@@ -355,6 +370,7 @@ def run_sync(cfg: PackRankConfig) -> dict[str, Any]:
         "latest_path": str(cfg.latest_path),
         "history_path": str(cfg.history_path),
         "state_path": str(cfg.state_path),
+        "full_rebuild": bool(full_rebuild),
     }
 
 
@@ -368,11 +384,12 @@ def main() -> int:
     (cfg.data_dir / "history").mkdir(parents=True, exist_ok=True)
     (cfg.data_dir / "state").mkdir(parents=True, exist_ok=True)
 
-    result = run_sync(cfg)
+    result = run_sync(cfg, full_rebuild=bool(args.full_rebuild))
     msg = (
         f"trigger={cfg.trigger} scan_mode={result['scan_mode']} wallets={result['wallet_count']} "
         f"api_calls={result['api_calls']} rows_scanned={result['rows_scanned']} "
-        f"reset={1 if result['reset_applied'] else 0} duration_sec={result['duration_sec']:.2f}"
+        f"reset={1 if result['reset_applied'] else 0} full_rebuild={1 if result['full_rebuild'] else 0} "
+        f"duration_sec={result['duration_sec']:.2f}"
     )
     print(f"[OK] {msg}")
     write_status(
@@ -389,6 +406,7 @@ def main() -> int:
             "latest_path": result["latest_path"],
             "history_path": result["history_path"],
             "state_path": result["state_path"],
+            "full_rebuild": result["full_rebuild"],
         },
     )
     return 0

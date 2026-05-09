@@ -898,6 +898,52 @@ async def pack_rank(interaction: discord.Interaction, address: str = None):
             start += 1800
 
 
+@tree.command(name="pack_rank_rebuild", description="手動全量重建 pack_rank（本月開包排行）")
+async def pack_rank_rebuild(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    if not _core.PACK_RANK_SYNC_ENABLE:
+        await interaction.followup.send(
+            "⚠️ pack_rank sync 目前是關閉狀態，這次沒有開始重建。",
+            ephemeral=True,
+        )
+        return
+    if _core.PACK_RANK_SYNC_SCRIPT_LOCK is not None and _core.PACK_RANK_SYNC_SCRIPT_LOCK.locked():
+        await interaction.followup.send(
+            "⏳ pack_rank sync 正在執行中，這次沒有另外開全量重建。請稍後再試。",
+            ephemeral=True,
+        )
+        return
+
+    ok = await _run_pack_rank_sync_script("manual_pack_rank_full_rebuild", full_rebuild=True)
+    if not ok:
+        await interaction.followup.send(
+            "❌ pack_rank 全量重建失敗，請看伺服器 log 或稍後再試。",
+            ephemeral=True,
+        )
+        return
+
+    latest_path = os.path.join(_rank_sync_data_dir(), "pack_rank_latest.json")
+    status_path = _pack_rank_sync_status_path()
+    status_info = ""
+    try:
+        with open(status_path, "r", encoding="utf-8") as f:
+            status = json.load(f)
+        extra = status.get("extra") if isinstance(status.get("extra"), dict) else {}
+        status_info = (
+            f"\nWallets: `{extra.get('wallet_count', 'n/a')}` | "
+            f"API Calls: `{extra.get('api_calls', 'n/a')}` | "
+            f"Rows: `{extra.get('rows_scanned', 'n/a')}` | "
+            f"Duration: `{extra.get('duration_sec', 'n/a')}` 秒"
+        )
+    except Exception:
+        status_info = ""
+
+    await interaction.followup.send(
+        f"✅ pack_rank 已全量重建。{status_info}\nLatest: `{latest_path}`",
+        ephemeral=True,
+    )
+
+
 @tree.command(name="bot_usage", description="查看機器人使用次數（總次數 + 各指令）")
 async def bot_usage(interaction: discord.Interaction):
     path = _bot_usage_stats_path()

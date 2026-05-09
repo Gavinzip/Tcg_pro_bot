@@ -9703,7 +9703,7 @@ def _queue_manual_ranking_full_rebuild(reason: str = "manual") -> dict[str, obje
     }
 
 
-async def _run_pack_rank_sync_script(trigger: str) -> bool:
+async def _run_pack_rank_sync_script(trigger: str, full_rebuild: bool = False) -> bool:
     global PACK_RANK_SYNC_SCRIPT_LOCK
     if not PACK_RANK_SYNC_ENABLE:
         return True
@@ -9725,11 +9725,13 @@ async def _run_pack_rank_sync_script(trigger: str) -> bool:
         "--data-dir",
         rank_data_dir,
     ]
+    if full_rebuild:
+        cmd.append("--full-rebuild")
 
     async with PACK_RANK_SYNC_SCRIPT_LOCK:
         print(
             "🕒 Pack rank sync start "
-            f"trigger={trigger} data_dir={rank_data_dir}"
+            f"trigger={trigger} full_rebuild={1 if full_rebuild else 0} data_dir={rank_data_dir}"
         )
         proc = await asyncio.create_subprocess_exec(
             *cmd,
