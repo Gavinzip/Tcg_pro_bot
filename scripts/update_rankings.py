@@ -2188,16 +2188,12 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             try:
                 if use_onchain_metrics:
                     assert onchain_cfg is not None
-                    legacy_open_pack_hints = fetch_legacy_open_pack_hints_for_wallet(
-                        rec.address,
-                        cfg.activity_page_limit,
-                        cfg.activity_max_pages,
-                    )
                     chain_metrics = analyze_wallet_onchain(
                         onchain_cfg,
                         rec.address,
-                        legacy_open_pack_hints=legacy_open_pack_hints,
+                        legacy_open_pack_hints=None,
                         use_delayed_recipient_heuristic=False,
+                        strict_pack_contracts_only=True,
                     )
                     prev_day_keys = sorted(prev_day_keys_map.get(rec.address) or set()) if prev is not None else []
                     activity_day_keys = list(prev_day_keys)
