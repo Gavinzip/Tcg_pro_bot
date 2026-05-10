@@ -4079,6 +4079,8 @@ async def finish_report_after_selection(
         gemrate_stats = None
 
     report_lines = []
+    report_lines.append("⚠️ 免責聲明：請確認相對應連結中的卡片是否與您上傳的卡片一致，機器人有時可能誤判。")
+    report_lines.append("")
     report_lines.append("# MARKET REPORT GENERATED")
     report_lines.append("")
     report_lines.append(f"⚡ {c_name_display} ({name}) #{number}")
