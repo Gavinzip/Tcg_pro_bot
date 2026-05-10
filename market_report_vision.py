@@ -12,6 +12,8 @@ import base64
 import threading
 import tempfile
 import html
+import shutil
+import unicodedata
 import image_generator
 from collections import deque
 from datetime import datetime, timedelta
@@ -19,7 +21,26 @@ from dotenv import load_dotenv
 import contextvars
 import traceback
 
+try:
+    import anyio
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+    _MINIMAX_MCP_IMPORT_ERROR = None
+except Exception as _mcp_import_exc:
+    anyio = None
+    ClientSession = None
+    StdioServerParameters = None
+    stdio_client = None
+    _MINIMAX_MCP_IMPORT_ERROR = _mcp_import_exc
+
 load_dotenv()
+SNKR_HISTORY_PER_PAGE = max(1, min(100, int(os.getenv("SNKR_HISTORY_PER_PAGE", "100"))))
+SNKR_HISTORY_MAX_PAGES = max(1, int(os.getenv("SNKR_HISTORY_MAX_PAGES", "20")))
+# Search mode switch:
+# - legacy (default): existing Jina/official API search path.
+# - beta: MiniMax MCP web_search path (fallback to legacy if beta path fails).
+SEARCH_MODE_LEGACY = "legacy"
+SEARCH_MODE_BETA = "beta"
 
 REPORT_ONLY = False
 # Use ContextVar for thread-safe per-task debug directory
@@ -1172,7 +1193,7 @@ def _has_alt_variant_feature(features_text):
     alt_markers = [
         "leader parallel", "sr parallel", "sr-p", "l-p",
         "リーダーパラレル", "コミパラ", "パラレル",
-        "alternate art", "parallel art", "manga",
+        "alternate art", "parallel art", "comic parallel", "manga parallel", "コミックパラレル",
     ]
     return any(marker in text for marker in alt_markers)
 
@@ -1190,6 +1211,21 @@ def _title_has_kr_marker(title):
         "[kr]", "【kr】", " korean", "korean version", "韓文版", "韓語版", "韓国語", "韓國語"
     ]
     return any(m in title_l for m in kr_markers)
+
+
+def _has_one_piece_sec_sp_feature(features_text):
+    text = str(features_text or "").lower()
+    compact = re.sub(r'[\s_]+', '', text)
+    if any(k in compact for k in ("sec-spc", "secspc", "sec-sp", "secsp")):
+        return True
+    has_sec = any(k in text for k in ("secret rare", "sec", "シークレット"))
+    has_sp = any(k in text for k in ("special parallel", " sp ", "(sp", "sp)", "comic parallel", "コミパラ", "コミック"))
+    return has_sec and has_sp
+
+
+def _pc_url_has_one_piece_sp(pc_url):
+    url = str(pc_url or "").lower()
+    return ("pricecharting.com/game/one-piece" in url) and ("-sp-" in url)
 
 def _fetch_pc_prices_from_url(product_url, md_content=None, skip_hi_res=False, target_grade="PSA 10"):
     """
@@ -1437,6 +1473,77 @@ def _build_pc_set_name_hint(card_info, card_language="UNKNOWN"):
     return base
 
 
+def _normalize_variant_text(text):
+    base = unicodedata.normalize("NFKD", str(text or ""))
+    base = "".join(ch for ch in base if not unicodedata.combining(ch))
+    return base.lower()
+
+
+def _detect_pokemon_ball_variant_from_text(text):
+    """
+    Return one of: master_ball, poke_ball, reverse_holo, normal.
+    """
+    t = _normalize_variant_text(text)
+    if not t:
+        return "normal"
+
+    has_master = any(k in t for k in (
+        "master ball",
+        "master-ball",
+        "masterball",
+        "マスターボール",
+        "大師球",
+        "大师球",
+    ))
+    has_pokeball = any(k in t for k in (
+        "poke ball",
+        "poke-ball",
+        "pokeball",
+        "pokeball",
+        "monster ball",
+        "monster-ball",
+        "monsterball",
+        "モンスターボール",
+        "精靈球",
+        "精灵球",
+    ))
+    has_reverse = any(k in t for k in (
+        "reverse holo",
+        "reverse",
+        "mirror",
+        "ミラー",
+        "鏡面",
+        "镜面",
+    ))
+
+    if has_master:
+        return "master_ball"
+    if has_pokeball:
+        return "poke_ball"
+    if has_reverse:
+        return "reverse_holo"
+    return "normal"
+
+
+def _detect_pokemon_ball_variant_hint(*texts):
+    merged = " ".join(str(x or "") for x in texts if x)
+    return _detect_pokemon_ball_variant_from_text(merged)
+
+
+def _is_pokemon_ball_variant_compatible(target_variant_hint, candidate_variant):
+    hint = str(target_variant_hint or "").strip().lower()
+    cand = str(candidate_variant or "normal").strip().lower()
+    if not hint:
+        return True
+    if hint == "master_ball":
+        return cand == "master_ball"
+    if hint == "poke_ball":
+        return cand in ("poke_ball", "reverse_holo")
+    if hint == "reverse_holo":
+        return cand in ("master_ball", "poke_ball", "reverse_holo")
+    return True
+
+
 def _score_pricecharting_candidate(
     url,
     *,
@@ -1447,6 +1554,7 @@ def _score_pricecharting_candidate(
     number_denominator,
     set_code_slug,
     mega_name_hint=False,
+    pokemon_variant_hint="",
 ):
     slug = url.split('/')[-1].lower()
     slug_norm = _normalize_alnum_dash(slug)
@@ -1507,6 +1615,16 @@ def _score_pricecharting_candidate(
         score += 60
         reasons.append("mega_name_hint")
 
+    # Hard variant guard for Pokemon 151-like variants (Poke Ball vs Master Ball).
+    if pokemon_variant_hint:
+        cand_variant = _detect_pokemon_ball_variant_from_text(slug)
+        if _is_pokemon_ball_variant_compatible(pokemon_variant_hint, cand_variant):
+            score += 120
+            reasons.append(f"variant_match={cand_variant}")
+        else:
+            score -= 320
+            reasons.append(f"variant_mismatch={cand_variant}")
+
     return score, reasons
 
 def filter_pricecharting_candidates(candidates):
@@ -1525,7 +1643,752 @@ def filter_pricecharting_candidates(candidates):
         filtered.append(c)
     return filtered
 
-def search_pricecharting(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name="", mega_name_hint=False, glossy_hint=False):
+
+def _get_search_mode():
+    raw = str(os.getenv("TCG_SEARCH_MODE", SEARCH_MODE_LEGACY) or "").strip().lower()
+    if raw in ("beta", "mcp", "beta_mcp", "minimax"):
+        return SEARCH_MODE_BETA
+    return SEARCH_MODE_LEGACY
+
+
+def _beta_fallback_enabled():
+    raw = str(os.getenv("TCG_BETA_FALLBACK_TO_LEGACY", "0") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _resolve_minimax_uvx_command():
+    configured = str(os.getenv("MINIMAX_UVX_PATH", "") or "").strip()
+    if configured:
+        return configured
+    if shutil.which("uvx"):
+        return "uvx"
+    fallback = os.path.expanduser("~/.local/bin/uvx")
+    if os.path.exists(fallback):
+        return fallback
+    return None
+
+
+def _clean_found_url(url):
+    return str(url or "").strip().strip("<>").rstrip('",\'')
+
+
+def _extract_links_from_web_search_payload(text):
+    links = []
+    raw = str(text or "")
+    if not raw:
+        return links
+    try:
+        payload = json.loads(raw)
+        if isinstance(payload, dict):
+            organic = payload.get("organic")
+            if isinstance(organic, list):
+                for row in organic:
+                    if isinstance(row, dict):
+                        link = _clean_found_url(row.get("link", ""))
+                        if link:
+                            links.append(link)
+    except Exception:
+        pass
+    links.extend(_clean_found_url(u) for u in re.findall(r'https?://[^\s)\]>"\']+', raw))
+    dedup = []
+    seen = set()
+    for link in links:
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        dedup.append(link)
+    return dedup
+
+
+def _run_minimax_web_search(queries, source_tag="MCP"):
+    query_list = [str(q or "").strip() for q in (queries or []) if str(q or "").strip()]
+    if not query_list:
+        return []
+
+    if _MINIMAX_MCP_IMPORT_ERROR is not None or anyio is None:
+        _debug_log(f"{source_tag}: mcp/anyio 未安裝，改走 legacy。err={_MINIMAX_MCP_IMPORT_ERROR}")
+        return []
+
+    uvx_cmd = _resolve_minimax_uvx_command()
+    if not uvx_cmd:
+        _debug_log(f"{source_tag}: 找不到 uvx（可設 MINIMAX_UVX_PATH），改走 legacy")
+        return []
+
+    api_key = str(os.getenv("MINIMAX_API_KEY", "") or "").strip()
+    api_host = str(os.getenv("MINIMAX_API_HOST", "https://api.minimax.io") or "").strip()
+    if not api_key:
+        _debug_log(f"{source_tag}: 缺少 MINIMAX_API_KEY，改走 legacy")
+        return []
+
+    async def _runner():
+        results = []
+        params = StdioServerParameters(
+            command=uvx_cmd,
+            args=["minimax-coding-plan-mcp", "-y"],
+            env={
+                "MINIMAX_API_KEY": api_key,
+                "MINIMAX_API_HOST": api_host,
+            },
+        )
+        async with stdio_client(params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                tool_names = {t.name for t in tools.tools}
+                if "web_search" not in tool_names:
+                    raise RuntimeError(f"MiniMax MCP 缺少 web_search，tools={sorted(tool_names)}")
+                for q in query_list:
+                    reply = await session.call_tool("web_search", {"query": q})
+                    text_parts = []
+                    for chunk in (reply.content or []):
+                        txt = getattr(chunk, "text", None)
+                        if txt:
+                            text_parts.append(txt)
+                    joined = "\n".join(text_parts)
+                    results.append({
+                        "query": q,
+                        "links": _extract_links_from_web_search_payload(joined),
+                        "raw": joined,
+                    })
+        return results
+
+    try:
+        return anyio.run(_runner)
+    except Exception as e:
+        _debug_log(f"{source_tag}: MiniMax MCP 搜尋失敗，改走 legacy。err={e}")
+        return []
+
+
+def _build_pc_queries_for_mcp(name, number, set_code, category="Pokemon", set_name="", glossy_hint=False):
+    name_query = re.sub(r'\(.*?\)', '', name).replace('-', ' ').strip()
+
+    if '-' in number and re.search(r'[A-Z]+\d+-\d+', number):
+        number_clean = number.split('-')[-1].lstrip('0')
+    else:
+        _num_parts = number.split('/')
+        _num_raw = _num_parts[0].strip()
+        _digits_only = re.search(r'\d+', _num_raw)
+        number_clean = _digits_only.group(0).lstrip('0') if _digits_only else _num_raw.lstrip('0')
+    if not number_clean:
+        number_clean = '0'
+
+    suffix = ""
+    _num_parts = number.split('/')
+    if len(_num_parts) > 1:
+        potential_suffix = _num_parts[1].strip()
+        if re.search(r'(SM-P|S-P|SV-P|SV-G|S8a-G)', potential_suffix, re.IGNORECASE):
+            suffix = potential_suffix
+
+    queries_to_try = []
+    final_set_code = set_code if set_code else suffix
+    set_name_norm = _normalize_alnum_dash(set_name)
+    name_query_norm = _normalize_alnum_dash(name_query)
+    is_pokemon_celebrations = (
+        category.lower() == "pokemon"
+        and (
+            "pokemon-celebrations" in set_name_norm
+            or ("pokemon" in set_name_norm and "celebrations" in set_name_norm)
+            or "celebrations" in set_name_norm
+            or "pokemon-celebrations" in name_query_norm
+        )
+    )
+    is_pokemon_korean = (
+        category.lower() == "pokemon"
+        and (
+            "pokemon-korean" in set_name_norm
+            or ("pokemon" in set_name_norm and "korean" in set_name_norm)
+            or "korean" in set_name_norm
+        )
+    )
+    is_pokemon_glossy = (category.lower() == "pokemon" and bool(glossy_hint))
+
+    if is_pokemon_korean and set_name and number_clean != '0':
+        queries_to_try.append(f"{name_query} {set_name} {number_clean}")
+    if final_set_code and number_clean != '0':
+        queries_to_try.append(f"{name_query} {final_set_code} {number_clean}")
+    if is_pokemon_celebrations and set_name and number_clean != '0':
+        queries_to_try.append(f"{name_query} {set_name} {number_clean}")
+    if is_pokemon_glossy and number_clean != '0':
+        queries_to_try.append(f"{name_query} Glossy {number_clean}")
+    if number_clean != '0':
+        queries_to_try.append(f"{name_query} {number_clean}")
+    if set_name and number_clean != '0':
+        _sn_clean = set_name.lower().strip()
+        if _sn_clean not in name_query.lower():
+            queries_to_try.append(f"{name_query} {set_name} {number_clean}")
+    if final_set_code:
+        queries_to_try.append(f"{name_query} {final_set_code}")
+
+    dedup = []
+    seen = set()
+    for q in queries_to_try:
+        nq = " ".join(q.split())
+        if not nq or nq in seen:
+            continue
+        seen.add(nq)
+        dedup.append(f"{nq} pricecharting")
+    return dedup
+
+
+def _build_snkr_variant_terms(snkr_variant_kws=None, is_alt_art=False):
+    kws = [str(kw).strip().lower() for kw in (snkr_variant_kws or []) if str(kw).strip()]
+    terms = []
+
+    def _add(*vals):
+        for v in vals:
+            t = str(v or "").strip()
+            if t:
+                terms.append(t)
+
+    for kw in kws:
+        _add(kw)
+        if kw in ("flagship", "フラッグシップ", "フラシ"):
+            _add("flagship", "flagship battle", "フラッグシップ", "フラシ")
+        if kw in ("sec-spc", "sec-sp", "secspc", "secsp"):
+            _add("sec-spc", "sec-sp", "comic parallel", "コミパラ", "コミックパラレル")
+        if kw in ("sr-p", "sr parallel", "スーパーレアパラレル"):
+            _add("sr-p", "sr parallel", "スーパーレアパラレル", "パラレル")
+        if kw in ("l-p", "leader parallel", "リーダーパラレル"):
+            _add("l-p", "leader parallel", "リーダーパラレル", "パラレル")
+        if kw in ("comic parallel", "manga parallel", "コミパラ", "コミックパラレル"):
+            _add("comic parallel", "manga parallel", "コミパラ", "コミックパラレル")
+
+    if is_alt_art:
+        _add("parallel", "パラレル")
+
+    dedup = []
+    seen = set()
+    for t in terms:
+        n = " ".join(t.split()).lower()
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        dedup.append(t)
+    return dedup
+
+
+def _build_snkr_queries_for_mcp(en_name, jp_name, number, set_code, snkr_variant_kws=None, is_alt_art=False, card_language="UNKNOWN"):
+    if '-' in number and re.search(r'[A-Z]+\d+-\d+', number):
+        number_clean = number.split('-')[-1].lstrip('0')
+    else:
+        _num_raw = number.split('/')[0]
+        _digits_only = re.search(r'\d+', _num_raw)
+        number_clean = _digits_only.group(0).lstrip('0') if _digits_only else _num_raw.lstrip('0')
+    if not number_clean:
+        number_clean = "0"
+    number_padded = number_clean.zfill(3)
+
+    en_name_query = re.sub(r'\(.*?\)', '', en_name).replace('-', ' ').strip()
+    jp_name_query = re.sub(r'\(.*?\)', '', jp_name).replace('-', ' ').strip() if jp_name else ""
+
+    terms_to_try = []
+    if set_code and number_padded != "000":
+        if jp_name_query:
+            terms_to_try.append(f"{jp_name_query} {set_code} {number_padded}")
+        terms_to_try.append(f"{en_name_query} {set_code} {number_padded}")
+    if number_padded != "000":
+        if jp_name_query:
+            terms_to_try.append(f"{jp_name_query} {number_padded}")
+        terms_to_try.append(f"{en_name_query} {number_padded}")
+    # NOTE:
+    # Keep beta SNKR queries on numerator-only card number (e.g. 074),
+    # do NOT append fraction form like 074/071.
+    # This avoids drifting to sibling variants that share denominator text.
+    if set_code:
+        if jp_name_query:
+            terms_to_try.append(f"{jp_name_query} {set_code}")
+        terms_to_try.append(f"{en_name_query} {set_code}")
+    if not terms_to_try:
+        if jp_name_query:
+            terms_to_try.append(jp_name_query)
+        terms_to_try.append(en_name_query)
+
+    variant_terms = _build_snkr_variant_terms(snkr_variant_kws=snkr_variant_kws, is_alt_art=is_alt_art)
+    enriched_terms = []
+    if variant_terms:
+        # Keep query list bounded to avoid slowing down MCP too much.
+        for base in terms_to_try:
+            for vt in variant_terms[:5]:
+                enriched_terms.append(f"{base} {vt}")
+
+    lang_norm = _normalize_card_language(card_language)
+    if lang_norm == "JP":
+        enriched_terms.extend(f"{base} japanese" for base in terms_to_try[:2])
+    elif lang_norm == "EN":
+        enriched_terms.extend(f"{base} english" for base in terms_to_try[:2])
+    elif lang_norm == "KR":
+        enriched_terms.extend(f"{base} korean" for base in terms_to_try[:2])
+
+    terms_to_try = enriched_terms + terms_to_try
+
+    dedup = []
+    seen = set()
+    for term in terms_to_try:
+        q = " ".join(term.split())
+        if not q or q in seen:
+            continue
+        seen.add(q)
+        dedup.append(f"{q} snkrdunk")
+    return dedup[:20]
+
+
+def _extract_snkr_product_id_from_url(url):
+    text = _clean_found_url(url)
+    if not text:
+        return None
+    m = re.search(r'snkrdunk\.com/apparels/(\d+)', text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    # Prefer canonical product pages. Skip /trading-cards/used/{id} listing ids.
+    m = re.search(r'snkrdunk\.com/(?:[a-z]{2}/)?trading-cards/(?!used/)(\d+)', text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _fetch_snkr_image_from_search_terms(product_id, terms_to_try):
+    """Best-effort image lookup for beta path: query SNKR search API and match by product id."""
+    pid = str(product_id or "").strip()
+    if not pid:
+        return ""
+    session = _create_snkr_api_session()
+    for term in terms_to_try or []:
+        # MCP web-search terms contain extra "snkrdunk" keyword; remove it for SNKR official API query.
+        term_clean = re.sub(r'(?i)\bsnkrdunk\b', '', str(term or "")).strip()
+        term_clean = " ".join(term_clean.split())
+        q = urllib.parse.quote_plus(term_clean)
+        if not q:
+            continue
+        search_url = f"https://snkrdunk.com/en/v1/search?keyword={q}&perPage=40&page=1"
+        data = _snkr_api_get_json(session, search_url)
+        items = []
+        for key in ("streetwears", "products"):
+            arr = data.get(key, [])
+            if isinstance(arr, list):
+                items.extend(arr)
+        for item in items:
+            item_pid = str(item.get("id", "")).strip()
+            if item_pid != pid:
+                continue
+            thumb = item.get("thumbnailUrl") or item.get("imageUrl") or item.get("image") or ""
+            if thumb:
+                return str(thumb).strip()
+    return ""
+
+
+def search_pricecharting_beta_mcp(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name="", mega_name_hint=False, glossy_hint=False, pokemon_variant_hint=""):
+    queries_to_try = _build_pc_queries_for_mcp(
+        name=name,
+        number=number,
+        set_code=set_code,
+        category=category,
+        set_name=set_name,
+        glossy_hint=glossy_hint,
+    )
+    _debug_log(f"PriceCharting-MCP: 共 {len(queries_to_try)} 種查詢方案: {queries_to_try}")
+    results = _run_minimax_web_search(queries_to_try, source_tag="PriceCharting-MCP")
+
+    candidate_urls = []
+    seen = set()
+    for row in results:
+        for link in row.get("links", []):
+            u = _clean_found_url(link)
+            if not u.startswith("https://www.pricecharting.com/game/"):
+                continue
+            if u in seen:
+                continue
+            seen.add(u)
+            candidate_urls.append(u)
+
+    if not candidate_urls:
+        return None, None, None
+
+    if return_candidates:
+        return candidate_urls, None, None
+
+    name_for_slug = re.sub(r'\(.*?\)', '', name).strip()
+    name_slug = re.sub(r'[^a-zA-Z0-9]', '-', name_for_slug.lower()).strip('-')
+    name_slug_alt = ""
+    if name_slug.startswith("m-") and len(name_slug) > 2:
+        name_slug_alt = "mega-" + name_slug[2:]
+    elif name_slug.startswith("mega-") and len(name_slug) > 5:
+        name_slug_alt = "m-" + name_slug[5:]
+
+    if '-' in number and re.search(r'[A-Z]+\d+-\d+', number):
+        number_clean = number.split('-')[-1].lstrip('0')
+    else:
+        _num_parts = number.split('/')
+        _num_raw = _num_parts[0].strip()
+        _digits_only = re.search(r'\d+', _num_raw)
+        number_clean = _digits_only.group(0).lstrip('0') if _digits_only else _num_raw.lstrip('0')
+    if not number_clean:
+        number_clean = "0"
+    number_padded = number_clean.zfill(3)
+    number_denominator = _extract_number_denominator(number)
+    set_code_slug = re.sub(r'[^a-zA-Z0-9]', '', set_code).lower() if set_code else ""
+    set_name_norm = _normalize_alnum_dash(set_name)
+    name_query_norm = _normalize_alnum_dash(name)
+    is_pokemon_celebrations = (
+        category.lower() == "pokemon"
+        and (
+            "pokemon-celebrations" in set_name_norm
+            or ("pokemon" in set_name_norm and "celebrations" in set_name_norm)
+            or "celebrations" in set_name_norm
+            or "pokemon-celebrations" in name_query_norm
+        )
+    )
+    is_pokemon_korean = (
+        category.lower() == "pokemon"
+        and (
+            "pokemon-korean" in set_name_norm
+            or ("pokemon" in set_name_norm and "korean" in set_name_norm)
+            or "korean" in set_name_norm
+        )
+    )
+    is_pokemon_glossy = (category.lower() == "pokemon" and bool(glossy_hint))
+
+    scored_urls = []
+    for u in candidate_urls:
+        score, reasons = _score_pricecharting_candidate(
+            u,
+            name_slug=name_slug,
+            name_slug_alt=name_slug_alt,
+            number_clean=number_clean,
+            number_padded=number_padded,
+            number_denominator=number_denominator,
+            set_code_slug=set_code_slug,
+            mega_name_hint=mega_name_hint,
+            pokemon_variant_hint=pokemon_variant_hint,
+        )
+        if is_pokemon_celebrations:
+            set_slug = _extract_pc_set_slug(u)
+            if "celebrations" in set_slug:
+                score += 140
+                reasons.append("celebrations_set_boost")
+            if "promo" in set_slug and "celebrations" not in set_slug:
+                score -= 150
+                reasons.append("promo_set_penalty")
+        if is_pokemon_glossy:
+            set_slug = _extract_pc_set_slug(u)
+            card_slug = u.split("/")[-1].lower()
+            if "glossy" in card_slug:
+                score += 130
+                reasons.append("glossy_name_boost")
+            if "cd-promo" in set_slug:
+                score += 120
+                reasons.append("cd_promo_set_boost")
+            if "shining" in card_slug and "glossy" not in card_slug:
+                score -= 80
+                reasons.append("non_glossy_shining_penalty")
+        if is_pokemon_korean:
+            set_slug = _extract_pc_set_slug(u)
+            if "korean" in set_slug:
+                score += 140
+                reasons.append("korean_set_boost")
+            if "japanese" in set_slug and "korean" not in set_slug:
+                score -= 130
+                reasons.append("japanese_set_penalty")
+        elif category.lower() == "pokemon":
+            set_slug = _extract_pc_set_slug(u)
+            if "korean" in set_slug:
+                score -= 40
+                reasons.append("korean_set_soft_penalty")
+        scored_urls.append((u, score, reasons))
+    scored_urls.sort(key=lambda x: x[1], reverse=True)
+    ranked_urls = [u for u, _, _ in scored_urls]
+    if pokemon_variant_hint:
+        ranked_urls = [
+            u for u in ranked_urls
+            if _is_pokemon_ball_variant_compatible(
+                pokemon_variant_hint,
+                _detect_pokemon_ball_variant_from_text(u.split("/")[-1]),
+            )
+        ]
+        if not ranked_urls:
+            _debug_step(
+                "PriceCharting-MCP",
+                1,
+                f"{name} {number_clean} {set_code}",
+                "MiniMax web_search",
+                "NO_MATCH",
+                candidate_urls=candidate_urls[:8],
+                reason=f"Variant strict check failed: hint={pokemon_variant_hint}",
+            )
+            return None, None, None
+    product_url = ranked_urls[0]
+
+    def _is_alt_variant_url(u):
+        lower_u = u.replace('[', '').replace(']', '').lower()
+        return (
+            "manga" in lower_u
+            or "alternate-art" in lower_u
+            or "-sp" in lower_u
+            or "parallel" in lower_u
+        )
+
+    def _num_match(slug):
+        return (bool(re.search(rf'(?<!\d){number_clean}(?!\d)', slug)) or number_padded in slug)
+
+    if is_flagship:
+        for u in ranked_urls:
+            lower_u = u.replace('[', '').replace(']', '').lower()
+            u_end = u.split('/')[-1].lower()
+            if "flagship" in lower_u and _num_match(u_end):
+                product_url = u
+                break
+    elif is_alt_art:
+        for u in ranked_urls:
+            u_end = u.split('/')[-1].lower()
+            if _is_alt_variant_url(u) and _num_match(u_end):
+                product_url = u
+                break
+    else:
+        for u in ranked_urls:
+            u_end = u.split('/')[-1].lower()
+            if _num_match(u_end) and not _is_alt_variant_url(u):
+                product_url = u
+                break
+
+    _debug_step(
+        "PriceCharting-MCP",
+        1,
+        f"{name} {number_clean} {set_code}",
+        "MiniMax web_search",
+        "OK",
+        candidate_urls=candidate_urls[:8],
+        selected_url=product_url,
+        reason=f"beta mode，候選 {len(candidate_urls)} 筆",
+        extra={"scored_top3": [(u, s) for u, s, _ in scored_urls[:3]]},
+    )
+    records, resolved_url, pc_img_url = _fetch_pc_prices_from_url(product_url, target_grade=target_grade)
+    return records, resolved_url, pc_img_url
+
+
+def search_snkrdunk_beta_mcp(
+    en_name,
+    jp_name,
+    number,
+    set_code,
+    target_grade,
+    is_alt_art=False,
+    card_language="UNKNOWN",
+    snkr_variant_kws=None,
+    return_candidates=False,
+    set_name="",
+    history_start_date="",
+    history_max_pages=None,
+    pokemon_variant_hint="",
+):
+    if '-' in number and re.search(r'[A-Z]+\d+-\d+', number):
+        number_clean = number.split('-')[-1].lstrip('0')
+    else:
+        _num_raw = number.split('/')[0]
+        _digits_only = re.search(r'\d+', _num_raw)
+        number_clean = _digits_only.group(0).lstrip('0') if _digits_only else _num_raw.lstrip('0')
+    if not number_clean:
+        number_clean = "0"
+
+    terms_to_try = _build_snkr_queries_for_mcp(
+        en_name,
+        jp_name,
+        number,
+        set_code,
+        snkr_variant_kws=snkr_variant_kws,
+        is_alt_art=is_alt_art,
+        card_language=card_language,
+    )
+    _debug_log(f"SNKRDUNK-MCP: 共 {len(terms_to_try)} 種查詢方案: {terms_to_try}")
+    results = _run_minimax_web_search(terms_to_try, source_tag="SNKRDUNK-MCP")
+
+    pid_source = {}
+    pid_score = {}
+    variant_terms = [v.lower() for v in _build_snkr_variant_terms(snkr_variant_kws=snkr_variant_kws, is_alt_art=is_alt_art)]
+    for q_idx, row in enumerate(results):
+        links = row.get("links", [])
+        for l_idx, link in enumerate(links):
+            product_id = _extract_snkr_product_id_from_url(link)
+            if not product_id:
+                continue
+            clean_link = _clean_found_url(link)
+            if product_id not in pid_source:
+                pid_source[product_id] = clean_link
+            score = 10000 - (q_idx * 120) - l_idx
+            low_link = clean_link.lower()
+            if "apparels/" in low_link:
+                score += 60
+            if variant_terms and any(vt in low_link for vt in variant_terms):
+                score += 120
+            if pokemon_variant_hint:
+                cand_variant = _detect_pokemon_ball_variant_from_text(low_link)
+                if _is_pokemon_ball_variant_compatible(pokemon_variant_hint, cand_variant):
+                    score += 120
+                else:
+                    score -= 320
+            prev = pid_score.get(product_id)
+            if prev is None or score > prev:
+                pid_score[product_id] = score
+
+    if not pid_score:
+        return None, None, None
+    pid_candidates = sorted(pid_score.keys(), key=lambda pid: pid_score.get(pid, -10**9), reverse=True)
+    if pokemon_variant_hint:
+        filtered_pids = []
+        for pid in pid_candidates:
+            source = pid_source.get(pid, "")
+            cand_variant = _detect_pokemon_ball_variant_from_text(source)
+            if _is_pokemon_ball_variant_compatible(pokemon_variant_hint, cand_variant):
+                filtered_pids.append(pid)
+        if not filtered_pids:
+            _debug_step(
+                "SNKRDUNK-MCP",
+                1,
+                f"{en_name} {number_clean} {set_code}",
+                "MiniMax web_search",
+                "NO_MATCH",
+                candidate_urls=[f"{pid_source.get(pid, '')} (score={pid_score.get(pid)})" for pid in pid_candidates[:8]],
+                reason=f"Variant strict check failed: hint={pokemon_variant_hint}",
+            )
+            return None, None, None
+        pid_candidates = filtered_pids
+
+    if return_candidates:
+        candidates = []
+        for pid in pid_candidates:
+            source_url = pid_source.get(pid, "")
+            candidates.append(f"https://snkrdunk.com/apparels/{pid} — MCP from {source_url}")
+        return candidates, None, None
+
+    # Beta mode strategy:
+    # 1) 用 MiniMax MCP 找到最可能的 SNKRDUNK 商品 URL
+    # 2) 萃出 product_id
+    # 3) 價格抓取仍沿用既有 direct API 流程
+    # 4) 圖片以 SNKR search API 回補（若找不到，後續會走既有 PC 圖片補位）
+    product_id = pid_candidates[0]
+    resolved_url = f"https://snkrdunk.com/apparels/{product_id}"
+    records, img_url = _fetch_snkr_prices_from_url_direct(resolved_url)
+    if not img_url:
+        img_url = _fetch_snkr_image_from_search_terms(product_id, terms_to_try)
+    _debug_step(
+        "SNKRDUNK-MCP",
+        1,
+        f"{en_name} {number_clean} {set_code}",
+        "MiniMax web_search",
+        "OK",
+        candidate_urls=[f"{pid_source.get(pid, '')} (score={pid_score.get(pid)})" for pid in pid_candidates[:8]],
+        selected_url=resolved_url,
+        reason=f"beta mode，命中 product_id={product_id}",
+    )
+    return records, img_url, resolved_url
+
+
+def search_pricecharting_dispatch(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name="", mega_name_hint=False, glossy_hint=False, pokemon_variant_hint=""):
+    mode = _get_search_mode()
+    if mode == SEARCH_MODE_BETA:
+        _debug_log("PriceCharting: 目前模式=beta(MCP)")
+        beta_result = search_pricecharting_beta_mcp(
+            name,
+            number,
+            set_code,
+            target_grade,
+            is_alt_art,
+            category,
+            is_flagship,
+            return_candidates,
+            set_name,
+            jp_name,
+            mega_name_hint,
+            glossy_hint,
+            pokemon_variant_hint,
+        )
+        if return_candidates:
+            if beta_result and beta_result[0]:
+                return beta_result
+        else:
+            if beta_result and beta_result[1]:
+                return beta_result
+        if _beta_fallback_enabled():
+            _debug_log("PriceCharting: beta 無結果，fallback 到 legacy")
+        else:
+            _debug_log("PriceCharting: beta 無結果，停留 beta（未啟用 fallback）")
+            return beta_result
+    return search_pricecharting(
+        name,
+        number,
+        set_code,
+        target_grade,
+        is_alt_art,
+        category,
+        is_flagship,
+        return_candidates,
+        set_name,
+        jp_name,
+        mega_name_hint,
+        glossy_hint,
+        pokemon_variant_hint,
+    )
+
+
+def search_snkrdunk_dispatch(
+    en_name,
+    jp_name,
+    number,
+    set_code,
+    target_grade,
+    is_alt_art=False,
+    card_language="UNKNOWN",
+    snkr_variant_kws=None,
+    return_candidates=False,
+    set_name="",
+    history_start_date="",
+    history_max_pages=None,
+    pokemon_variant_hint="",
+):
+    mode = _get_search_mode()
+    if mode == SEARCH_MODE_BETA:
+        _debug_log("SNKRDUNK: 目前模式=beta(MCP)")
+        beta_result = search_snkrdunk_beta_mcp(
+            en_name,
+            jp_name,
+            number,
+            set_code,
+            target_grade,
+            is_alt_art,
+            card_language,
+            snkr_variant_kws,
+            return_candidates,
+            set_name,
+            history_start_date,
+            history_max_pages,
+            pokemon_variant_hint,
+        )
+        if return_candidates:
+            if beta_result and beta_result[0]:
+                return beta_result
+        else:
+            if beta_result and beta_result[2]:
+                return beta_result
+        if _beta_fallback_enabled():
+            _debug_log("SNKRDUNK: beta 無結果，fallback 到 legacy")
+        else:
+            _debug_log("SNKRDUNK: beta 無結果，停留 beta（未啟用 fallback）")
+            return beta_result
+    return search_snkrdunk(
+        en_name,
+        jp_name,
+        number,
+        set_code,
+        target_grade,
+        is_alt_art,
+        card_language,
+        snkr_variant_kws,
+        return_candidates,
+        set_name,
+        history_start_date,
+        history_max_pages,
+        pokemon_variant_hint,
+    )
+
+def search_pricecharting(name, number, set_code, target_grade, is_alt_art, category="Pokemon", is_flagship=False, return_candidates=False, set_name="", jp_name="", mega_name_hint=False, glossy_hint=False, pokemon_variant_hint=""):
     # Basic Name cleaning (strip parentheses and normalize hyphens to spaces)
     name_query = re.sub(r'\(.*?\)', '', name).replace('-', ' ').strip()
     
@@ -1788,6 +2651,7 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
                 number_denominator=number_denominator,
                 set_code_slug=set_code_slug,
                 mega_name_hint=mega_name_hint,
+                pokemon_variant_hint=pokemon_variant_hint,
             )
             if is_pokemon_celebrations:
                 set_slug = _extract_pc_set_slug(u)
@@ -1820,6 +2684,25 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
             scored_urls.append((u, sc, why))
         scored_urls.sort(key=lambda x: x[1], reverse=True)
         ranked_urls = [u for u, _, _ in scored_urls]
+        if pokemon_variant_hint:
+            ranked_urls = [
+                u for u in ranked_urls
+                if _is_pokemon_ball_variant_compatible(
+                    pokemon_variant_hint,
+                    _detect_pokemon_ball_variant_from_text(u.split("/")[-1]),
+                )
+            ]
+            if not ranked_urls:
+                _debug_step(
+                    "PriceCharting",
+                    pc_step + 1,
+                    f"name_slug={name_slug!r}, number={number_clean!r}",
+                    search_url,
+                    "NO_MATCH",
+                    candidate_urls=urls,
+                    reason=f"Variant strict check failed: hint={pokemon_variant_hint}",
+                )
+                return None, None, None
 
         if return_candidates:
             return ranked_urls, None, None
@@ -1901,7 +2784,21 @@ def search_pricecharting(name, number, set_code, target_grade, is_alt_art, categ
     
     return records, resolved_url, pc_img_url
 
-def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art=False, card_language="UNKNOWN", snkr_variant_kws=None, return_candidates=False, set_name=""):
+def search_snkrdunk(
+    en_name,
+    jp_name,
+    number,
+    set_code,
+    target_grade,
+    is_alt_art=False,
+    card_language="UNKNOWN",
+    snkr_variant_kws=None,
+    return_candidates=False,
+    set_name="",
+    history_start_date="",
+    history_max_pages=None,
+    pokemon_variant_hint="",
+):
     # Strip prefix like "No." (e.g. "No.025" -> "25"), then apply lstrip('0')
     if '-' in number and re.search(r'[A-Z]+\d+-\d+', number):
         number_clean = number.split('-')[-1].lstrip('0')
@@ -1914,6 +2811,11 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
     number_padded = number_clean.zfill(3)
     number_denominator = _extract_number_denominator(number)
     set_code_slug = re.sub(r'[^a-zA-Z0-9]', '', set_code).lower() if set_code else ""
+    norm_lang = _normalize_card_language(card_language)
+    set_name_l = str(set_name or "").lower()
+    is_one_piece_set = bool(re.match(r'^op\d+', set_code_slug))
+    has_prb_hint = any(k in set_name_l for k in ("prb", "premium booster", "one piece card the best", "the best"))
+    has_starter_hint = any(k in set_name_l for k in ("starter deck", "st26", "st-26"))
 
     # Normalize hyphens to spaces in names for better search matching (e.g. Ex-Holo -> Ex Holo)
     en_name_query = re.sub(r'\(.*?\)', '', en_name).replace('-', ' ').strip()
@@ -2023,6 +2925,8 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
             ranked_matches = []
             en_name_norm = re.sub(r'\(.*?\)', '', en_name).strip().lower()
             jp_name_norm = re.sub(r'\(.*?\)', '', jp_name).strip().lower() if jp_name else ""
+            variant_kws_norm = [str(kw).strip().lower() for kw in (snkr_variant_kws or []) if str(kw).strip()]
+            prefer_sec_sp_variant = any(kw in ("sec-spc", "sec-sp") for kw in variant_kws_norm)
 
             for title, pid, thumb in unique_matches:
                 title_l = str(title).lower()
@@ -2035,6 +2939,15 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
                 if set_code_slug and set_code_slug in title_compact:
                     score += 140
                     reasons.append("set_code")
+
+                # One Piece JP cards: avoid accidental EN listing over JP listing.
+                if is_one_piece_set and norm_lang == "JP":
+                    if _title_has_en_marker(title):
+                        score -= 95
+                        reasons.append("jp_penalty_en_marker")
+                    if _title_has_kr_marker(title):
+                        score -= 95
+                        reasons.append("jp_penalty_kr_marker")
 
                 # Japanese name exact string gets highest name confidence.
                 if jp_name_norm and jp_name_norm in title_l:
@@ -2072,6 +2985,43 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
                         score += 40
                         reasons.append("number_standalone_clean")
 
+                if variant_kws_norm:
+                    hits = [kw for kw in variant_kws_norm if kw in title_l]
+                    if hits:
+                        score += 78
+                        reasons.append(f"variant_match={'|'.join(hits[:2])}")
+
+                if pokemon_variant_hint:
+                    cand_variant = _detect_pokemon_ball_variant_from_text(title_l)
+                    if _is_pokemon_ball_variant_compatible(pokemon_variant_hint, cand_variant):
+                        score += 120
+                        reasons.append(f"pokemon_variant_match={cand_variant}")
+                    else:
+                        score -= 320
+                        reasons.append(f"pokemon_variant_mismatch={cand_variant}")
+
+                if prefer_sec_sp_variant:
+                    has_sec_sp = ("sec-spc" in title_l) or ("sec-sp" in title_l)
+                    has_plain_sec = bool(re.search(r'\bsec\b', title_l))
+                    if has_sec_sp:
+                        score += 110
+                        reasons.append("sec_sp_boost")
+                    elif has_plain_sec:
+                        score -= 65
+                        reasons.append("sec_without_sp_penalty")
+
+                # One Piece PRB cards: prefer PRB / Premium Booster pages, avoid Start Deck pages.
+                if is_one_piece_set and has_prb_hint:
+                    if any(k in title_l for k in ("prb", "premium booster", "one piece card the best", "vol.2", "vol. 2")):
+                        score += 95
+                        reasons.append("prb_hint_boost")
+                    if "start deck" in title_l:
+                        score -= 90
+                        reasons.append("prb_start_deck_penalty")
+                elif is_one_piece_set and has_starter_hint and "start deck" in title_l:
+                    score += 70
+                    reasons.append("starter_hint_boost")
+
                 if number_denominator:
                     den_trim = number_denominator.lstrip('0') or number_denominator
                     if d_hit:
@@ -2085,6 +3035,26 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
                 ranked_matches.append((title, pid, thumb, score, reasons))
 
             ranked_matches.sort(key=lambda x: x[3], reverse=True)
+            if pokemon_variant_hint:
+                ranked_matches = [
+                    row for row in ranked_matches
+                    if _is_pokemon_ball_variant_compatible(
+                        pokemon_variant_hint,
+                        _detect_pokemon_ball_variant_from_text(row[0]),
+                    )
+                ]
+                if not ranked_matches:
+                    _debug_step(
+                        "SNKRDUNK",
+                        snkr_step,
+                        term,
+                        search_url,
+                        "NO_MATCH",
+                        candidate_urls=[f"https://snkrdunk.com/apparels/{pid} — {t}" for t, pid, _ in unique_matches],
+                        reason=f"Variant strict check failed: hint={pokemon_variant_hint}",
+                    )
+                    time.sleep(1)
+                    continue
             unique_matches = [(t, p, i) for t, p, i, _, _ in ranked_matches]
             score_by_pid = {p: s for _, p, _, s, _ in ranked_matches}
             _debug_log(f"SNKRDUNK ranking top3: {[(t, p, s) for t, p, _, s, _ in ranked_matches[:3]]}")
@@ -2104,7 +3074,7 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
             # ── Stage 1: Variant-specific filter (features-based, 最高優先) ──
             # snkr_variant_kws 由 process_single_image 從 features 解析並傳入
             # 例: ["l-p"] for Leader Parallel, ["sr-p"] for SR Parallel, ["コミパラ"] for Manga, ["フラッグシップ","フラシ"] for Flagship
-            _variant_kws = snkr_variant_kws or []
+            _variant_kws = variant_kws_norm
             
             stage1_candidates = [(t, p, i) for t, p, i in unique_matches
                                  if any(kw in t.lower() for kw in _variant_kws)] if _variant_kws else []
@@ -2127,7 +3097,6 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
 
             top_score = score_by_pid.get(product_id, 0)
             top_tied = [(t, p, i) for t, p, i in working_set2 if score_by_pid.get(p, -10**9) == top_score]
-            norm_lang = _normalize_card_language(card_language)
             if len(top_tied) > 1 and norm_lang in ("EN", "JP", "KR"):
                 if norm_lang == "EN":
                     lang_tied = [(t, p, i) for t, p, i in top_tied if _title_has_en_marker(t)]
@@ -2171,16 +3140,52 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
     print(f"Found SNKRDUNK Product ID: {product_id}")
 
     jpy_rate = get_exchange_rate()
-    hist_url = f"https://snkrdunk.com/en/v1/streetwears/{product_id}/trading-histories?perPage=100&page=1"
-    hist_data = _snkr_api_get_json(snkr_session, hist_url)
-    histories = hist_data.get("histories", []) if isinstance(hist_data, dict) else []
+    cutoff_day = None
+    raw_cutoff = str(history_start_date or "").strip()
+    if raw_cutoff:
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                cutoff_day = datetime.strptime(raw_cutoff, fmt).date()
+                break
+            except Exception:
+                continue
+        if cutoff_day is None:
+            _debug_log(f"SNKRDUNK history_start_date parse failed: {raw_cutoff}")
+    page_limit = SNKR_HISTORY_MAX_PAGES
+    if history_max_pages is not None:
+        try:
+            page_limit = max(1, int(history_max_pages))
+        except Exception:
+            page_limit = SNKR_HISTORY_MAX_PAGES
+    if cutoff_day is None:
+        # Keep legacy performance for non-holdings calls.
+        page_limit = 1
 
     records = []
-    for h in histories:
-        date_found = _snkr_traded_date(h.get("tradedAt", ""))
-        grade_found = str(h.get("condition", "")).strip() or "Unknown"
-        price_jpy = _snkr_history_to_jpy(h, jpy_rate)
-        if date_found and price_jpy > 0:
+    seen_rows = set()
+    fetched_pages = 0
+    oldest_seen = None
+    for page in range(1, page_limit + 1):
+        hist_url = (
+            f"https://snkrdunk.com/en/v1/streetwears/{product_id}/trading-histories"
+            f"?perPage={SNKR_HISTORY_PER_PAGE}&page={page}"
+        )
+        hist_data = _snkr_api_get_json(snkr_session, hist_url)
+        histories = hist_data.get("histories", []) if isinstance(hist_data, dict) else []
+        if not isinstance(histories, list) or not histories:
+            break
+        fetched_pages += 1
+        page_oldest = None
+        for h in histories:
+            date_found = _snkr_traded_date(h.get("tradedAt", ""))
+            grade_found = str(h.get("condition", "")).strip() or "Unknown"
+            price_jpy = _snkr_history_to_jpy(h, jpy_rate)
+            if not date_found or price_jpy <= 0:
+                continue
+            uniq_key = (date_found, grade_found, int(price_jpy))
+            if uniq_key in seen_rows:
+                continue
+            seen_rows.add(uniq_key)
             # 不過濾等級，直接收集所有成交紀錄（含實際等級）
             # generate_report 的顯示邏輯會按需選取正確等級
             # 航海王 BGS 卡需要同時看到 A/PSA10/BGS 等紀錄
@@ -2189,10 +3194,27 @@ def search_snkrdunk(en_name, jp_name, number, set_code, target_grade, is_alt_art
                 "price": price_jpy,
                 "grade": grade_found
             })
+            try:
+                d_obj = datetime.strptime(date_found, "%Y/%m/%d").date()
+                if page_oldest is None or d_obj < page_oldest:
+                    page_oldest = d_obj
+            except Exception:
+                pass
+        if page_oldest is not None and (oldest_seen is None or page_oldest < oldest_seen):
+            oldest_seen = page_oldest
+        if cutoff_day is not None and page_oldest is not None and page_oldest <= cutoff_day:
+            break
+        if len(histories) < SNKR_HISTORY_PER_PAGE:
+            break
                 
     resolved_url = f"https://snkrdunk.com/apparels/{product_id}" if product_id else None
                 
-    _debug_log(f"SNKRDUNK: 成功提取 {len(records)} 筆價格紀錄 (包含全等級)")
+    _debug_log(
+        "SNKRDUNK: 成功提取 "
+        f"{len(records)} 筆價格紀錄 (包含全等級), pages={fetched_pages}, "
+        f"cutoff={cutoff_day.isoformat() if cutoff_day else 'none'}, "
+        f"oldest={oldest_seen.isoformat() if oldest_seen else 'n/a'}"
+    )
     
     snkr_target = target_grade.replace(" ", "")
     matched_records = []
@@ -2664,6 +3686,7 @@ async def process_single_image(
     number = str(card_info.get("number", "0"))
     grade = card_info.get("grade", "Ungraded")
     category = card_info.get("category", "Pokemon")
+    release_info = str(card_info.get("release_info", "") or "")
     features = card_info.get("features", "Unknown")
     is_alt_art = False
     # Allow external JSON to override poster version when provided.
@@ -2750,7 +3773,7 @@ async def process_single_image(
         category.lower() == "pokemon"
         and any(kw in features_lower for kw in ["glossy", "光澤面", "光泽面"])
     )
-    features_has_alt_variant = _has_alt_variant_feature(features)
+    features_has_alt_variant = _has_alt_variant_feature(features) or _has_one_piece_sec_sp_feature(features)
     if features_has_alt_variant:
         is_alt_art = True
         _debug_log("✨ features-based override: is_alt_art=True (從 features 偵測到異圖關鍵字)")
@@ -2763,6 +3786,19 @@ async def process_single_image(
         _debug_log("✨ features-based override: mega_name_hint=True (從 features 偵測到 Mega 進化卡面)")
     if glossy_hint:
         _debug_log("✨ features-based override: glossy_hint=True (從 features 偵測到 Glossy)")
+
+    pokemon_variant_hint = ""
+    if category.lower() == "pokemon":
+        pokemon_variant_hint = _detect_pokemon_ball_variant_hint(
+            name,
+            jp_name,
+            card_info.get("c_name", ""),
+            features,
+            card_info.get("market_heat", ""),
+            card_info.get("collection_value", ""),
+        )
+        if pokemon_variant_hint in ("master_ball", "poke_ball", "reverse_holo"):
+            _debug_log(f"🎯 Pokemon variant hint: {pokemon_variant_hint}")
 
     # ── Detect card language and variant hints for SNKRDUNK ──
     is_one_piece_cat = (category.lower() == "one piece")
@@ -2800,14 +3836,17 @@ async def process_single_image(
         if is_flagship:
             snkr_variant_kws = ["フラッグシップ", "フラシ", "flagship"]
             _debug_log(f"🎯 SNKR Variant: Flagship ({snkr_variant_kws})")
+        elif _has_one_piece_sec_sp_feature(features):
+            snkr_variant_kws = ["sec-spc", "sec-sp", "comic parallel"]
+            _debug_log(f"🎯 SNKR Variant: SEC-SPC ({snkr_variant_kws})")
         elif any(kw in features_lower for kw in ["sr parallel", "sr-p", "スーパーレアパラレル"]):
             snkr_variant_kws = ["sr-p"]
             _debug_log(f"🎯 SNKR Variant: SR-P ({snkr_variant_kws})")
         elif any(kw in features_lower for kw in ["leader parallel", "l-p", "リーダーパラレル"]):
             snkr_variant_kws = ["l-p"]
             _debug_log(f"🎯 SNKR Variant: L-P ({snkr_variant_kws})")
-        elif any(kw in features_lower for kw in ["コミパラ", "manga", "コミックパラレル"]):
-            snkr_variant_kws = ["コミパラ", "コミック"]
+        elif any(kw in features_lower for kw in ["コミパラ", "comic parallel", "manga parallel", "コミックパラレル"]):
+            snkr_variant_kws = ["コミパラ", "コミック", "comic"]
             _debug_log(f"🎯 SNKR Variant: Manga ({snkr_variant_kws})")
         elif any(kw in features_lower for kw in ["パラレル", "sr parallel", "parallel art"]):
             snkr_variant_kws = ["パラレル", "-p"]
@@ -2824,7 +3863,7 @@ async def process_single_image(
         pc_result = await loop.run_in_executor(
             None,
             contextvars.copy_context().run,
-            search_pricecharting,
+            search_pricecharting_dispatch,
             name,
             number,
             set_code,
@@ -2837,12 +3876,13 @@ async def process_single_image(
             jp_name,
             mega_name_hint,
             glossy_hint,
+            pokemon_variant_hint,
         )
         snkr_result = None
     else:
         pc_result, snkr_result = await asyncio.gather(
-            loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, False, pc_set_name_hint, jp_name, mega_name_hint, glossy_hint),
-            loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws),
+            loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting_dispatch, name, number, set_code, grade, is_alt_art, category, is_flagship, False, pc_set_name_hint, jp_name, mega_name_hint, glossy_hint, pokemon_variant_hint),
+            loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk_dispatch, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws, False, release_info, "", None, pokemon_variant_hint),
         )
 
     pc_records = pc_result[0] if pc_result else None
@@ -2852,6 +3892,44 @@ async def process_single_image(
     snkr_records = snkr_result[0] if snkr_result else None
     img_url = snkr_result[1] if snkr_result else None
     snkr_url = snkr_result[2] if snkr_result else None
+
+    # One Piece fallback: if PC points to SP variant, enforce SPC-friendly SNKR query once.
+    if (
+        is_one_piece_cat
+        and not skip_snkr_for_korean
+        and _pc_url_has_one_piece_sp(pc_url)
+    ):
+        enforced_kws = list(dict.fromkeys((snkr_variant_kws or []) + ["sec-spc", "sr-spc", "-spc", "sec-sp"]))
+        _debug_log(f"🔁 SNKR fallback: PC 為 SP 版本，追加 SPC 強化搜尋 {enforced_kws}")
+        try:
+            forced_snkr = await loop.run_in_executor(
+                None,
+                contextvars.copy_context().run,
+                search_snkrdunk_dispatch,
+                name,
+                jp_name,
+                number,
+                set_code,
+                grade,
+                is_alt_art,
+                card_language,
+                enforced_kws,
+                False,
+                release_info,
+                "",
+                None,
+                pokemon_variant_hint,
+            )
+            if forced_snkr and forced_snkr[2]:
+                forced_records, forced_img, forced_url = forced_snkr
+                if forced_url != snkr_url:
+                    _debug_log(
+                        f"🔁 SNKR fallback 命中替代 URL: {forced_url} "
+                        f"(原始={snkr_url}, records={len(forced_records) if forced_records else 0})"
+                    )
+                    snkr_records, img_url, snkr_url = forced_records, (forced_img or img_url), forced_url
+        except Exception as e:
+            _debug_log(f"⚠️ SNKR fallback 失敗: {e}")
 
     # Prefer higher quality image for poster rendering.
     # SNKRDUNK "bg_removed" or explicit small size often looks blurry on large posters.
@@ -3219,6 +4297,7 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
     number = str(card_info.get("number", "0"))
     grade = card_info.get("grade", "Ungraded")
     category = card_info.get("category", "Pokemon")
+    release_info = str(card_info.get("release_info", "") or "")
     features = card_info.get("features", "Unknown")
     is_alt_art = False
     
@@ -3229,13 +4308,24 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
         category.lower() == "pokemon"
         and any(kw in features_lower for kw in ["glossy", "光澤面", "光泽面"])
     )
-    features_has_alt_variant = _has_alt_variant_feature(features)
+    features_has_alt_variant = _has_alt_variant_feature(features) or _has_one_piece_sec_sp_feature(features)
     if features_has_alt_variant:
         is_alt_art = True
     else:
         is_alt_art = False
     if is_flagship:
         is_alt_art = True
+
+    pokemon_variant_hint = ""
+    if category.lower() == "pokemon":
+        pokemon_variant_hint = _detect_pokemon_ball_variant_hint(
+            name,
+            jp_name,
+            card_info.get("c_name", ""),
+            features,
+            card_info.get("market_heat", ""),
+            card_info.get("collection_value", ""),
+        )
         
     is_one_piece_cat = (category.lower() == "one piece")
     raw_language = card_info.get("language", card_info.get("card_language", card_info.get("lang", "")))
@@ -3257,12 +4347,14 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
     if is_one_piece_cat and is_alt_art:
         if is_flagship:
             snkr_variant_kws = ["フラッグシップ", "フラシ", "flagship"]
+        elif _has_one_piece_sec_sp_feature(features):
+            snkr_variant_kws = ["sec-spc", "sec-sp", "comic parallel"]
         elif any(kw in features_lower for kw in ["sr parallel", "sr-p", "スーパーレアパラレル"]):
             snkr_variant_kws = ["sr-p"]
         elif any(kw in features_lower for kw in ["leader parallel", "l-p", "リーダーパラレル"]):
             snkr_variant_kws = ["l-p"]
-        elif any(kw in features_lower for kw in ["コミパラ", "manga", "コミックパラレル"]):
-            snkr_variant_kws = ["コミパラ", "コミック"]
+        elif any(kw in features_lower for kw in ["コミパラ", "comic parallel", "manga parallel", "コミックパラレル"]):
+            snkr_variant_kws = ["コミパラ", "コミック", "comic"]
         elif any(kw in features_lower for kw in ["パラレル", "sr parallel", "parallel art"]):
             snkr_variant_kws = ["パラレル", "-p"]
 
@@ -3271,7 +4363,7 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
         pc_result = await loop.run_in_executor(
             None,
             contextvars.copy_context().run,
-            search_pricecharting,
+            search_pricecharting_dispatch,
             name,
             number,
             set_code,
@@ -3284,12 +4376,13 @@ async def process_image_for_candidates(image_path, api_key, lang="zh"):
             jp_name,
             mega_name_hint,
             glossy_hint,
+            pokemon_variant_hint,
         )
         snkr_result = None
     else:
         pc_result, snkr_result = await asyncio.gather(
-            loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting, name, number, set_code, grade, is_alt_art, category, is_flagship, True, pc_set_name_hint, jp_name, mega_name_hint, glossy_hint),
-            loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws, True),
+            loop.run_in_executor(None, contextvars.copy_context().run, search_pricecharting_dispatch, name, number, set_code, grade, is_alt_art, category, is_flagship, True, pc_set_name_hint, jp_name, mega_name_hint, glossy_hint, pokemon_variant_hint),
+            loop.run_in_executor(None, contextvars.copy_context().run, search_snkrdunk_dispatch, name, jp_name, number, set_code, grade, is_alt_art, card_language, snkr_variant_kws, True, release_info, "", None, pokemon_variant_hint),
         )
     
     pc_candidates = (pc_result[0] if pc_result else None) or []
