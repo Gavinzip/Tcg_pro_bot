@@ -30,7 +30,6 @@ import image_generator
 from dotenv import load_dotenv
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
-
 # ============================================================
 # ⚠️ JINA AI RATE LIMITER 說明（重要！請勿刪除此說明）
 # ============================================================
@@ -214,6 +213,19 @@ PACK_RANK_SYNC_SCRIPT_LOCK: asyncio.Lock | None = None
 PACK_RANK_SYNC_CURRENT_JOB: dict[str, object] = {}
 PACK_RANK_SYNC_CURRENT_PROC: asyncio.subprocess.Process | None = None
 PACK_RANK_SYNC_INTERVAL_MINUTES = max(1, int(os.getenv("PACK_RANK_SYNC_INTERVAL_MINUTES", "10")))
+
+WALLET_MIGRATION_SYNC_ENABLE = _env_true("WALLET_MIGRATION_SYNC_ENABLE", True)
+WALLET_MIGRATION_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "sync_wallet_migration.py")
+WALLET_MIGRATION_SYNC_STARTUP_DONE = False
+WALLET_MIGRATION_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
+WALLET_MIGRATION_SYNC_TZ = str(os.getenv("WALLET_MIGRATION_SYNC_TZ", RANK_SYNC_TZ)).strip() or RANK_SYNC_TZ
+WALLET_MIGRATION_SYNC_HOUR = max(0, min(23, int(os.getenv("WALLET_MIGRATION_SYNC_HOUR", "7"))))
+WALLET_MIGRATION_SYNC_MINUTE = max(0, min(59, int(os.getenv("WALLET_MIGRATION_SYNC_MINUTE", "0"))))
+WALLET_MIGRATION_SYNC_RUN_TIME = dt_time(
+    hour=WALLET_MIGRATION_SYNC_HOUR,
+    minute=WALLET_MIGRATION_SYNC_MINUTE,
+    tzinfo=_safe_tzinfo(WALLET_MIGRATION_SYNC_TZ),
+)
 
 
 def _nft_sync_data_dir() -> str:
@@ -5001,65 +5013,7 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         for x in (getattr(cfg, "pack_contracts", ()) or ())
         if str(x or "").strip().lower().startswith("0x") and len(str(x or "").strip().lower()) == 42
     )
-    delayed_open_matches = _infer_delayed_open_pack_matches(usdt_rows, nft_rows, wallet_norm, cfg, nft_in_txs)
-    delayed_open_tx_hashes = set(delayed_open_matches.keys())
-    for match in delayed_open_matches.values():
-        payment = match.get("payment") if isinstance(match, dict) and isinstance(match.get("payment"), dict) else {}
-        payment_to = str(payment.get("to") or "").strip().lower()
-        if not (payment_to.startswith("0x") and len(payment_to) == 42):
-            continue
-        if payment_to in (wallet_norm, str(getattr(cfg, "marketplace_contract", "") or "").strip().lower()):
-            continue
-        # Keep goblin-style money classification deterministic:
-        # delayed matches are handled by tx-hash check, not by learning unknown recipients as pack contracts.
-
-    payment_hint_candidates: list[dict] = []
     marketplace_contract = str(getattr(cfg, "marketplace_contract", "") or "").strip().lower()
-    for row in usdt_rows:
-        if not isinstance(row, dict):
-            continue
-        amount = _tokentx_usdt_amount(row)
-        if amount <= 0:
-            continue
-        tx_hash = str(row.get("hash") or "").strip().lower()
-        frm = str(row.get("from") or "").strip().lower()
-        to = str(row.get("to") or "").strip().lower()
-        if frm != wallet_norm:
-            continue
-        if not to.startswith("0x") or len(to) != 42:
-            continue
-        if to == marketplace_contract:
-            continue
-        payment_hint_candidates.append(row)
-
-    pull_activity_hints: list[dict] = []
-    official_pull_hint_by_tx: dict[str, dict] = {}
-    if payment_hint_candidates:
-        try:
-            pull_activity_hints = _fetch_pull_activity_hints(wallet_norm, max_pages=PROFILE_ACTIVITY_MAX_PAGES)
-            official_pull_hint_by_tx = _match_pull_hints_to_payment_rows(payment_hint_candidates, pull_activity_hints)
-        except Exception as e:
-            print(f"⚠️ legacy pull hint lookup failed for {wallet_norm}: {e}", file=sys.stderr)
-            pull_activity_hints = []
-            official_pull_hint_by_tx = {}
-
-    payment_hint_row_by_tx = {
-        str((row or {}).get("hash") or "").strip().lower(): row
-        for row in payment_hint_candidates
-        if isinstance(row, dict) and str((row or {}).get("hash") or "").strip()
-    }
-    for tx_hash, hint in official_pull_hint_by_tx.items():
-        payment_row = payment_hint_row_by_tx.get(str(tx_hash or "").strip().lower()) or {}
-        payment_to = str(payment_row.get("to") or "").strip().lower()
-        hint_contract = str((hint or {}).get("contract_address") or "").strip().lower()
-        # Only trust explicit on-chain contract hints; never auto-learn recipient address directly.
-        learned_contract = hint_contract
-        if not (learned_contract.startswith("0x") and len(learned_contract) == 42):
-            continue
-        if learned_contract in (wallet_norm, marketplace_contract):
-            continue
-        known_pack_contracts.add(learned_contract)
-        pack_price_map_dirty = _record_pack_contract_hint(pack_price_map, learned_contract) or pack_price_map_dirty
 
     ts_values: list[int] = []
     open_pack_txs: dict[str, dict] = {}
@@ -5095,7 +5049,6 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
         tx_hash = str(row.get("hash") or "").strip().lower()
         frm = str(row.get("from") or "").strip().lower()
         to = str(row.get("to") or "").strip().lower()
-        hint = official_pull_hint_by_tx.get(tx_hash)
         cls = "other"
         if frm == wallet_norm and to == marketplace_contract:
             cls = "mp_buy"
@@ -5103,16 +5056,6 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
             cls = "mp_sell"
         elif to == wallet_norm and tx_hash in nft_out_txs:
             cls = "buyback"
-        elif hint:
-            cls = "open_pack"
-            pack_key = str((hint or {}).get("pack_key") or "").strip().lower()
-            pack_name = str((hint or {}).get("pack_name") or "").strip()
-            if pack_key:
-                to = pack_key
-                if pack_name:
-                    contract_pack_name[pack_key] = pack_name
-        elif tx_hash in delayed_open_tx_hashes:
-            cls = "open_pack"
         elif frm == wallet_norm and to in known_pack_contracts:
             cls = "open_pack"
         elif frm in known_pack_contracts and to == wallet_norm:
@@ -5138,30 +5081,6 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     market_buy_tokens_by_tx: defaultdict[str, set[str]] = defaultdict(set)
     withdraw_token_ids: set[str] = set()
     withdraw_targets = _profile_withdraw_target_set()
-    delayed_hint_by_tx: dict[str, dict] = {}
-    delayed_hint_by_token: dict[str, dict] = {}
-    if delayed_open_matches:
-        try:
-            delayed_hints = pull_activity_hints or _fetch_pull_activity_hints(
-                wallet_norm,
-                max_pages=PROFILE_ACTIVITY_MAX_PAGES,
-            )
-            delayed_hint_by_tx = _match_delayed_pull_hints(delayed_open_matches, delayed_hints)
-        except Exception as e:
-            print(f"⚠️ delayed pull hint lookup failed for {wallet_norm}: {e}", file=sys.stderr)
-            delayed_hint_by_tx = {}
-        for tx_hash, hint in delayed_hint_by_tx.items():
-            if not isinstance(hint, dict):
-                continue
-            pack_key = str(hint.get("pack_key") or "").strip().lower()
-            pack_name = str(hint.get("pack_name") or "").strip()
-            if pack_key and tx_hash in open_pack_txs:
-                open_pack_txs[tx_hash]["counterparty"] = pack_key
-                contract_pack_name[pack_key] = pack_name
-            token_id = str(hint.get("token_id") or "").strip()
-            if token_id:
-                delayed_hint_by_token[token_id] = hint
-
     for row in nft_rows:
         if not isinstance(row, dict):
             continue
@@ -5198,44 +5117,6 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
             market_buy_tokens_by_tx[tx_hash].add(token_id)
         if frm == wallet_norm and to in withdraw_targets:
             withdraw_token_ids.add(token_id)
-
-    for tx_hash, match in delayed_open_matches.items():
-        tx = open_pack_txs.get(tx_hash)
-        if not tx:
-            continue
-        pack_key = str(tx.get("counterparty") or "").strip().lower()
-        for row in match.get("mint_rows") or []:
-            if not isinstance(row, dict):
-                continue
-            token_id = _nft_row_token_id(row)
-            if not token_id:
-                continue
-            ts = int(_parse_int(row.get("timeStamp")) or _parse_int(row.get("timestamp")) or 0)
-            if ts > 0:
-                ts_values.append(ts)
-            hint = delayed_hint_by_token.get(token_id) or delayed_hint_by_tx.get(tx_hash) or {}
-            hint_pack_key = str((hint or {}).get("pack_key") or "").strip().lower()
-            hint_pack_name = str((hint or {}).get("pack_name") or "").strip()
-            if hint_pack_key:
-                pack_key = hint_pack_key
-                open_pack_txs[tx_hash]["counterparty"] = pack_key
-                if hint_pack_name:
-                    contract_pack_name[pack_key] = hint_pack_name
-            open_pack_tokens_by_tx[tx_hash].add(token_id)
-            current = release_cards_by_token.get(token_id) or {}
-            current_ts = int(_parse_int(current.get("timestamp_raw")) or 0)
-            if (not current) or ts >= current_ts:
-                release_cards_by_token[token_id] = {
-                    "token_id": token_id,
-                    "name": str((hint or {}).get("name") or row.get("tokenName") or "Unknown Collectible"),
-                    "market_image": str((hint or {}).get("market_image") or "").strip(),
-                    "preview_image": str((hint or {}).get("preview_image") or "").strip(),
-                    "image": str((hint or {}).get("image") or "").strip(),
-                    "timestamp_raw": ts,
-                    "pack_contract": pack_key,
-                    "token_contract": str(row.get("contractAddress") or "").strip().lower(),
-                    "checkout_id": tx_hash,
-                }
 
     effective_open_pack_txs: dict[str, dict] = dict(open_pack_txs)
 
@@ -5561,6 +5442,11 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
         except Exception as e:
             print(f"⚠️ chain_official history failed for {wallet_address}: {e}; fallback legacy", file=sys.stderr)
     return _build_wallet_activity_history_legacy(wallet_address, profile_lang=profile_lang)
+
+
+
+def _build_wallet_activity_history_for_profile(wallet_address: str, profile_lang: str = "en") -> dict:
+    return _build_wallet_activity_history(wallet_address, profile_lang=profile_lang)
 
 
 def _build_wallet_extremes_template_context(
@@ -7445,7 +7331,7 @@ def _build_wallet_profile_context(
 
     def _history_worker():
         try:
-            history_holder["data"] = _build_wallet_activity_history(wallet_address, profile_lang=profile_lang)
+            history_holder["data"] = _build_wallet_activity_history_for_profile(wallet_address, profile_lang=profile_lang)
         except Exception as e:
             history_holder["error"] = e
 
@@ -9668,6 +9554,38 @@ async def _run_nft_sync_script(trigger: str, bootstrap_only: bool = False) -> bo
     return True
 
 
+async def _run_wallet_migration_sync_script(trigger: str, bootstrap_only: bool = False) -> bool:
+    if not WALLET_MIGRATION_SYNC_ENABLE:
+        return True
+    if not os.path.exists(WALLET_MIGRATION_SYNC_SCRIPT_PATH):
+        print(f"⚠️ Wallet migration sync script not found: {WALLET_MIGRATION_SYNC_SCRIPT_PATH}")
+        return False
+
+    cmd = [sys.executable, WALLET_MIGRATION_SYNC_SCRIPT_PATH, "--trigger", trigger]
+    if bootstrap_only:
+        cmd.append("--bootstrap-only")
+
+    print(f"🕒 Wallet migration sync start trigger={trigger} bootstrap_only={1 if bootstrap_only else 0}")
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=BASE_DIR,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out_b, err_b = await proc.communicate()
+    out = (out_b or b"").decode("utf-8", errors="replace").strip()
+    err = (err_b or b"").decode("utf-8", errors="replace").strip()
+    if out:
+        print(out)
+    if err:
+        print(err, file=sys.stderr)
+    if proc.returncode != 0:
+        print(f"❌ Wallet migration sync failed trigger={trigger} rc={proc.returncode}")
+        return False
+    print(f"✅ Wallet migration sync done trigger={trigger}")
+    return True
+
+
 @tasks.loop(time=NFT_SYNC_RUN_TIME)
 async def nft_daily_sync_job():
     await _run_nft_sync_script("daily", bootstrap_only=False)
@@ -9675,6 +9593,16 @@ async def nft_daily_sync_job():
 
 @nft_daily_sync_job.before_loop
 async def _before_nft_daily_sync_job():
+    await client.wait_until_ready()
+
+
+@tasks.loop(time=WALLET_MIGRATION_SYNC_RUN_TIME)
+async def wallet_migration_daily_sync_job():
+    await _run_wallet_migration_sync_script("daily", bootstrap_only=False)
+
+
+@wallet_migration_daily_sync_job.before_loop
+async def _before_wallet_migration_daily_sync_job():
     await client.wait_until_ready()
 
 
@@ -10014,6 +9942,7 @@ async def _before_legendary_alert_monitor_job():
 async def on_ready():
     global NFT_SYNC_STARTUP_DONE, NFT_SYNC_STARTUP_LOCK, RANK_SYNC_STARTUP_DONE, RANK_SYNC_STARTUP_LOCK
     global PACK_RANK_SYNC_STARTUP_DONE, PACK_RANK_SYNC_STARTUP_LOCK
+    global WALLET_MIGRATION_SYNC_STARTUP_DONE, WALLET_MIGRATION_SYNC_STARTUP_LOCK
     # Attempt to sync global commands
     try:
         await tree.sync()
@@ -10055,6 +9984,16 @@ async def on_ready():
             ranking_interval_sync_job.start()
         if not ranking_daily_sync_job.is_running():
             ranking_daily_sync_job.start()
+
+    if WALLET_MIGRATION_SYNC_ENABLE:
+        if WALLET_MIGRATION_SYNC_STARTUP_LOCK is None:
+            WALLET_MIGRATION_SYNC_STARTUP_LOCK = asyncio.Lock()
+        async with WALLET_MIGRATION_SYNC_STARTUP_LOCK:
+            if not WALLET_MIGRATION_SYNC_STARTUP_DONE:
+                await _run_wallet_migration_sync_script("startup", bootstrap_only=True)
+                WALLET_MIGRATION_SYNC_STARTUP_DONE = True
+        if not wallet_migration_daily_sync_job.is_running():
+            wallet_migration_daily_sync_job.start()
 
     if PACK_RANK_SYNC_ENABLE:
         if PACK_RANK_SYNC_STARTUP_LOCK is None:

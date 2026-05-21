@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,12 @@ from typing import Any
 from dotenv import load_dotenv
 
 from onchain_metrics import OnchainConfig, scan_pack_open_counts_incremental
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from runtime.wallet_migration import apply_wallet_migration_counts, load_wallet_migration_map, wallet_migration_map_path
 
 try:
     from zoneinfo import ZoneInfo
@@ -23,6 +30,7 @@ except Exception:  # pragma: no cover
 
 
 DEFAULT_MONTHLY_PACK_LAUNCH_START = "2026-05-01T00:00:00+08:00"
+DEFAULT_PACK_RANK_CUTOVER_START = "2026-05-21T22:00:00+08:00"
 DEFAULT_PACK_RANK_CONTRACTS = (
     "0xaab5f5fa75437a6e9e7004c12c9c56cda4b4885a",
     "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
@@ -112,6 +120,18 @@ def _month_start_local(now_dt: datetime) -> datetime:
     return now_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
+def _pack_rank_cutover_start(tzinfo) -> datetime | None:
+    raw = str(os.getenv("PACK_RANK_CUTOVER_START", DEFAULT_PACK_RANK_CUTOVER_START)).strip()
+    if not raw:
+        return None
+    dt = _parse_iso_dt(raw)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tzinfo)
+    return dt.astimezone(tzinfo)
+
+
 def _monthly_pack_rank_window(now_dt: datetime, tzinfo) -> tuple[datetime, datetime]:
     month_start = _month_start_local(now_dt)
     launch_raw = str(os.getenv("PACK_RANK_LAUNCH_START", DEFAULT_MONTHLY_PACK_LAUNCH_START)).strip()
@@ -123,6 +143,16 @@ def _monthly_pack_rank_window(now_dt: datetime, tzinfo) -> tuple[datetime, datet
             launch_dt = launch_dt.astimezone(tzinfo)
         if launch_dt.year == now_dt.year and launch_dt.month == now_dt.month and launch_dt > month_start:
             month_start = launch_dt
+
+    cutover_dt = _pack_rank_cutover_start(tzinfo)
+    if (
+        cutover_dt is not None
+        and cutover_dt.year == now_dt.year
+        and cutover_dt.month == now_dt.month
+        and cutover_dt > month_start
+    ):
+        month_start = cutover_dt
+
     return month_start, now_dt
 
 
@@ -182,6 +212,7 @@ class PackRankConfig:
     onchain_pack_contracts: tuple[str, ...]
     onchain_marketplace_contract: str
     onchain_page_size: int
+    wallet_migration_map_path: str
 
     @property
     def latest_path(self) -> Path:
@@ -199,6 +230,10 @@ class PackRankConfig:
     def history_path(self) -> Path:
         key = datetime.now(tz=self.tzinfo).strftime("%Y-%m-%d_%H")
         return self.data_dir / "history" / f"pack_rank_{key}.json"
+
+    @property
+    def pre_cutover_snapshot_path(self) -> Path:
+        return self.data_dir / "state" / "pack_rank_pre_cutover_snapshot.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -231,6 +266,7 @@ def load_config(args: argparse.Namespace) -> PackRankConfig:
         os.getenv("ONCHAIN_MARKETPLACE_CONTRACT", "0xae3e7268ef5a062946216a44f58a8f685ffd11d0")
     ).strip().lower()
     onchain_page_size = max(100, min(10000, _to_int(os.getenv("ONCHAIN_PAGE_SIZE", "10000"), 10000)))
+    wallet_migration_map_path = str(os.getenv("WALLET_MIGRATION_MAP_PATH", "")).strip()
 
     return PackRankConfig(
         trigger=str(args.trigger or "manual"),
@@ -244,6 +280,7 @@ def load_config(args: argparse.Namespace) -> PackRankConfig:
         onchain_pack_contracts=onchain_pack_contracts,
         onchain_marketplace_contract=onchain_marketplace_contract,
         onchain_page_size=onchain_page_size,
+        wallet_migration_map_path=wallet_migration_map_path,
     )
 
 
@@ -278,8 +315,47 @@ def write_status(cfg: PackRankConfig, *, success: bool, message: str, extra: dic
     _atomic_write_json(cfg.status_path, payload)
 
 
+def _maybe_snapshot_pre_cutover_pack_rank(cfg: PackRankConfig, now_dt: datetime) -> None:
+    cutover_dt = _pack_rank_cutover_start(cfg.tzinfo)
+    if cutover_dt is None or now_dt < cutover_dt:
+        return
+    if cfg.pre_cutover_snapshot_path.exists():
+        return
+
+    latest_payload = _json_load(cfg.latest_path)
+    if not latest_payload:
+        return
+    meta = latest_payload.get("meta") if isinstance(latest_payload.get("meta"), dict) else {}
+    wallets = latest_payload.get("wallets") if isinstance(latest_payload.get("wallets"), list) else []
+    if not wallets:
+        return
+
+    # Snapshot only when latest file is still from the pre-cutover window.
+    latest_window_end = _parse_iso_dt(str(meta.get("monthly_gacha_window_end") or "").strip())
+    if latest_window_end is None:
+        latest_window_end = _parse_iso_dt(str(meta.get("updated_at") or "").strip())
+    if latest_window_end is None or latest_window_end > cutover_dt:
+        return
+
+    snapshot_payload = {
+        "meta": {
+            "captured_at": now_dt.isoformat(),
+            "cutover_start": cutover_dt.isoformat(),
+            "source_latest_path": str(cfg.latest_path),
+            "source_updated_at": str(meta.get("updated_at") or ""),
+            "source_window_start": str(meta.get("monthly_gacha_window_start") or ""),
+            "source_window_end": str(meta.get("monthly_gacha_window_end") or ""),
+            "wallet_count": len(wallets),
+        },
+        "wallets": wallets,
+        "top": latest_payload.get("top") if isinstance(latest_payload.get("top"), dict) else {},
+    }
+    _atomic_write_json(cfg.pre_cutover_snapshot_path, snapshot_payload)
+
+
 def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, Any]:
     started_at = datetime.now(tz=cfg.tzinfo)
+    _maybe_snapshot_pre_cutover_pack_rank(cfg, started_at)
     window_start, window_end = _monthly_pack_rank_window(started_at, cfg.tzinfo)
     window_start_ts = int(window_start.astimezone(timezone.utc).timestamp())
     window_end_ts = int(window_end.astimezone(timezone.utc).timestamp())
@@ -299,21 +375,33 @@ def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, An
     )
 
     wallet_counts_raw = scan.get("wallet_counts") if isinstance(scan.get("wallet_counts"), dict) else {}
+    migration_map = load_wallet_migration_map(cfg.wallet_migration_map_path)
+    wallet_counts = apply_wallet_migration_counts(wallet_counts_raw, migration_map)
     stats = scan.get("stats") if isinstance(scan.get("stats"), dict) else {}
     next_state = scan.get("state") if isinstance(scan.get("state"), dict) else {}
 
     rows: list[dict[str, Any]] = []
-    for address, raw_count in wallet_counts_raw.items():
+    for address, raw_count in wallet_counts.items():
         addr = str(address or "").strip().lower()
         if not addr.startswith("0x") or len(addr) != 42:
             continue
         opens = max(0, _to_int(raw_count, 0))
         if opens <= 0:
             continue
+        username = username_map.get(addr)
+        if not username and migration_map:
+            # If canonical(new) has no username yet, borrow old wallet name from latest map.
+            for old_addr, new_addr in migration_map.items():
+                if str(new_addr or "").strip().lower() != addr:
+                    continue
+                old_name = username_map.get(str(old_addr or "").strip().lower())
+                if old_name:
+                    username = old_name
+                    break
         rows.append(
             {
                 "address": addr,
-                "username": username_map.get(addr) or None,
+                "username": username or None,
                 "monthly_gacha_open_count": int(opens),
             }
         )
@@ -344,6 +432,9 @@ def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, An
         "monthly_gacha_scan_reset": bool(stats.get("reset_applied")),
         "pack_contracts": list(pack_contracts),
         "pack_contract_count": len(pack_contracts),
+        "cutover_start": (_pack_rank_cutover_start(cfg.tzinfo).isoformat() if _pack_rank_cutover_start(cfg.tzinfo) else ""),
+        "wallet_migration_map_path": str(cfg.wallet_migration_map_path or wallet_migration_map_path()),
+        "wallet_migration_pairs": len(migration_map),
         "wallet_count": len(rows),
         "total_monthly_opens": int(sum(int(r.get("monthly_gacha_open_count") or 0) for r in rows)),
     }
@@ -371,6 +462,7 @@ def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, An
         "latest_path": str(cfg.latest_path),
         "history_path": str(cfg.history_path),
         "state_path": str(cfg.state_path),
+        "pre_cutover_snapshot_path": str(cfg.pre_cutover_snapshot_path),
         "full_rebuild": bool(full_rebuild),
     }
 
@@ -407,6 +499,7 @@ def main() -> int:
             "latest_path": result["latest_path"],
             "history_path": result["history_path"],
             "state_path": result["state_path"],
+            "pre_cutover_snapshot_path": result["pre_cutover_snapshot_path"],
             "full_rebuild": result["full_rebuild"],
         },
     )
