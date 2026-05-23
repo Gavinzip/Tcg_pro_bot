@@ -729,6 +729,22 @@ PROFILE_CHAIN_TOKEN_PRICE_SOURCE = str(os.getenv("PROFILE_CHAIN_TOKEN_PRICE_SOUR
 if PROFILE_CHAIN_TOKEN_PRICE_SOURCE not in ("cli", "api"):
     PROFILE_CHAIN_TOKEN_PRICE_SOURCE = "api"
 PROFILE_CHAIN_USE_TOKEN_VALUE_HINTS = _env_true("PROFILE_CHAIN_USE_TOKEN_VALUE_HINTS", False)
+PROFILE_CHAIN_INCLUDE_TRANSFER_SOURCE_WALLETS = _env_true("PROFILE_CHAIN_INCLUDE_TRANSFER_SOURCE_WALLETS", True)
+PROFILE_CHAIN_SOURCE_WALLET_MAX_SOURCES = max(
+    0,
+    min(5, int(os.getenv("PROFILE_CHAIN_SOURCE_WALLET_MAX_SOURCES", "1"))),
+)
+PROFILE_CHAIN_CARD_CONTRACT = str(
+    os.getenv(
+        "PROFILE_CHAIN_CARD_CONTRACT",
+        os.getenv("WALLET_MIGRATION_CARD_CONTRACT", "0xf8646a3ca093e97bb404c3b25e675c0394dd5b30"),
+    )
+).strip().lower()
+PROFILE_CHAIN_REQUIRE_MIGRATION_HELPER = _env_true("PROFILE_CHAIN_REQUIRE_MIGRATION_HELPER", True)
+PROFILE_CHAIN_MIGRATION_HELPER_CONTRACT = str(
+    os.getenv("PROFILE_CHAIN_MIGRATION_HELPER_CONTRACT", "0x2e737d552b3c601ada4fcd167bfbd8d4e1043b2c")
+).strip().lower()
+PROFILE_CHAIN_SOURCE_TX_LOOKBACK = max(1, min(20, int(os.getenv("PROFILE_CHAIN_SOURCE_TX_LOOKBACK", "5"))))
 try:
     PROFILE_RENAISS_CLI_TIMEOUT_SEC = max(3.0, float(str(os.getenv("PROFILE_RENAISS_CLI_TIMEOUT_SEC", "18")).strip()))
 except Exception:
@@ -4940,7 +4956,7 @@ def _infer_delayed_open_pack_matches(
     return matches
 
 
-def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str = "en") -> dict:
+def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lang: str = "en") -> dict:
     lang = _profile_lang_from_locale(profile_lang)
     labels = _profile_history_labels(lang)
     wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
@@ -5435,10 +5451,382 @@ def _build_wallet_activity_history_chain(wallet_address: str, profile_lang: str 
     }
 
 
+def _profile_chain_transfer_source_wallets(wallet_address: str, cfg) -> list[str]:
+    if not PROFILE_CHAIN_INCLUDE_TRANSFER_SOURCE_WALLETS or PROFILE_CHAIN_SOURCE_WALLET_MAX_SOURCES <= 0:
+        return []
+    wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
+    if not wallet_norm:
+        return []
+
+    card_contract = str(PROFILE_CHAIN_CARD_CONTRACT or "").strip().lower()
+    marketplace_contract = str(getattr(cfg, "marketplace_contract", "") or "").strip().lower()
+    pack_contracts = {
+        str(x or "").strip().lower()
+        for x in (getattr(cfg, "pack_contracts", ()) or ())
+        if str(x or "").strip().lower().startswith("0x") and len(str(x or "").strip().lower()) == 42
+    }
+    nft_rows = _bsc_account_api_fetch_all(
+        cfg,
+        action="tokennfttx",
+        extra_params={"address": wallet_norm},
+        sort="asc",
+    )
+
+    seen_candidates: set[tuple[str, str]] = set()
+    checked_candidates = 0
+    for row in nft_rows:
+        if not isinstance(row, dict):
+            continue
+        tx_hash = str(row.get("hash") or "").strip().lower()
+        if not tx_hash:
+            continue
+        contract = str(row.get("contractAddress") or "").strip().lower()
+        if card_contract and contract != card_contract:
+            continue
+        if not card_contract:
+            sym = str(row.get("tokenSymbol") or "").strip().lower()
+            if sym and sym != str(PROFILE_CHAIN_CARD_TOKEN_SYMBOL or "").strip().lower():
+                continue
+        frm = _normalize_wallet_address(str(row.get("from") or ""))
+        to = _normalize_wallet_address(str(row.get("to") or ""))
+        if to != wallet_norm or not frm or frm == wallet_norm:
+            continue
+        if _is_zero_chain_address(frm) or frm == marketplace_contract or frm in pack_contracts:
+            continue
+        candidate_key = (tx_hash, frm)
+        if candidate_key in seen_candidates:
+            continue
+        seen_candidates.add(candidate_key)
+        checked_candidates += 1
+        if not _profile_chain_tx_matches_migration_helper(cfg, tx_hash=tx_hash):
+            if checked_candidates >= PROFILE_CHAIN_SOURCE_TX_LOOKBACK:
+                break
+            continue
+        return [frm]
+    return []
+
+
+def _profile_decimal_from_display(value: object) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    return _to_decimal(str(value or "").replace(",", "").strip())
+
+
+def _profile_history_range_bounds(value: object) -> tuple[date | None, date | None]:
+    text = str(value or "").strip()
+    if not text or text == "-":
+        return None, None
+    parts = [x.strip() for x in text.split("~")]
+    dates: list[date] = []
+    for part in parts:
+        if not part:
+            continue
+        try:
+            dates.append(date.fromisoformat(part[:10]))
+        except Exception:
+            continue
+    if not dates:
+        return None, None
+    return min(dates), max(dates)
+
+
+def _bsc_proxy_api_fetch(cfg, *, action: str, tx_hash: str) -> dict:
+    params = {
+        "chainid": int(getattr(cfg, "chain_id", 56) or 56),
+        "module": "proxy",
+        "action": str(action or "").strip(),
+        "txhash": str(tx_hash or "").strip().lower(),
+        "apikey": str(getattr(cfg, "api_key", "") or ""),
+    }
+    retries = max(1, int(getattr(cfg, "retries", PROFILE_API_MAX_RETRIES) or PROFILE_API_MAX_RETRIES))
+    backoff = max(0.2, float(getattr(cfg, "backoff_sec", PROFILE_API_RETRY_BACKOFF_SEC) or PROFILE_API_RETRY_BACKOFF_SEC))
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = _http_get(str(getattr(cfg, "api_url", "https://api.etherscan.io/v2/api")), params=params, timeout=30)
+            status = int(resp.status_code or 0)
+            if status == 429 or status >= 500:
+                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError(f"bsc proxy {action} invalid response")
+            result = data.get("result")
+            if isinstance(result, dict):
+                return result
+            message = str(data.get("message") or "").strip()
+            raise RuntimeError(f"bsc proxy {action} error: {message or result}")
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(backoff * (2 ** (attempt - 1)))
+                continue
+            break
+    raise RuntimeError(f"bsc proxy {action} request failed: {last_err}")
+
+
+def _profile_chain_tx_matches_migration_helper(cfg, *, tx_hash: str) -> bool:
+    if not PROFILE_CHAIN_REQUIRE_MIGRATION_HELPER:
+        return True
+    tx_hash = str(tx_hash or "").strip().lower()
+    if not tx_hash:
+        return False
+
+    try:
+        tx = _bsc_proxy_api_fetch(cfg, action="eth_getTransactionByHash", tx_hash=tx_hash)
+    except Exception as e:
+        print(f"⚠️ profile migration helper check failed for {tx_hash}: {e}", file=sys.stderr)
+        return False
+
+    helper_contract = str(PROFILE_CHAIN_MIGRATION_HELPER_CONTRACT or "").strip().lower()
+    if helper_contract and str(tx.get("to") or "").strip().lower() != helper_contract:
+        return False
+    return True
+
+
+def _merge_profile_contract_rows(histories: list[dict]) -> list[dict]:
+    merged: dict[str, dict[str, object]] = {}
+    for history in histories:
+        for row in history.get("contract_rows") or []:
+            if not isinstance(row, dict):
+                continue
+            contract = str(row.get("contract") or "").strip().lower()
+            pack_name = str(row.get("pack_name") or "").strip()
+            key = contract if contract and contract != "-" else f"legacy-name:{pack_name.lower()}"
+            if not key:
+                continue
+            out = merged.setdefault(
+                key,
+                {
+                    "pack_name": pack_name or "Unknown Pack",
+                    "contract": contract if contract.startswith("0x") else "-",
+                    "open_count": 0,
+                    "direct_count": 0,
+                    "inferred_count": 0,
+                    "spent_total_raw": Decimal("0"),
+                },
+            )
+            if _pack_name_is_real(pack_name, contract) and not _pack_name_is_real(str(out.get("pack_name") or ""), contract):
+                out["pack_name"] = pack_name
+            out["open_count"] = int(out.get("open_count") or 0) + int(_parse_int(row.get("open_count")) or 0)
+            out["direct_count"] = int(out.get("direct_count") or 0) + int(_parse_int(row.get("direct_count")) or 0)
+            out["inferred_count"] = int(out.get("inferred_count") or 0) + int(_parse_int(row.get("inferred_count")) or 0)
+            out["spent_total_raw"] = _to_decimal(out.get("spent_total_raw")) + _profile_decimal_from_display(row.get("spent_total"))
+
+    rows: list[dict] = []
+    for row in merged.values():
+        contract = str(row.get("contract") or "").strip().lower()
+        open_count = int(row.get("open_count") or 0)
+        spent_total = _to_decimal(row.get("spent_total_raw"))
+        unit_price = (spent_total / Decimal(open_count)) if open_count > 0 and spent_total > 0 else Decimal("0")
+        rows.append(
+            {
+                "pack_name": str(row.get("pack_name") or "Unknown Pack"),
+                "contract": contract if contract.startswith("0x") else "-",
+                "contract_short": _short_hex(contract) if contract.startswith("0x") else "-",
+                "open_count": open_count,
+                "direct_count": int(row.get("direct_count") or 0),
+                "inferred_count": int(row.get("inferred_count") or 0),
+                "unit_price": _format_usdt_decimal(unit_price) if unit_price > 0 else "-",
+                "spent_total": _format_usdt_decimal(spent_total),
+                "spent_total_raw": spent_total,
+            }
+        )
+    rows.sort(key=lambda x: (_to_decimal(x.get("spent_total_raw")), int(x.get("open_count") or 0)), reverse=True)
+    for row in rows:
+        row.pop("spent_total_raw", None)
+    return rows
+
+
+def _merge_profile_activity_rows(histories: list[dict], lang: str) -> list[dict]:
+    merged: dict[str, dict[str, object]] = {}
+    for history in histories:
+        for row in history.get("activity_rows") or []:
+            if not isinstance(row, dict):
+                continue
+            typ = str(row.get("type") or row.get("name") or "").strip()
+            if not typ:
+                continue
+            out = merged.setdefault(
+                typ,
+                {
+                    "name": _profile_activity_display_name(typ, lang),
+                    "count": 0,
+                    "type": typ,
+                    "highlight": False,
+                },
+            )
+            out["count"] = int(out.get("count") or 0) + int(_parse_int(row.get("count")) or 0)
+            out["highlight"] = bool(out.get("highlight")) or bool(row.get("highlight"))
+    order = {
+        "PerpetualReleaseTokenActivity": 0,
+        "ReleaseTokenActivity": 0,
+        "PerpetualBuybackActivity": 1,
+        "BuybackActivity": 1,
+        "BuyActivity": 2,
+        "SellActivity": 3,
+    }
+    return sorted(
+        merged.values(),
+        key=lambda x: (order.get(str(x.get("type") or ""), 99), -int(x.get("count") or 0), str(x.get("name") or "")),
+    )
+
+
+def _merge_profile_pack_options(histories: list[dict]) -> list[dict]:
+    merged: dict[str, dict[str, object]] = {}
+    for history in histories:
+        for row in history.get("pack_options") or []:
+            if not isinstance(row, dict):
+                continue
+            contract = str(row.get("contract") or "").strip().lower()
+            if not contract:
+                continue
+            out = merged.setdefault(
+                contract,
+                {
+                    "contract": contract,
+                    "pack_name": str(row.get("pack_name") or f"Contract {_short_hex(contract)}"),
+                    "release_count": 0,
+                    "latest_ts": 0,
+                },
+            )
+            pack_name = str(row.get("pack_name") or "").strip()
+            if _pack_name_is_real(pack_name, contract) and not _pack_name_is_real(str(out.get("pack_name") or ""), contract):
+                out["pack_name"] = pack_name
+            out["release_count"] = int(out.get("release_count") or 0) + int(_parse_int(row.get("release_count")) or 0)
+            out["latest_ts"] = max(int(out.get("latest_ts") or 0), int(_parse_int(row.get("latest_ts")) or 0))
+    rows = list(merged.values())
+    rows.sort(
+        key=lambda x: (int(x.get("latest_ts") or 0), int(x.get("release_count") or 0), str(x.get("pack_name") or "")),
+        reverse=True,
+    )
+    return rows
+
+
+def _merge_profile_token_acquire_hints(histories: list[dict]) -> dict[str, dict[str, object]]:
+    merged: dict[str, dict[str, object]] = {}
+    for history in histories:
+        hints = history.get("token_acquire_cost_hints") if isinstance(history, dict) else {}
+        if not isinstance(hints, dict):
+            continue
+        for token_id, row in hints.items():
+            if not isinstance(row, dict):
+                continue
+            tid = str(token_id or "").strip()
+            if not tid:
+                continue
+            ts = int(_parse_int(row.get("timestamp")) or 0)
+            prev = merged.get(tid)
+            if prev is None or ts >= int(_parse_int(prev.get("timestamp")) or 0):
+                merged[tid] = {
+                    "cost": _to_decimal(row.get("cost")),
+                    "timestamp": ts,
+                    "source": str(row.get("source") or ""),
+                }
+    return merged
+
+
+def _merge_profile_release_cards(histories: list[dict]) -> list[dict]:
+    by_token: dict[str, dict] = {}
+    for history in histories:
+        for row in history.get("release_cards") or []:
+            if not isinstance(row, dict):
+                continue
+            token_id = str(row.get("token_id") or "").strip()
+            if not token_id:
+                continue
+            ts = int(_parse_int(row.get("timestamp")) or 0)
+            prev = by_token.get(token_id)
+            if prev is None or ts >= int(_parse_int(prev.get("timestamp")) or 0):
+                by_token[token_id] = dict(row)
+    return sorted(by_token.values(), key=lambda x: int(_parse_int(x.get("timestamp")) or 0), reverse=True)
+
+
+def _merge_profile_history_data(histories: list[dict], *, wallet_norm: str, source_wallets: list[str], lang: str) -> dict:
+    valid = [x for x in histories if isinstance(x, dict)]
+    if not valid:
+        return {}
+    labels = valid[-1].get("labels") or _profile_history_labels(lang)
+    total_spent = sum((_to_decimal(x.get("total_spent")) for x in valid), Decimal("0"))
+    total_earned = sum((_to_decimal(x.get("total_earned")) for x in valid), Decimal("0"))
+    card_withdraw_total = sum((_to_decimal(x.get("card_withdraw_total")) for x in valid), Decimal("0"))
+    net_total = total_earned - total_spent + card_withdraw_total
+
+    min_date: date | None = None
+    max_date: date | None = None
+    for history in valid:
+        start, end = _profile_history_range_bounds(history.get("history_range"))
+        if start and (min_date is None or start < min_date):
+            min_date = start
+        if end and (max_date is None or end > max_date):
+            max_date = end
+    if min_date and max_date:
+        history_range = min_date.isoformat() if min_date == max_date else f"{min_date.isoformat()} ~ {max_date.isoformat()}"
+        now_day = datetime.now(timezone.utc).date()
+        active_days_count = max(1, (max(now_day, min_date) - min_date).days + 1)
+    else:
+        history_range = "-"
+        active_days_count = max((int(_parse_int(x.get("active_days_count")) or 0) for x in valid), default=0)
+
+    pack_spent_map_raw: defaultdict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for history in valid:
+        pack_spent_map = history.get("pack_spent_map") if isinstance(history.get("pack_spent_map"), dict) else {}
+        for key, value in (pack_spent_map or {}).items():
+            norm_key = str(key or "").strip().lower()
+            if norm_key:
+                pack_spent_map_raw[norm_key] += _profile_decimal_from_display(value)
+
+    return {
+        "labels": labels,
+        "history_range": history_range,
+        "wallet_short": f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm,
+        "source_wallets": list(source_wallets),
+        "activity_total_count": sum((int(_parse_int(x.get("activity_total_count")) or 0) for x in valid), 0),
+        "opened_packs_count": sum((int(_parse_int(x.get("opened_packs_count")) or 0) for x in valid), 0),
+        "direct_price_count": sum((int(_parse_int(x.get("direct_price_count")) or 0) for x in valid), 0),
+        "inferred_price_count": sum((int(_parse_int(x.get("inferred_price_count")) or 0) for x in valid), 0),
+        "unknown_price_count": sum((int(_parse_int(x.get("unknown_price_count")) or 0) for x in valid), 0),
+        "pack_spent_total": sum((_to_decimal(x.get("pack_spent_total")) for x in valid), Decimal("0")),
+        "total_spent": total_spent,
+        "total_earned": total_earned,
+        "net_total": net_total,
+        "trade_volume": sum((_to_decimal(x.get("trade_volume")) for x in valid), Decimal("0")),
+        "buyback_total": sum((_to_decimal(x.get("buyback_total")) for x in valid), Decimal("0")),
+        "market_buy_total": sum((_to_decimal(x.get("market_buy_total")) for x in valid), Decimal("0")),
+        "market_sell_total": sum((_to_decimal(x.get("market_sell_total")) for x in valid), Decimal("0")),
+        "card_withdraw_total": card_withdraw_total,
+        "active_days_count": active_days_count,
+        "contract_rows": _merge_profile_contract_rows(valid),
+        "activity_rows": _merge_profile_activity_rows(valid, lang),
+        "release_cards": _merge_profile_release_cards(valid),
+        "pack_options": _merge_profile_pack_options(valid),
+        "pack_spent_map": {k: _format_usdt_decimal(v) for k, v in pack_spent_map_raw.items()},
+        "token_value_hints": {},
+        "token_acquire_cost_hints": _merge_profile_token_acquire_hints(valid),
+    }
+
+
+def _build_wallet_activity_history_chain_profile(wallet_address: str, profile_lang: str = "en") -> dict:
+    lang = _profile_lang_from_locale(profile_lang)
+    wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
+    current_history = _build_wallet_activity_history_chain_single(wallet_norm, profile_lang=lang)
+    if not PROFILE_CHAIN_INCLUDE_TRANSFER_SOURCE_WALLETS or PROFILE_CHAIN_SOURCE_WALLET_MAX_SOURCES <= 0:
+        return current_history
+
+    cfg = _build_profile_onchain_cfg(force=True)
+    source_wallets = _profile_chain_transfer_source_wallets(wallet_norm, cfg)
+    if not source_wallets:
+        return current_history
+
+    histories = [_build_wallet_activity_history_chain_single(source, profile_lang=lang) for source in source_wallets]
+    histories.append(current_history)
+    return _merge_profile_history_data(histories, wallet_norm=wallet_norm, source_wallets=source_wallets, lang=lang)
+
+
 def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en") -> dict:
     if PROFILE_DATA_MODE == "chain_official":
         try:
-            return _build_wallet_activity_history_chain(wallet_address, profile_lang=profile_lang)
+            return _build_wallet_activity_history_chain_single(wallet_address, profile_lang=profile_lang)
         except Exception as e:
             print(f"⚠️ chain_official history failed for {wallet_address}: {e}; fallback legacy", file=sys.stderr)
     return _build_wallet_activity_history_legacy(wallet_address, profile_lang=profile_lang)
@@ -5446,6 +5834,8 @@ def _build_wallet_activity_history(wallet_address: str, profile_lang: str = "en"
 
 
 def _build_wallet_activity_history_for_profile(wallet_address: str, profile_lang: str = "en") -> dict:
+    if PROFILE_DATA_MODE == "chain_official":
+        return _build_wallet_activity_history_chain_profile(wallet_address, profile_lang=profile_lang)
     return _build_wallet_activity_history(wallet_address, profile_lang=profile_lang)
 
 
@@ -7541,6 +7931,11 @@ def _build_wallet_profile_context(
     history_labels = history_data.get("labels") or _profile_history_labels(profile_lang)
     history_activity_rows = list(history_data.get("activity_rows") or [])
     history_contract_rows = history_data.get("contract_rows") or []
+    history_source_wallets = [
+        str(x or "").strip().lower()
+        for x in (history_data.get("source_wallets") or [])
+        if _normalize_wallet_address(str(x or ""))
+    ]
     metric_opened_count = _parse_int(history_data.get("opened_packs_count")) or 0
     use_live_onchain_metrics = bool(
         PROFILE_REALTIME_RECALC_ON_PROFILE
@@ -7673,6 +8068,8 @@ def _build_wallet_profile_context(
         "active_days_rank_tier": participation_rank_chip["tier"],
         "activity_total_label": history_labels.get("activity_total", "Total Activities"),
         "activity_total_value": _format_number(history_data.get("activity_total_count")),
+        "source_wallets": history_source_wallets,
+        "source_wallets_value": ", ".join(_short_hex(x) for x in history_source_wallets),
         "chip_direct_label": history_labels.get("chip_direct", "Direct"),
         "chip_inferred_label": history_labels.get("chip_inferred", "Inferred"),
         "chip_unknown_label": history_labels.get("chip_unknown", "Unknown"),
@@ -7807,6 +8204,7 @@ def _build_wallet_profile_context(
             "market_buy_total": metric_market_buy_total,
             "market_sell_total": metric_market_sell_total,
             "card_withdraw_total": metric_card_withdraw_total,
+            "source_wallets": history_source_wallets,
         },
         "replacements": {
             "{{ card_name }}": html_lib.escape(f"{profile_name} Vault"),
@@ -10425,12 +10823,28 @@ class ProfileConfigView(discord.ui.View):
                     "(1페이지에 표시할 카드가 없어 히스토리 포스터만 생성)\n",
                     "（该地址目前无可展示卡片，仅生成历史海报）\n",
                 )
+            source_wallets = [
+                str(x or "").strip().lower()
+                for x in (history_summary.get("source_wallets") or [])
+                if _normalize_wallet_address(str(x or ""))
+            ]
+            history_source_hint = ""
+            if source_wallets:
+                source_text = ", ".join(f"`{_short_hex(x)}`" for x in source_wallets)
+                history_source_hint = _t(
+                    self.selected_lang,
+                    f"History 來源：目前錢包 + 轉入來源錢包 {source_text}\n",
+                    f"History source: current wallet + transferred-from wallet {source_text}\n",
+                    f"History source: current wallet + transferred-from wallet {source_text}\n",
+                    f"History 来源：当前钱包 + 转入来源钱包 {source_text}\n",
+                )
             summary = (
                 f"✅ **{self.username}** · {self.texts['summary_done']}\n"
                 f"{history_only_hint}"
                 f"{self.texts['wallet_label']}: `{self.wallet}`\n"
                 f"{self.texts['shown_label']}: **{profile_ctx.get('shown_count', 0)}** | "
                 f"{self.texts['shown_fmv_label']}: **{_format_fmv_usd(_parse_int(profile_ctx.get('shown_fmv')))}**\n"
+                f"{history_source_hint}"
                 f"History · Opened Packs: **{_format_number(history_summary.get('opened_packs'))}** | "
                 f"Net: **{_format_usdt_currency(history_summary.get('net_total'), signed=True)}**"
             )
