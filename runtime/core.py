@@ -128,6 +128,18 @@ def _parse_int_set(raw: str | None) -> set[int]:
     return out
 
 
+def _parse_hex_topic_csv(raw: str | None, default_values: tuple[str, ...] = ()) -> tuple[str, ...]:
+    source = str(raw).strip() if raw is not None else ",".join(default_values)
+    out: list[str] = []
+    for token in re.split(r"[\s,]+", source):
+        text = str(token or "").strip().lower()
+        if not re.fullmatch(r"0x[0-9a-f]{64}", text):
+            continue
+        if text not in out:
+            out.append(text)
+    return tuple(out) or tuple(default_values)
+
+
 def _coerce_thread_auto_archive_minutes(raw: str | int | None, default: int = 1440) -> int:
     allowed = (60, 1440, 4320, 10080)
     try:
@@ -523,6 +535,11 @@ _PACK_NAME_MAP_CACHE: dict[str, object] = {
     "mtime": -1.0,
     "data": {},
 }
+_PACK_ACTIVITY_TX_MAP_CACHE: dict[str, object] = {
+    "path": "",
+    "mtime": -1.0,
+    "data": {},
+}
 
 
 def _load_rankings_wallet_map() -> dict[str, dict]:
@@ -662,6 +679,27 @@ PROFILE_API_RETRY_BACKOFF_SEC = max(0.2, float(os.getenv("PROFILE_API_RETRY_BACK
 PROFILE_ACTIVITY_PAGE_LIMIT = max(1, min(50, int(os.getenv("PROFILE_ACTIVITY_PAGE_LIMIT", "50"))))
 PROFILE_ACTIVITY_MAX_PAGES = max(1, int(os.getenv("PROFILE_ACTIVITY_MAX_PAGES", "120")))
 PROFILE_PACK_NAME_HINT_MAX_PAGES = max(0, int(os.getenv("PROFILE_PACK_NAME_HINT_MAX_PAGES", "4")))
+PROFILE_CHAIN_PULL_HINT_MAX_PAGES = max(0, int(os.getenv("PROFILE_CHAIN_PULL_HINT_MAX_PAGES", "80")))
+PROFILE_TEST_OMEGA_CONTRACT = str(
+    os.getenv("PROFILE_TEST_OMEGA_CONTRACT", "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910")
+).strip().lower()
+try:
+    PROFILE_TEST_OMEGA_PRICE_USDT = Decimal(str(os.getenv("PROFILE_TEST_OMEGA_PRICE_USDT", "100")).strip() or "100")
+except Exception:
+    PROFILE_TEST_OMEGA_PRICE_USDT = Decimal("100")
+PROFILE_TEST_OMEGA_LABEL = str(os.getenv("PROFILE_TEST_OMEGA_LABEL", "Test OMEGA | Pokémon")).strip() or "Test OMEGA | Pokémon"
+PROFILE_CHAIN_RECEIPT_PACK_ID_ENABLED = _env_true("PROFILE_CHAIN_RECEIPT_PACK_ID_ENABLED", True)
+PROFILE_CHAIN_RECEIPT_WORKERS = max(1, min(16, int(os.getenv("PROFILE_CHAIN_RECEIPT_WORKERS", "8"))))
+PROFILE_CHAIN_RECEIPT_FALLBACK_LIMIT = max(0, int(os.getenv("PROFILE_CHAIN_RECEIPT_FALLBACK_LIMIT", "24")))
+PROFILE_CHAIN_LOG_PAGE_LIMIT = max(100, min(1000, int(os.getenv("PROFILE_CHAIN_LOG_PAGE_LIMIT", "1000"))))
+PROFILE_CHAIN_LOG_BLOCK_GAP = max(1, int(os.getenv("PROFILE_CHAIN_LOG_BLOCK_GAP", "20000")))
+PROFILE_CHAIN_PACK_ID_EVENT_TOPICS = _parse_hex_topic_csv(
+    os.getenv("PROFILE_CHAIN_PACK_ID_EVENT_TOPICS"),
+    default_values=(
+        "0xd505514c5f9bb134a66621a7fd46a679442a1a0e45f5ad5dff0724e4b4588fed",
+        "0xbce26dc7177b18647918a6cc5cba6dd27ba1a2e1aeb20ccc5820d11b6a705277",
+    ),
+)
 PROFILE_CHAIN_DELAYED_MINT_WINDOW_SEC = max(0, int(os.getenv("PROFILE_CHAIN_DELAYED_MINT_WINDOW_SEC", "3600")))
 PROFILE_CHAIN_ACTIVITY_MATCH_WINDOW_SEC = max(
     0,
@@ -801,6 +839,10 @@ PACK_PRICE_MAP_PATH = (
 PACK_NAME_MAP_PATH = (
     str(os.getenv("PACK_NAME_MAP_PATH", os.path.join(BASE_DIR, "data", "pack_name_map.json"))).strip()
     or os.path.join(BASE_DIR, "data", "pack_name_map.json")
+)
+PACK_ACTIVITY_TX_MAP_PATH = (
+    str(os.getenv("PACK_ACTIVITY_TX_MAP_PATH", os.path.join(BASE_DIR, "data", "pack_activity_tx_map.json"))).strip()
+    or os.path.join(BASE_DIR, "data", "pack_activity_tx_map.json")
 )
 _HTTP_SESSION_LOCAL = threading.local()
 _PROFILE_BACKGROUND_FILES = {
@@ -3643,6 +3685,103 @@ def _pack_label_from_pull_item(item: dict | None) -> str:
     return "Unknown Pack"
 
 
+def _profile_amount_pack_key(contract_key: str | None, amount: Decimal) -> str:
+    contract = str(contract_key or "").strip().lower()
+    amount_key = _format_usdt_decimal(_to_decimal(amount)).replace(",", "")
+    return f"payment:{contract}:{amount_key}" if contract else f"payment:unknown:{amount_key}"
+
+
+def _is_profile_test_omega_pack(contract_key: str | None, pack_name: str | None, amount: Decimal) -> bool:
+    contract = str(contract_key or "").strip().lower()
+    label_key = _normalize_pack_label_key(pack_name)
+    return bool(
+        PROFILE_TEST_OMEGA_CONTRACT
+        and contract == PROFILE_TEST_OMEGA_CONTRACT
+        and PROFILE_TEST_OMEGA_PRICE_USDT > 0
+        and abs(_to_decimal(amount) - PROFILE_TEST_OMEGA_PRICE_USDT) <= Decimal("0.000001")
+        and label_key == _normalize_pack_label_key("OMEGA | Pokémon")
+    )
+
+
+def _normalize_profile_activity_pack_hint(pack_key: str | None, pack_name: str | None, amount: Decimal, contract: str | None) -> tuple[str, str]:
+    key = str(pack_key or "").strip().lower()
+    label = str(pack_name or "").strip()
+    contract_key = str(contract or "").strip().lower() or key
+    if _is_profile_test_omega_pack(contract_key, label, amount):
+        return _profile_amount_pack_key(contract_key, amount), PROFILE_TEST_OMEGA_LABEL
+    return key, label
+
+
+def _known_profile_payment_pack_name(contract_key: str | None, amount: Decimal) -> str:
+    contract = str(contract_key or "").strip().lower()
+    if _is_profile_test_omega_pack(contract, "OMEGA | Pokémon", amount):
+        return PROFILE_TEST_OMEGA_LABEL
+    return ""
+
+
+def _profile_payment_has_local_pack_identity(payment_row: dict, pack_price_map: dict, pack_name_map: dict) -> bool:
+    if not isinstance(payment_row, dict):
+        return False
+    contract = str(payment_row.get("to") or "").strip().lower()
+    amount = _tokentx_usdt_amount(payment_row)
+    if _known_profile_payment_pack_name(contract, amount):
+        return True
+    cached_name = _lookup_pack_name(pack_name_map, contract)
+    cached_unit = _lookup_pack_unit_price(pack_price_map, contract_key=contract)
+    return bool(
+        cached_name
+        and cached_unit > 0
+        and amount > 0
+        and abs(cached_unit - amount) <= Decimal("0.000001")
+    )
+
+
+def _profile_named_activity_pack_key(contract_key: str | None, pack_name: str | None, amount: Decimal) -> str:
+    contract = str(contract_key or "").strip().lower() or "unknown"
+    amount_key = _format_usdt_decimal(_to_decimal(amount)).replace(",", "")
+    name_key = _normalize_pack_label_key(pack_name) or "unknown"
+    digest = hashlib.sha1(f"{contract}|{amount_key}|{name_key}".encode("utf-8")).hexdigest()[:12]
+    return f"activity:{contract}:{amount_key}:{digest}"
+
+
+def _is_profile_virtual_pack_key(value: str | None) -> bool:
+    key = str(value or "").strip().lower()
+    return key.startswith("payment:") or key.startswith("activity:") or key.startswith("legacy")
+
+
+def _is_profile_cacheable_pack_key(value: str | None) -> bool:
+    key = str(value or "").strip().lower()
+    return bool(key and not key.startswith("payment:") and not key.startswith("activity:"))
+
+
+def _resolve_profile_official_pack_identity(
+    hint: dict,
+    pack_price_map: dict,
+    pack_name_map: dict,
+) -> tuple[str, str, str]:
+    raw_key = str((hint or {}).get("pack_key") or "").strip().lower()
+    pack_name = str((hint or {}).get("pack_name") or "").strip()
+    contract = str((hint or {}).get("contract_address") or "").strip().lower()
+    price = _to_decimal((hint or {}).get("price"))
+    if raw_key.startswith("payment:"):
+        return raw_key, pack_name, contract
+    if raw_key.startswith("legacy:"):
+        return raw_key, pack_name, contract
+
+    cached_name = _lookup_pack_name(pack_name_map, raw_key) if raw_key.startswith("0x") else ""
+    cached_unit = _lookup_pack_unit_price(pack_price_map, contract_key=raw_key) if raw_key.startswith("0x") else Decimal("0")
+    name_matches = bool(cached_name and _normalize_pack_label_key(cached_name) == _normalize_pack_label_key(pack_name))
+    price_matches = bool(cached_unit <= 0 or price <= 0 or abs(cached_unit - price) <= Decimal("0.000001"))
+    if raw_key.startswith("0x") and name_matches and price_matches:
+        return raw_key, pack_name, contract
+
+    # Shared payment contracts and legacy keys are not unique pack identities.
+    # Split by official pack name and price so rows like 0xaab5... do not collapse.
+    if pack_name:
+        return _profile_named_activity_pack_key(contract or raw_key, pack_name, price), pack_name, contract or raw_key
+    return raw_key, pack_name, contract
+
+
 def _normalize_pack_label_key(name: str | None) -> str:
     return re.sub(r"\s+", " ", str(name or "").strip().lower())
 
@@ -3783,6 +3922,152 @@ def _save_pack_name_map(pack_map: dict) -> None:
         _PACK_NAME_MAP_CACHE["data"] = payload
     except Exception:
         return
+
+
+def _default_pack_activity_tx_map() -> dict:
+    return {
+        "version": 1,
+        "updated_at": "",
+        "by_tx": {},
+    }
+
+
+def _load_pack_activity_tx_map() -> dict:
+    path = PACK_ACTIVITY_TX_MAP_PATH
+    default_data = _default_pack_activity_tx_map()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return default_data
+
+    if (
+        _PACK_ACTIVITY_TX_MAP_CACHE.get("path") == path
+        and _PACK_ACTIVITY_TX_MAP_CACHE.get("mtime") == mtime
+        and isinstance(_PACK_ACTIVITY_TX_MAP_CACHE.get("data"), dict)
+    ):
+        data_cached = _PACK_ACTIVITY_TX_MAP_CACHE.get("data") or {}
+        if isinstance(data_cached.get("by_tx"), dict):
+            return data_cached  # type: ignore[return-value]
+        return default_data
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return default_data
+    if not isinstance(data, dict):
+        return default_data
+    if not isinstance(data.get("by_tx"), dict):
+        data["by_tx"] = {}
+    _PACK_ACTIVITY_TX_MAP_CACHE["path"] = path
+    _PACK_ACTIVITY_TX_MAP_CACHE["mtime"] = mtime
+    _PACK_ACTIVITY_TX_MAP_CACHE["data"] = data
+    return data
+
+
+def _save_pack_activity_tx_map(activity_map: dict) -> None:
+    if not isinstance(activity_map, dict):
+        return
+    by_tx = activity_map.get("by_tx") if isinstance(activity_map.get("by_tx"), dict) else {}
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "by_tx": by_tx,
+    }
+    path = PACK_ACTIVITY_TX_MAP_PATH
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
+        _PACK_ACTIVITY_TX_MAP_CACHE["path"] = path
+        _PACK_ACTIVITY_TX_MAP_CACHE["mtime"] = os.path.getmtime(path)
+        _PACK_ACTIVITY_TX_MAP_CACHE["data"] = payload
+    except Exception:
+        return
+
+
+def _pack_activity_hint_cache_row(hint: dict) -> dict:
+    price = _to_decimal((hint or {}).get("price"))
+    row = {
+        "pack_key": str((hint or {}).get("pack_key") or "").strip().lower(),
+        "pack_name": str((hint or {}).get("pack_name") or "").strip(),
+        "contract_address": str((hint or {}).get("contract_address") or "").strip().lower(),
+        "token_id": str((hint or {}).get("token_id") or "").strip(),
+        "timestamp": int(_parse_int((hint or {}).get("timestamp")) or 0),
+        "price": _format_usdt_decimal(price) if price > 0 else "",
+        "checkout_id": str((hint or {}).get("checkout_id") or "").strip(),
+        "tx_hash": str((hint or {}).get("tx_hash") or "").strip().lower(),
+        "source": str((hint or {}).get("source") or "").strip(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return {k: v for k, v in row.items() if v not in ("", 0)}
+
+
+def _lookup_pack_activity_tx_hint(activity_map: dict, tx_hash: str | None) -> dict | None:
+    if not isinstance(activity_map, dict):
+        return None
+    tx = str(tx_hash or "").strip().lower()
+    if not tx:
+        return None
+    by_tx = activity_map.get("by_tx") if isinstance(activity_map.get("by_tx"), dict) else {}
+    row = by_tx.get(tx)
+    if not isinstance(row, dict):
+        return None
+    out = dict(row)
+    out["tx_hash"] = tx
+    if "price" in out:
+        out["price"] = _to_decimal(out.get("price"))
+    return out
+
+
+def _record_pack_activity_tx_hint(activity_map: dict, hint: dict) -> bool:
+    if not isinstance(activity_map, dict):
+        return False
+    tx_hash = str((hint or {}).get("tx_hash") or "").strip().lower()
+    if not tx_hash:
+        return False
+    if not isinstance(activity_map.get("by_tx"), dict):
+        activity_map["by_tx"] = {}
+    by_tx = activity_map["by_tx"]
+    next_row = _pack_activity_hint_cache_row(hint)
+    prev = by_tx.get(tx_hash) if isinstance(by_tx.get(tx_hash), dict) else {}
+    prev_cmp = dict(prev)
+    prev_cmp.pop("updated_at", None)
+    next_cmp = dict(next_row)
+    next_cmp.pop("updated_at", None)
+    if prev_cmp == next_cmp:
+        return False
+    by_tx[tx_hash] = next_row
+    return True
+
+
+def _merge_profile_pack_hints(primary: dict | None, fallback: dict | None) -> dict | None:
+    if not isinstance(primary, dict):
+        return dict(fallback) if isinstance(fallback, dict) else None
+    if not isinstance(fallback, dict):
+        return dict(primary)
+    merged = dict(primary)
+    for key in (
+        "pack_name",
+        "contract_address",
+        "token_id",
+        "checkout_id",
+        "tx_hash",
+        "name",
+        "market_image",
+        "preview_image",
+        "image",
+    ):
+        if not merged.get(key) and fallback.get(key):
+            merged[key] = fallback.get(key)
+    fallback_price = _to_decimal(fallback.get("price"))
+    if fallback_price > 0:
+        merged["price"] = fallback_price
+    if not merged.get("source"):
+        merged["source"] = fallback.get("source") or "merged"
+    return merged
 
 
 def _pack_price_entry_to_decimal(entry) -> Decimal:
@@ -4026,6 +4311,8 @@ def _fetch_pull_activity_hints(wallet_address: str, *, max_pages: int | None = N
                 pack_key = contract
             else:
                 pack_key = f"legacy:{pack_id}" if pack_id else f"legacy-name:{pack_label}"
+            price = _wei_to_usdt(row.get("priceInUsdt"))
+            pack_key, pack_label = _normalize_profile_activity_pack_hint(pack_key, pack_label, price, contract)
             token_id = str(row.get("nftTokenId") or row.get("tokenId") or row_item.get("tokenId") or "").strip()
             hints.append(
                 {
@@ -4034,8 +4321,9 @@ def _fetch_pull_activity_hints(wallet_address: str, *, max_pages: int | None = N
                     "contract_address": contract,
                     "token_id": token_id,
                     "timestamp": int(_parse_int(row.get("timestamp")) or 0),
-                    "price": _wei_to_usdt(row.get("priceInUsdt")),
+                    "price": price,
                     "checkout_id": str(row.get("checkoutId") or "").strip(),
+                    "tx_hash": str(row.get("txHash") or row.get("hash") or "").strip().lower(),
                     "name": str(
                         row_item.get("collectibleName")
                         or row_item.get("title")
@@ -4084,6 +4372,21 @@ def _match_pull_hints_to_payment_rows(payment_rows: list[dict], hints: list[dict
         payment_ts = int(_parse_int(row.get("timeStamp")) or _parse_int(row.get("timestamp")) or 0)
         payment_amount = _tokentx_usdt_amount(row)
         if payment_ts <= 0 or payment_amount <= 0:
+            continue
+
+        for hint in hints:
+            if id(hint) in used_hint_ids:
+                continue
+            hint_tx_hash = str((hint or {}).get("tx_hash") or "").strip().lower()
+            if hint_tx_hash != tx_hash:
+                continue
+            price = _to_decimal((hint or {}).get("price"))
+            if price <= 0 or abs(price - payment_amount) > Decimal("0.000001"):
+                continue
+            matched[tx_hash] = hint
+            used_hint_ids.add(id(hint))
+            break
+        if tx_hash in matched:
             continue
 
         best: dict | None = None
@@ -4815,6 +5118,335 @@ def _bsc_account_api_fetch_all(
     return out
 
 
+def _profile_topic_to_address(topic: str | None) -> str:
+    text = str(topic or "").strip().lower()
+    if not re.fullmatch(r"0x[0-9a-f]{64}", text):
+        return ""
+    return "0x" + text[-40:]
+
+
+def _bsc_proxy_get_transaction_receipt(cfg, tx_hash: str) -> dict:
+    tx = str(tx_hash or "").strip().lower()
+    if not re.fullmatch(r"0x[0-9a-f]{64}", tx):
+        return {}
+    params = {
+        "chainid": int(getattr(cfg, "chain_id", 56)),
+        "module": "proxy",
+        "action": "eth_getTransactionReceipt",
+        "txhash": tx,
+        "apikey": str(getattr(cfg, "api_key", "") or ""),
+    }
+    retries = max(1, int(getattr(cfg, "retries", PROFILE_API_MAX_RETRIES) or PROFILE_API_MAX_RETRIES))
+    backoff = max(0.2, float(getattr(cfg, "backoff_sec", PROFILE_API_RETRY_BACKOFF_SEC) or PROFILE_API_RETRY_BACKOFF_SEC))
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = _http_get(str(getattr(cfg, "api_url", "https://api.etherscan.io/v2/api")), params=params, timeout=30)
+            status = int(resp.status_code or 0)
+            if status == 429 or status >= 500:
+                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("bsc receipt invalid response")
+            result = data.get("result")
+            if isinstance(result, dict):
+                return result
+            if result in (None, "0x", ""):
+                return {}
+            raise RuntimeError(str(data.get("error") or result))
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(backoff * (2 ** (attempt - 1)))
+                continue
+            break
+    raise RuntimeError(f"bsc receipt request failed: {last_err}")
+
+
+def _bsc_logs_api_fetch_page(
+    cfg,
+    *,
+    contract: str,
+    from_block: int,
+    to_block: int,
+    topic0: str,
+    page: int,
+) -> list[dict]:
+    params = {
+        "chainid": int(getattr(cfg, "chain_id", 56)),
+        "module": "logs",
+        "action": "getLogs",
+        "fromBlock": int(from_block),
+        "toBlock": int(to_block),
+        "address": str(contract or "").strip().lower(),
+        "topic0": str(topic0 or "").strip().lower(),
+        "page": int(page),
+        "offset": int(PROFILE_CHAIN_LOG_PAGE_LIMIT),
+        "apikey": str(getattr(cfg, "api_key", "") or ""),
+    }
+    retries = max(1, int(getattr(cfg, "retries", PROFILE_API_MAX_RETRIES) or PROFILE_API_MAX_RETRIES))
+    backoff = max(0.2, float(getattr(cfg, "backoff_sec", PROFILE_API_RETRY_BACKOFF_SEC) or PROFILE_API_RETRY_BACKOFF_SEC))
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = _http_get(str(getattr(cfg, "api_url", "https://api.etherscan.io/v2/api")), params=params, timeout=30)
+            status = int(resp.status_code or 0)
+            if status == 429 or status >= 500:
+                raise requests.HTTPError(f"HTTP {status}", response=resp)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("bsc getLogs invalid response")
+            result = data.get("result")
+            if isinstance(result, list):
+                return [x for x in result if isinstance(x, dict)]
+            if isinstance(result, str):
+                lowered = result.lower()
+                if "no records" in lowered or "no transactions" in lowered:
+                    return []
+                if "query timeout" in lowered or "result window" in lowered or "more than" in lowered:
+                    raise RuntimeError(result)
+            raise RuntimeError(f"bsc getLogs error: {data.get('message') or result}")
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(backoff * (2 ** (attempt - 1)))
+                continue
+            break
+    raise RuntimeError(f"bsc getLogs request failed: {last_err}")
+
+
+def _bsc_logs_api_fetch_range_adaptive(
+    cfg,
+    *,
+    contract: str,
+    from_block: int,
+    to_block: int,
+    topic0: str,
+) -> list[dict]:
+    if from_block > to_block:
+        return []
+    try:
+        out: list[dict] = []
+        page = 1
+        while True:
+            rows = _bsc_logs_api_fetch_page(
+                cfg,
+                contract=contract,
+                from_block=from_block,
+                to_block=to_block,
+                topic0=topic0,
+                page=page,
+            )
+            if not rows:
+                break
+            out.extend(rows)
+            if len(rows) < PROFILE_CHAIN_LOG_PAGE_LIMIT:
+                break
+            page += 1
+        return out
+    except Exception:
+        if from_block >= to_block:
+            raise
+        mid = (from_block + to_block) // 2
+        return _bsc_logs_api_fetch_range_adaptive(
+            cfg,
+            contract=contract,
+            from_block=from_block,
+            to_block=mid,
+            topic0=topic0,
+        ) + _bsc_logs_api_fetch_range_adaptive(
+            cfg,
+            contract=contract,
+            from_block=mid + 1,
+            to_block=to_block,
+            topic0=topic0,
+        )
+
+
+def _extract_profile_chain_pack_id_from_log(log: dict, wallet_norm: str, payment_contract: str) -> str:
+    if not isinstance(log, dict):
+        return ""
+    wallet = str(wallet_norm or "").strip().lower()
+    router = str(payment_contract or "").strip().lower()
+    if str(log.get("address") or "").strip().lower() != router:
+        return ""
+    topics = log.get("topics") if isinstance(log.get("topics"), list) else []
+    if len(topics) < 3:
+        return ""
+    topic0 = str(topics[0] or "").strip().lower()
+    if topic0 not in PROFILE_CHAIN_PACK_ID_EVENT_TOPICS:
+        return ""
+    if wallet and _profile_topic_to_address(str(topics[1] or "")) != wallet:
+        return ""
+    pack_id = str(topics[2] or "").strip().lower()
+    if re.fullmatch(r"0x[0-9a-f]{64}", pack_id):
+        return pack_id
+    return ""
+
+
+def _extract_profile_chain_pack_id_from_receipt(receipt: dict, wallet_norm: str, payment_contract: str) -> str:
+    if not isinstance(receipt, dict):
+        return ""
+    for log in receipt.get("logs") or []:
+        pack_id = _extract_profile_chain_pack_id_from_log(log, wallet_norm, payment_contract)
+        if pack_id:
+            return pack_id
+    return ""
+
+
+def _profile_chain_pack_hint_from_pack_id(payment_row: dict, pack_id: str, pack_price_map: dict, pack_name_map: dict) -> dict | None:
+    tx_hash = str((payment_row or {}).get("hash") or "").strip().lower()
+    payment_contract = str((payment_row or {}).get("to") or "").strip().lower()
+    pack_id_norm = str(pack_id or "").strip().lower()
+    if not tx_hash or not re.fullmatch(r"0x[0-9a-f]{64}", pack_id_norm):
+        return None
+    pack_key = f"legacy:{pack_id_norm}"
+    amount = _tokentx_usdt_amount(payment_row)
+    cached_name = _lookup_pack_name(pack_name_map, pack_key)
+    cached_unit = _lookup_pack_unit_price(pack_price_map, contract_key=pack_key)
+    price = cached_unit if cached_unit > 0 else amount
+    return {
+        "pack_key": pack_key,
+        "pack_name": cached_name,
+        "contract_address": payment_contract,
+        "timestamp": int(_parse_int((payment_row or {}).get("timeStamp")) or _parse_int((payment_row or {}).get("timestamp")) or 0),
+        "price": price,
+        "tx_hash": tx_hash,
+        "source": "chain_log",
+    }
+
+
+def _chain_receipt_pack_hint_for_payment(
+    cfg,
+    payment_row: dict,
+    wallet_norm: str,
+    pack_price_map: dict,
+    pack_name_map: dict,
+) -> dict | None:
+    if not PROFILE_CHAIN_RECEIPT_PACK_ID_ENABLED or not isinstance(payment_row, dict):
+        return None
+    tx_hash = str(payment_row.get("hash") or "").strip().lower()
+    payment_contract = str(payment_row.get("to") or "").strip().lower()
+    if not tx_hash or not payment_contract:
+        return None
+    receipt = _bsc_proxy_get_transaction_receipt(cfg, tx_hash)
+    pack_id = _extract_profile_chain_pack_id_from_receipt(receipt, wallet_norm, payment_contract)
+    if not pack_id:
+        return None
+    hint = _profile_chain_pack_hint_from_pack_id(payment_row, pack_id, pack_price_map, pack_name_map)
+    if isinstance(hint, dict):
+        hint["source"] = "chain_receipt"
+    return hint
+
+
+def _chain_receipt_pack_hints_for_payments(
+    cfg,
+    payment_rows: list[dict],
+    wallet_norm: str,
+    pack_price_map: dict,
+    pack_name_map: dict,
+) -> dict[str, dict]:
+    rows = [row for row in payment_rows if isinstance(row, dict)]
+    if not rows or not PROFILE_CHAIN_RECEIPT_PACK_ID_ENABLED:
+        return {}
+    out: dict[str, dict] = {}
+    workers = min(PROFILE_CHAIN_RECEIPT_WORKERS, len(rows))
+    if workers <= 1:
+        for row in rows:
+            try:
+                hint = _chain_receipt_pack_hint_for_payment(cfg, row, wallet_norm, pack_price_map, pack_name_map)
+            except Exception:
+                hint = None
+            if isinstance(hint, dict):
+                tx_hash = str(hint.get("tx_hash") or "").strip().lower()
+                if tx_hash:
+                    out[tx_hash] = hint
+        return out
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_chain_receipt_pack_hint_for_payment, cfg, row, wallet_norm, pack_price_map, pack_name_map): row
+            for row in rows
+        }
+        for future in as_completed(futures):
+            try:
+                hint = future.result()
+            except Exception:
+                hint = None
+            if isinstance(hint, dict):
+                tx_hash = str(hint.get("tx_hash") or "").strip().lower()
+                if tx_hash:
+                    out[tx_hash] = hint
+    return out
+
+
+def _chain_log_pack_hints_for_payments(
+    cfg,
+    payment_rows: list[dict],
+    wallet_norm: str,
+    pack_price_map: dict,
+    pack_name_map: dict,
+) -> dict[str, dict]:
+    rows = [row for row in payment_rows if isinstance(row, dict)]
+    if not rows or not PROFILE_CHAIN_RECEIPT_PACK_ID_ENABLED:
+        return {}
+    by_contract: defaultdict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        contract = str(row.get("to") or "").strip().lower()
+        tx_hash = str(row.get("hash") or "").strip().lower()
+        block_no = int(_parse_int(row.get("blockNumber")) or 0)
+        if contract.startswith("0x") and len(contract) == 42 and tx_hash and block_no > 0:
+            by_contract[contract].append(row)
+    if not by_contract:
+        return {}
+
+    out: dict[str, dict] = {}
+    for contract, contract_rows in by_contract.items():
+        tx_lookup = {str(row.get("hash") or "").strip().lower(): row for row in contract_rows}
+        blocks = sorted({int(_parse_int(row.get("blockNumber")) or 0) for row in contract_rows if int(_parse_int(row.get("blockNumber")) or 0) > 0})
+        if not blocks:
+            continue
+        block_ranges: list[tuple[int, int]] = []
+        start_block = blocks[0]
+        prev_block = blocks[0]
+        for block in blocks[1:]:
+            if block - prev_block > PROFILE_CHAIN_LOG_BLOCK_GAP:
+                block_ranges.append((max(0, start_block - 2), prev_block + 2))
+                start_block = block
+            prev_block = block
+        block_ranges.append((max(0, start_block - 2), prev_block + 2))
+        for topic0 in PROFILE_CHAIN_PACK_ID_EVENT_TOPICS:
+            logs: list[dict] = []
+            for from_block, to_block in block_ranges:
+                try:
+                    logs.extend(
+                        _bsc_logs_api_fetch_range_adaptive(
+                            cfg,
+                            contract=contract,
+                            from_block=from_block,
+                            to_block=to_block,
+                            topic0=topic0,
+                        )
+                    )
+                except Exception:
+                    continue
+            for log in logs:
+                tx_hash = str(log.get("transactionHash") or log.get("hash") or "").strip().lower()
+                if not tx_hash or tx_hash in out:
+                    continue
+                payment_row = tx_lookup.get(tx_hash)
+                if not isinstance(payment_row, dict):
+                    continue
+                pack_id = _extract_profile_chain_pack_id_from_log(log, wallet_norm, contract)
+                if not pack_id:
+                    continue
+                hint = _profile_chain_pack_hint_from_pack_id(payment_row, pack_id, pack_price_map, pack_name_map)
+                if isinstance(hint, dict):
+                    out[tx_hash] = hint
+    return out
+
+
 def _tokentx_usdt_amount(row: dict) -> Decimal:
     value = _to_decimal(row.get("value"))
     decimals = int(_to_decimal(row.get("tokenDecimal")) or 18)
@@ -5037,7 +5669,15 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
     market_buy_txs: dict[str, dict] = {}
     market_sell_txs: dict[str, dict] = {}
 
-    def _upsert_tx(bucket: dict[str, dict], tx_hash: str, *, counterparty: str, ts: int, amount: Decimal):
+    def _upsert_tx(
+        bucket: dict[str, dict],
+        tx_hash: str,
+        *,
+        counterparty: str,
+        ts: int,
+        amount: Decimal,
+        payment_row: dict | None = None,
+    ):
         key = str(tx_hash or "").strip().lower()
         if not key:
             key = f"synthetic:{len(bucket)}:{counterparty}:{ts}"
@@ -5050,6 +5690,8 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
             row["timestamp"] = int(ts)
         if (not row.get("counterparty")) and counterparty:
             row["counterparty"] = counterparty
+        if payment_row is not None and not row.get("payment_row"):
+            row["payment_row"] = dict(payment_row)
 
     contract_pack_name: dict[str, str] = {}
 
@@ -5077,7 +5719,7 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         elif frm in known_pack_contracts and to == wallet_norm:
             cls = "buyback"
         if cls == "open_pack":
-            _upsert_tx(open_pack_txs, tx_hash, counterparty=to, ts=ts, amount=amount)
+            _upsert_tx(open_pack_txs, tx_hash, counterparty=to, ts=ts, amount=amount, payment_row=row)
         elif cls == "buyback":
             _upsert_tx(buyback_txs, tx_hash, counterparty=frm, ts=ts, amount=amount)
         elif cls == "mp_buy":
@@ -5085,7 +5727,150 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         elif cls == "mp_sell":
             _upsert_tx(market_sell_txs, tx_hash, counterparty=frm, ts=ts, amount=amount)
 
+    pull_hint_matches: dict[str, dict] = {}
+    if open_pack_txs:
+        payment_rows = [
+            tx.get("payment_row")
+            for tx in open_pack_txs.values()
+            if isinstance(tx.get("payment_row"), dict)
+        ]
+        if payment_rows:
+            activity_tx_map = _load_pack_activity_tx_map()
+            activity_tx_map_dirty = False
+            for row in payment_rows:
+                tx_hash = str(row.get("hash") or "").strip().lower()
+                if not tx_hash:
+                    continue
+                cached_hint = _lookup_pack_activity_tx_hint(activity_tx_map, tx_hash)
+                if not isinstance(cached_hint, dict):
+                    continue
+                payment_amount = _tokentx_usdt_amount(row)
+                hint_price = _to_decimal(cached_hint.get("price"))
+                if payment_amount > 0 and hint_price > 0 and abs(payment_amount - hint_price) <= Decimal("0.000001"):
+                    pull_hint_matches[tx_hash] = cached_hint
+
+            receipt_payment_rows = []
+            for row in payment_rows:
+                tx_hash = str(row.get("hash") or "").strip().lower()
+                if not tx_hash:
+                    continue
+                current_hint = pull_hint_matches.get(tx_hash) or {}
+                if str(current_hint.get("source") or "").strip() in ("chain_log", "chain_receipt"):
+                    continue
+                counterparty = str(row.get("to") or "").strip().lower()
+                amount = _tokentx_usdt_amount(row)
+                if _profile_payment_has_local_pack_identity(row, pack_price_map, pack_name_map):
+                    continue
+                # OMEGA's current/test split is amount-based; its receipt topic is checkout id, not pack id.
+                if counterparty == PROFILE_TEST_OMEGA_CONTRACT and _known_profile_payment_pack_name(counterparty, amount):
+                    continue
+                receipt_payment_rows.append(row)
+            if receipt_payment_rows:
+                chain_matches = _chain_log_pack_hints_for_payments(
+                    cfg,
+                    receipt_payment_rows,
+                    wallet_norm,
+                    pack_price_map,
+                    pack_name_map,
+                )
+                for tx_hash, hint in chain_matches.items():
+                    if not isinstance(hint, dict):
+                        continue
+                    pull_hint_matches[tx_hash] = hint
+                    activity_tx_map_dirty = _record_pack_activity_tx_hint(activity_tx_map, hint) or activity_tx_map_dirty
+                receipt_fallback_rows = [
+                    row
+                    for row in receipt_payment_rows
+                    if str(row.get("hash") or "").strip().lower() not in pull_hint_matches
+                ]
+                if PROFILE_CHAIN_RECEIPT_FALLBACK_LIMIT > 0 and len(receipt_fallback_rows) <= PROFILE_CHAIN_RECEIPT_FALLBACK_LIMIT:
+                    receipt_matches = _chain_receipt_pack_hints_for_payments(
+                        cfg,
+                        receipt_fallback_rows,
+                        wallet_norm,
+                        pack_price_map,
+                        pack_name_map,
+                    )
+                    for tx_hash, hint in receipt_matches.items():
+                        if not isinstance(hint, dict):
+                            continue
+                        pull_hint_matches[tx_hash] = hint
+                        activity_tx_map_dirty = _record_pack_activity_tx_hint(activity_tx_map, hint) or activity_tx_map_dirty
+
+            missing_payment_rows = [
+                row
+                for row in payment_rows
+                if (
+                    str(row.get("hash") or "").strip().lower() not in pull_hint_matches
+                    or not str((pull_hint_matches.get(str(row.get("hash") or "").strip().lower()) or {}).get("pack_name") or "").strip()
+                )
+                and not _profile_payment_has_local_pack_identity(row, pack_price_map, pack_name_map)
+            ]
+            if missing_payment_rows and PROFILE_CHAIN_PULL_HINT_MAX_PAGES > 0:
+                try:
+                    pull_hints = _fetch_pull_activity_hints(
+                        wallet_norm,
+                        max_pages=PROFILE_CHAIN_PULL_HINT_MAX_PAGES,
+                    )
+                    official_matches = _match_pull_hints_to_payment_rows(missing_payment_rows, pull_hints)
+                    for tx_hash, hint in official_matches.items():
+                        existing_hint = pull_hint_matches.get(tx_hash)
+                        merged_hint = _merge_profile_pack_hints(existing_hint, hint)
+                        if isinstance(merged_hint, dict):
+                            pull_hint_matches[tx_hash] = merged_hint
+                            activity_tx_map_dirty = _record_pack_activity_tx_hint(activity_tx_map, merged_hint) or activity_tx_map_dirty
+                except Exception as e:
+                    print(f"⚠️ pack activity hint match failed for {wallet_norm}: {e}", file=sys.stderr)
+            if activity_tx_map_dirty:
+                _save_pack_activity_tx_map(activity_tx_map)
+
+    effective_open_pack_txs: dict[str, dict] = {}
+    for tx_hash, tx in open_pack_txs.items():
+        key = str(tx_hash or "").strip().lower()
+        effective = dict(tx)
+        amount = _to_decimal(effective.get("amount"))
+        counterparty = str(effective.get("counterparty") or "").strip().lower()
+        hint = pull_hint_matches.get(key)
+        if isinstance(hint, dict):
+            pack_key, pack_name, contract_display = _resolve_profile_official_pack_identity(
+                hint,
+                pack_price_map,
+                pack_name_map,
+            )
+            price = _to_decimal(hint.get("price"))
+            if pack_key:
+                effective["pack_key"] = pack_key
+            if pack_name:
+                effective["pack_name"] = pack_name
+            if price > 0:
+                effective["amount"] = price
+            if _is_profile_virtual_pack_key(pack_key):
+                contract_display = str(contract_display or counterparty).strip().lower()
+                if contract_display:
+                    effective["contract_display"] = contract_display
+            effective["pack_source"] = str(hint.get("source") or "official_activity").strip() or "official_activity"
+        else:
+            pack_key = counterparty
+            pack_name = ""
+            known_payment_name = _known_profile_payment_pack_name(counterparty, amount)
+            if known_payment_name:
+                pack_key = _profile_amount_pack_key(counterparty, amount)
+                pack_name = known_payment_name
+                effective["contract_display"] = counterparty
+            cached_unit = _lookup_pack_unit_price(pack_price_map, contract_key=counterparty)
+            if not pack_name and cached_unit > 0 and amount > 0 and abs(cached_unit - amount) > Decimal("0.000001"):
+                pack_key = _profile_amount_pack_key(counterparty, amount)
+                amount_key = _format_usdt_decimal(amount).replace(",", "")
+                pack_name = f"Unmatched Pack {amount_key} USDT"
+                effective["contract_display"] = counterparty
+            effective["pack_key"] = pack_key
+            if pack_name:
+                effective["pack_name"] = pack_name
+            effective["pack_source"] = "payment_contract"
+        effective_open_pack_txs[key] = effective
+
     contract_pull_price_counter: defaultdict[str, Counter] = defaultdict(Counter)
+    contract_pack_counter: defaultdict[str, Counter] = defaultdict(Counter)
     contract_open_count: defaultdict[str, int] = defaultdict(int)
     contract_direct_count: defaultdict[str, int] = defaultdict(int)
     contract_inferred_count: defaultdict[str, int] = defaultdict(int)
@@ -5110,7 +5895,7 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         if not token_id:
             continue
 
-        if to == wallet_norm and tx_hash in open_pack_txs:
+        if to == wallet_norm and tx_hash in effective_open_pack_txs:
             open_pack_tokens_by_tx[tx_hash].add(token_id)
             current = release_cards_by_token.get(token_id) or {}
             current_ts = int(_parse_int(current.get("timestamp_raw")) or 0)
@@ -5122,7 +5907,11 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
                     "preview_image": "",
                     "image": "",
                     "timestamp_raw": ts,
-                    "pack_contract": str((open_pack_txs.get(tx_hash) or {}).get("counterparty") or "").strip().lower(),
+                    "pack_contract": str(
+                        (effective_open_pack_txs.get(tx_hash) or {}).get("pack_key")
+                        or (effective_open_pack_txs.get(tx_hash) or {}).get("counterparty")
+                        or ""
+                    ).strip().lower(),
                     "token_contract": str(row.get("contractAddress") or "").strip().lower(),
                     "checkout_id": tx_hash,
                 }
@@ -5134,16 +5923,19 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         if frm == wallet_norm and to in withdraw_targets:
             withdraw_token_ids.add(token_id)
 
-    effective_open_pack_txs: dict[str, dict] = dict(open_pack_txs)
-
     for tx in effective_open_pack_txs.values():
-        contract = str(tx.get("counterparty") or "").strip().lower()
+        contract = str(tx.get("pack_key") or tx.get("counterparty") or "").strip().lower()
         if not contract:
             continue
         amount = _to_decimal(tx.get("amount"))
+        pack_name = str(tx.get("pack_name") or "").strip()
         contract_open_count[contract] += 1
         contract_direct_count[contract] += 1
         contract_spent_total[contract] += amount
+        if pack_name:
+            contract_pack_counter[contract][pack_name] += 1
+            if contract not in contract_pack_name:
+                contract_pack_name[contract] = pack_name
         if amount > 0:
             contract_pull_price_counter[contract][amount] += 1
 
@@ -5173,6 +5965,10 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
                 contract_pack_name[contract] = contract.split("legacy-name:", 1)[1] or "Legacy Pack"
             elif contract.startswith("legacy:"):
                 contract_pack_name[contract] = f"Legacy Pack {_short_hex(contract.split('legacy:', 1)[1])}"
+            elif contract.startswith("payment:") or contract.startswith("activity:"):
+                parts = contract.split(":")
+                amount_label = parts[-1] if len(parts) >= 3 else ""
+                contract_pack_name[contract] = f"Unmatched Pack {amount_label} USDT".strip()
             else:
                 contract_pack_name[contract] = f"Contract {_short_hex(contract)}"
 
@@ -5272,19 +6068,24 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
     all_contracts = sorted(contract_open_count.keys())
     for contract in all_contracts:
         unit_price = _pick_contract_unit_price(contract_pull_price_counter.get(contract) or Counter())
-        pack_name = contract_pack_name.get(contract) or f"Contract {_short_hex(contract)}"
-        if unit_price > 0:
+        pack_counter = contract_pack_counter.get(contract) or Counter()
+        if pack_counter:
+            pack_name = pack_counter.most_common(1)[0][0]
+        else:
+            pack_name = contract_pack_name.get(contract) or f"Contract {_short_hex(contract)}"
+        should_cache_pack = _is_profile_cacheable_pack_key(contract)
+        if unit_price > 0 and should_cache_pack:
             pack_price_map_dirty = _record_pack_unit_price(
                 pack_price_map,
                 contract_key=contract,
                 pack_name=pack_name,
                 unit_price=unit_price,
             ) or pack_price_map_dirty
-        if _pack_name_is_real(pack_name, contract):
+        if should_cache_pack and _pack_name_is_real(pack_name, contract):
             pack_name_map_dirty = _record_pack_name(pack_name_map, contract, pack_name) or pack_name_map_dirty
-        is_legacy_pack = contract.startswith("legacy")
-        contract_full = "-" if is_legacy_pack else contract
-        contract_short = "-" if is_legacy_pack else _short_hex(contract)
+        is_virtual_pack = _is_profile_virtual_pack_key(contract)
+        contract_full = "-" if is_virtual_pack else contract
+        contract_short = "-" if is_virtual_pack else _short_hex(contract)
         contract_rows.append(
             {
                 "pack_name": pack_name,
