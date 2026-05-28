@@ -742,6 +742,195 @@ def _fetch_tx_receipt(cfg: OnchainConfig, tx_hash: str) -> dict[str, Any]:
     raise RuntimeError(f"bscscan receipt request failed: {last_err}")
 
 
+def _fetch_event_logs_page(
+    cfg: OnchainConfig,
+    *,
+    contract: str,
+    topic0: str,
+    from_block: int,
+    to_block: int,
+    page: int,
+) -> list[dict[str, Any]]:
+    page_limit = int(max(1, min(1000, cfg.page_size)))
+    params = {
+        "chainid": int(cfg.chain_id),
+        "module": "logs",
+        "action": "getLogs",
+        "address": str(contract or "").strip().lower(),
+        "fromBlock": int(max(0, from_block or 0)),
+        "toBlock": int(max(0, to_block or 0)) if int(to_block or 0) > 0 else "latest",
+        "topic0": str(topic0 or "").strip().lower(),
+        "page": int(page),
+        "offset": page_limit,
+        "apikey": cfg.api_key,
+    }
+    last_err: Exception | None = None
+    for attempt in range(1, max(1, cfg.retries) + 1):
+        try:
+            resp = requests.get(cfg.api_url, params=params, timeout=30)
+            status_code = int(resp.status_code or 0)
+            if status_code >= 500 or status_code == 429:
+                raise requests.HTTPError(f"HTTP {status_code}", response=resp)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("bscscan logs invalid response")
+
+            message = str(data.get("message") or "").strip()
+            result = data.get("result")
+            if message == "No records found":
+                return []
+            if isinstance(result, list):
+                return [x for x in result if isinstance(x, dict)]
+            if isinstance(result, str):
+                lowered = result.lower()
+                if "no records found" in lowered or "no transactions found" in lowered:
+                    return []
+                if "max rate limit" in lowered or "query timeout" in lowered:
+                    raise RuntimeError(result)
+            raise RuntimeError(f"bscscan logs error: {message or result}")
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt < max(1, cfg.retries):
+                time.sleep(max(0.2, cfg.backoff_sec) * (2 ** (attempt - 1)))
+                continue
+            break
+    raise RuntimeError(f"bscscan logs request failed: {last_err}")
+
+
+def _log_block_number(row: dict[str, Any]) -> int:
+    return _hex_to_int(row.get("blockNumber"))
+
+
+def _log_tx_hash(row: dict[str, Any]) -> str:
+    return str(row.get("transactionHash") or row.get("hash") or "").strip().lower()
+
+
+def _card_transfer_log_count(row: dict[str, Any], wallet: str) -> int:
+    wallet_norm = str(wallet or "").strip().lower()
+    topics = row.get("topics") if isinstance(row.get("topics"), list) else []
+    if not topics:
+        return 0
+    topic0 = str(topics[0] or "").strip().lower()
+    if topic0 == ERC721_TRANSFER_TOPIC:
+        return 1 if len(topics) >= 3 and _topic_address(topics[2]) == wallet_norm else 0
+    if topic0 == ERC1155_TRANSFER_SINGLE_TOPIC:
+        if len(topics) < 4 or _topic_address(topics[3]) != wallet_norm:
+            return 0
+        words = _hex_words(row.get("data"))
+        qty = int(words[1]) if len(words) >= 2 else 1
+        return max(1, qty)
+    if topic0 == ERC1155_TRANSFER_BATCH_TOPIC:
+        if len(topics) < 4 or _topic_address(topics[3]) != wallet_norm:
+            return 0
+        return max(1, _erc1155_batch_value_count(row.get("data")))
+    return 0
+
+
+def _scan_card_transfer_counts_by_tx_wallet(
+    cfg: OnchainConfig,
+    *,
+    from_block: int,
+    to_block: int,
+) -> tuple[dict[tuple[str, str], int], dict[str, int]]:
+    card_contract = str(cfg.card_contract or "").strip().lower()
+    if not card_contract:
+        return {}, {"api_calls": 0, "rows_scanned": 0}
+
+    counts: dict[tuple[str, str], int] = {}
+    api_calls = 0
+    rows_scanned = 0
+    limit = int(max(1, min(1000, cfg.page_size)))
+    max_pages_per_window = max(1, 10000 // limit)
+    topics = (
+        ERC721_TRANSFER_TOPIC,
+        ERC1155_TRANSFER_SINGLE_TOPIC,
+        ERC1155_TRANSFER_BATCH_TOPIC,
+    )
+    default_chunk = int(_to_decimal(os.getenv("PACK_RANK_CARD_LOG_BLOCK_CHUNK", "50000")) or 50000)
+    block_chunk = max(1000, default_chunk)
+    final_to_block = int(max(0, to_block or 0))
+    for topic0 in topics:
+        current_start_block = int(max(0, from_block or 0))
+        while current_start_block > 0 and (final_to_block <= 0 or current_start_block <= final_to_block):
+            current_to_block = (
+                min(final_to_block, current_start_block + block_chunk - 1)
+                if final_to_block > 0
+                else current_start_block + block_chunk - 1
+            )
+            page = 1
+            max_block_seen = current_start_block
+            while True:
+                if page > max_pages_per_window:
+                    next_start_block = int(max(max_block_seen, current_start_block) + 1)
+                    if next_start_block <= current_start_block:
+                        current_start_block = current_to_block + 1
+                    else:
+                        current_start_block = next_start_block
+                    break
+
+                try:
+                    rows = _fetch_event_logs_page(
+                        cfg,
+                        contract=card_contract,
+                        topic0=topic0,
+                        from_block=current_start_block,
+                        to_block=current_to_block,
+                        page=page,
+                    )
+                except Exception as e:
+                    text = str(e).lower()
+                    if block_chunk > 1000 and ("query timeout" in text or "timeout" in text):
+                        block_chunk = max(1000, block_chunk // 2)
+                        print(
+                            "[WARN] card_transfer_logs reducing block chunk "
+                            f"topic={topic0[:10]} chunk={block_chunk} error={e}",
+                            flush=True,
+                        )
+                        break
+                    raise
+                api_calls += 1
+                if not rows:
+                    current_start_block = current_to_block + 1
+                    break
+                for row in rows:
+                    rows_scanned += 1
+                    block = _log_block_number(row)
+                    if block > max_block_seen:
+                        max_block_seen = block
+                    tx_hash = _log_tx_hash(row)
+                    if not tx_hash:
+                        continue
+                    topics_row = row.get("topics") if isinstance(row.get("topics"), list) else []
+                    to_addr = ""
+                    if topic0 == ERC721_TRANSFER_TOPIC and len(topics_row) >= 3:
+                        to_addr = _topic_address(topics_row[2])
+                    elif (
+                        topic0 in (ERC1155_TRANSFER_SINGLE_TOPIC, ERC1155_TRANSFER_BATCH_TOPIC)
+                        and len(topics_row) >= 4
+                    ):
+                        to_addr = _topic_address(topics_row[3])
+                    if not to_addr:
+                        continue
+                    qty = _card_transfer_log_count(row, to_addr)
+                    if qty <= 0:
+                        continue
+                    key = (tx_hash, to_addr)
+                    counts[key] = counts.get(key, 0) + int(qty)
+                if len(rows) < limit:
+                    current_start_block = current_to_block + 1
+                    break
+                page += 1
+            print(
+                "[PROGRESS] card_transfer_logs "
+                f"topic={topic0[:10]} block={min(current_start_block - 1, current_to_block)}/{final_to_block or '-'} "
+                f"rows={rows_scanned} api_calls={api_calls}",
+                flush=True,
+            )
+
+    return counts, {"api_calls": int(api_calls), "rows_scanned": int(rows_scanned)}
+
+
 def _receipt_card_transfer_count(cfg: OnchainConfig, tx_hash: str, wallet: str) -> int:
     card_contract = str(cfg.card_contract or "").strip().lower()
     if not card_contract:
@@ -871,6 +1060,8 @@ def scan_pack_open_counts_incremental(
     receipt_failed = 0
     multi_open_txs = 0
     fallback_open_txs = 0
+    card_transfer_log_api_calls = 0
+    card_transfer_log_rows_scanned = 0
     window_start_block = 0
     if reset_applied and start_ts > 0:
         try:
@@ -879,6 +1070,23 @@ def scan_pack_open_counts_incremental(
         except Exception:
             # Fallback to full contract scan when block-by-time endpoint is unavailable.
             window_start_block = 0
+
+    card_transfer_counts: dict[tuple[str, str], int] = {}
+    card_transfer_log_scan_ok = False
+    if reset_applied and cfg.card_contract and window_start_block > 0:
+        try:
+            window_end_block = _fetch_block_number_by_timestamp(cfg, end_ts) if end_ts > 0 else 0
+            api_calls += 1
+            card_transfer_counts, card_transfer_stats = _scan_card_transfer_counts_by_tx_wallet(
+                cfg,
+                from_block=window_start_block,
+                to_block=window_end_block,
+            )
+            card_transfer_log_api_calls = int(card_transfer_stats.get("api_calls") or 0)
+            card_transfer_log_rows_scanned = int(card_transfer_stats.get("rows_scanned") or 0)
+            card_transfer_log_scan_ok = True
+        except Exception as e:
+            raise RuntimeError(f"card transfer log scan failed for pack_rank full rebuild: {e}") from e
 
     limit = int(max(1, min(1000, cfg.page_size)))
     max_pages_per_window = max(1, 10000 // limit)
@@ -958,14 +1166,20 @@ def scan_pack_open_counts_incremental(
                 open_count = 1
                 receipt_count_found = False
                 if cfg.card_contract:
-                    try:
-                        receipt_api_calls += 1
-                        receipt_count = _receipt_card_transfer_count(cfg, tx_hash, from_addr)
+                    if card_transfer_log_scan_ok:
+                        receipt_count = int(card_transfer_counts.get((tx_hash, from_addr)) or 0)
                         if receipt_count > 0:
                             receipt_count_found = True
                             open_count = int(receipt_count)
-                    except Exception:
-                        receipt_failed += 1
+                    else:
+                        try:
+                            receipt_api_calls += 1
+                            receipt_count = _receipt_card_transfer_count(cfg, tx_hash, from_addr)
+                            if receipt_count > 0:
+                                receipt_count_found = True
+                                open_count = int(receipt_count)
+                        except Exception:
+                            receipt_failed += 1
                     if not receipt_count_found:
                         fallback_open_txs += 1
                     elif open_count > 1:
@@ -1008,7 +1222,9 @@ def scan_pack_open_counts_incremental(
             "scan_mode": "contract_center_incremental",
             "api_calls": int(api_calls),
             "receipt_api_calls": int(receipt_api_calls),
+            "card_transfer_log_api_calls": int(card_transfer_log_api_calls),
             "rows_scanned": int(rows_scanned),
+            "card_transfer_log_rows_scanned": int(card_transfer_log_rows_scanned),
             "receipt_failed": int(receipt_failed),
             "multi_open_txs": int(multi_open_txs),
             "fallback_open_txs": int(fallback_open_txs),

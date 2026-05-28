@@ -435,7 +435,9 @@ def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, An
         "monthly_gacha_scan_mode": str(stats.get("scan_mode") or "contract_center_incremental"),
         "monthly_gacha_scan_api_calls": int(_to_int(stats.get("api_calls"), 0)),
         "monthly_gacha_receipt_api_calls": int(_to_int(stats.get("receipt_api_calls"), 0)),
+        "monthly_gacha_card_transfer_log_api_calls": int(_to_int(stats.get("card_transfer_log_api_calls"), 0)),
         "monthly_gacha_scan_rows_scanned": int(_to_int(stats.get("rows_scanned"), 0)),
+        "monthly_gacha_card_transfer_log_rows_scanned": int(_to_int(stats.get("card_transfer_log_rows_scanned"), 0)),
         "monthly_gacha_receipt_failed": int(_to_int(stats.get("receipt_failed"), 0)),
         "monthly_gacha_multi_open_txs": int(_to_int(stats.get("multi_open_txs"), 0)),
         "monthly_gacha_fallback_open_txs": int(_to_int(stats.get("fallback_open_txs"), 0)),
@@ -467,7 +469,9 @@ def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, An
         "duration_sec": duration_sec,
         "api_calls": int(_to_int(stats.get("api_calls"), 0)),
         "receipt_api_calls": int(_to_int(stats.get("receipt_api_calls"), 0)),
+        "card_transfer_log_api_calls": int(_to_int(stats.get("card_transfer_log_api_calls"), 0)),
         "rows_scanned": int(_to_int(stats.get("rows_scanned"), 0)),
+        "card_transfer_log_rows_scanned": int(_to_int(stats.get("card_transfer_log_rows_scanned"), 0)),
         "receipt_failed": int(_to_int(stats.get("receipt_failed"), 0)),
         "multi_open_txs": int(_to_int(stats.get("multi_open_txs"), 0)),
         "fallback_open_txs": int(_to_int(stats.get("fallback_open_txs"), 0)),
@@ -495,7 +499,8 @@ def main() -> int:
     msg = (
         f"trigger={cfg.trigger} scan_mode={result['scan_mode']} wallets={result['wallet_count']} "
         f"api_calls={result['api_calls']} receipt_calls={result['receipt_api_calls']} "
-        f"rows_scanned={result['rows_scanned']} multi_open_txs={result['multi_open_txs']} "
+        f"card_log_calls={result['card_transfer_log_api_calls']} rows_scanned={result['rows_scanned']} "
+        f"multi_open_txs={result['multi_open_txs']} "
         f"receipt_failed={result['receipt_failed']} "
         f"reset={1 if result['reset_applied'] else 0} full_rebuild={1 if result['full_rebuild'] else 0} "
         f"duration_sec={result['duration_sec']:.2f}"
@@ -510,7 +515,9 @@ def main() -> int:
             "scan_mode": result["scan_mode"],
             "api_calls": result["api_calls"],
             "receipt_api_calls": result["receipt_api_calls"],
+            "card_transfer_log_api_calls": result["card_transfer_log_api_calls"],
             "rows_scanned": result["rows_scanned"],
+            "card_transfer_log_rows_scanned": result["card_transfer_log_rows_scanned"],
             "receipt_failed": result["receipt_failed"],
             "multi_open_txs": result["multi_open_txs"],
             "fallback_open_txs": result["fallback_open_txs"],
