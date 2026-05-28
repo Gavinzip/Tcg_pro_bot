@@ -3719,20 +3719,83 @@ def _known_profile_payment_pack_name(contract_key: str | None, amount: Decimal) 
     return ""
 
 
-def _profile_payment_has_local_pack_identity(payment_row: dict, pack_price_map: dict, pack_name_map: dict) -> bool:
+def _profile_amounts_match(left: Decimal, right: Decimal) -> bool:
+    return bool(left > 0 and right > 0 and abs(_to_decimal(left) - _to_decimal(right)) <= Decimal("0.000001"))
+
+
+def _profile_open_count_from_nft_quantity(quantity: Decimal | int | str | None) -> int:
+    qty = _to_decimal(quantity)
+    if qty <= 0:
+        return 1
+    count = int(qty.to_integral_value(rounding=ROUND_HALF_UP))
+    return max(1, count)
+
+
+def _profile_payment_unit_amount(payment_amount: Decimal, open_count: int) -> Decimal:
+    amount = _to_decimal(payment_amount)
+    count = max(1, int(open_count or 1))
+    if amount <= 0 or count <= 1:
+        return amount
+    return amount / Decimal(count)
+
+
+def _profile_nft_transfer_quantity(row: dict | None) -> Decimal:
+    if not isinstance(row, dict):
+        return Decimal("0")
+    for key in ("tokenValue", "tokenAmount", "amount"):
+        if row.get(key) in (None, ""):
+            continue
+        qty = _to_decimal(row.get(key))
+        if qty > 0:
+            return qty
+    return Decimal("1")
+
+
+def _profile_nft_row_is_card(row: dict | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    contract = str(row.get("contractAddress") or "").strip().lower()
+    card_contract = str(PROFILE_CHAIN_CARD_CONTRACT or "").strip().lower()
+    if card_contract and contract:
+        return contract == card_contract
+    symbol_filter = str(PROFILE_CHAIN_CARD_TOKEN_SYMBOL or "").strip().lower()
+    if symbol_filter:
+        sym = str(row.get("tokenSymbol") or "").strip().lower()
+        if sym and sym != symbol_filter:
+            return False
+    return True
+
+
+def _profile_hint_price_matches_payment(price: Decimal, payment_amount: Decimal, open_count: int = 1) -> bool:
+    unit_price = _to_decimal(price)
+    total_amount = _to_decimal(payment_amount)
+    count = max(1, int(open_count or 1))
+    if _profile_amounts_match(unit_price, total_amount):
+        return True
+    return bool(count > 1 and _profile_amounts_match(unit_price * Decimal(count), total_amount))
+
+
+def _profile_payment_has_local_pack_identity(
+    payment_row: dict,
+    pack_price_map: dict,
+    pack_name_map: dict,
+    *,
+    open_count: int = 1,
+) -> bool:
     if not isinstance(payment_row, dict):
         return False
     contract = str(payment_row.get("to") or "").strip().lower()
     amount = _tokentx_usdt_amount(payment_row)
-    if _known_profile_payment_pack_name(contract, amount):
+    unit_amount = _profile_payment_unit_amount(amount, open_count)
+    if _known_profile_payment_pack_name(contract, unit_amount):
         return True
     cached_name = _lookup_pack_name(pack_name_map, contract)
     cached_unit = _lookup_pack_unit_price(pack_price_map, contract_key=contract)
     return bool(
         cached_name
         and cached_unit > 0
-        and amount > 0
-        and abs(cached_unit - amount) <= Decimal("0.000001")
+        and unit_amount > 0
+        and _profile_amounts_match(cached_unit, unit_amount)
     )
 
 
@@ -4348,7 +4411,12 @@ def _fetch_pull_activity_hints(wallet_address: str, *, max_pages: int | None = N
     return hints
 
 
-def _match_pull_hints_to_payment_rows(payment_rows: list[dict], hints: list[dict]) -> dict[str, dict]:
+def _match_pull_hints_to_payment_rows(
+    payment_rows: list[dict],
+    hints: list[dict],
+    *,
+    open_count_by_tx: dict[str, int] | None = None,
+) -> dict[str, dict]:
     if not payment_rows or not hints:
         return {}
 
@@ -4373,6 +4441,7 @@ def _match_pull_hints_to_payment_rows(payment_rows: list[dict], hints: list[dict
         payment_amount = _tokentx_usdt_amount(row)
         if payment_ts <= 0 or payment_amount <= 0:
             continue
+        open_count = max(1, int((open_count_by_tx or {}).get(tx_hash) or 1))
 
         for hint in hints:
             if id(hint) in used_hint_ids:
@@ -4381,7 +4450,7 @@ def _match_pull_hints_to_payment_rows(payment_rows: list[dict], hints: list[dict
             if hint_tx_hash != tx_hash:
                 continue
             price = _to_decimal((hint or {}).get("price"))
-            if price <= 0 or abs(price - payment_amount) > Decimal("0.000001"):
+            if price <= 0 or not _profile_hint_price_matches_payment(price, payment_amount, open_count):
                 continue
             matched[tx_hash] = hint
             used_hint_ids.add(id(hint))
@@ -4402,7 +4471,7 @@ def _match_pull_hints_to_payment_rows(payment_rows: list[dict], hints: list[dict
             if delta > window_sec:
                 continue
             price = _to_decimal((hint or {}).get("price"))
-            if price <= 0 or abs(price - payment_amount) > Decimal("0.000001"):
+            if price <= 0 or not _profile_hint_price_matches_payment(price, payment_amount, open_count):
                 continue
             score = (delta, str((hint or {}).get("pack_key") or ""))
             if best_score is None or score < best_score:
@@ -5641,6 +5710,7 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
     )
     nft_in_txs: set[str] = set()
     nft_out_txs: set[str] = set()
+    nft_in_quantity_by_tx: defaultdict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     for row in nft_rows:
         tx_hash = str((row or {}).get("hash") or "").strip().lower()
         if not tx_hash:
@@ -5649,6 +5719,8 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         to = str((row or {}).get("to") or "").strip().lower()
         if to == wallet_norm:
             nft_in_txs.add(tx_hash)
+            if _profile_nft_row_is_card(row):
+                nft_in_quantity_by_tx[tx_hash] += _profile_nft_transfer_quantity(row)
         if frm == wallet_norm:
             nft_out_txs.add(tx_hash)
     pack_price_map = _load_pack_price_map()
@@ -5727,6 +5799,11 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         elif cls == "mp_sell":
             _upsert_tx(market_sell_txs, tx_hash, counterparty=frm, ts=ts, amount=amount)
 
+    open_count_by_tx: dict[str, int] = {
+        tx_hash: _profile_open_count_from_nft_quantity(nft_in_quantity_by_tx.get(tx_hash))
+        for tx_hash in open_pack_txs.keys()
+    }
+
     pull_hint_matches: dict[str, dict] = {}
     if open_pack_txs:
         payment_rows = [
@@ -5746,7 +5823,8 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
                     continue
                 payment_amount = _tokentx_usdt_amount(row)
                 hint_price = _to_decimal(cached_hint.get("price"))
-                if payment_amount > 0 and hint_price > 0 and abs(payment_amount - hint_price) <= Decimal("0.000001"):
+                open_count = max(1, int(open_count_by_tx.get(tx_hash) or 1))
+                if payment_amount > 0 and hint_price > 0 and _profile_hint_price_matches_payment(hint_price, payment_amount, open_count):
                     pull_hint_matches[tx_hash] = cached_hint
 
             receipt_payment_rows = []
@@ -5759,10 +5837,11 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
                     continue
                 counterparty = str(row.get("to") or "").strip().lower()
                 amount = _tokentx_usdt_amount(row)
-                if _profile_payment_has_local_pack_identity(row, pack_price_map, pack_name_map):
+                open_count = max(1, int(open_count_by_tx.get(tx_hash) or 1))
+                if _profile_payment_has_local_pack_identity(row, pack_price_map, pack_name_map, open_count=open_count):
                     continue
                 # OMEGA's current/test split is amount-based; its receipt topic is checkout id, not pack id.
-                if counterparty == PROFILE_TEST_OMEGA_CONTRACT and _known_profile_payment_pack_name(counterparty, amount):
+                if counterparty == PROFILE_TEST_OMEGA_CONTRACT and _known_profile_payment_pack_name(counterparty, _profile_payment_unit_amount(amount, open_count)):
                     continue
                 receipt_payment_rows.append(row)
             if receipt_payment_rows:
@@ -5804,7 +5883,12 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
                     str(row.get("hash") or "").strip().lower() not in pull_hint_matches
                     or not str((pull_hint_matches.get(str(row.get("hash") or "").strip().lower()) or {}).get("pack_name") or "").strip()
                 )
-                and not _profile_payment_has_local_pack_identity(row, pack_price_map, pack_name_map)
+                and not _profile_payment_has_local_pack_identity(
+                    row,
+                    pack_price_map,
+                    pack_name_map,
+                    open_count=max(1, int(open_count_by_tx.get(str(row.get("hash") or "").strip().lower()) or 1)),
+                )
             ]
             if missing_payment_rows and PROFILE_CHAIN_PULL_HINT_MAX_PAGES > 0:
                 try:
@@ -5812,7 +5896,11 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
                         wallet_norm,
                         max_pages=PROFILE_CHAIN_PULL_HINT_MAX_PAGES,
                     )
-                    official_matches = _match_pull_hints_to_payment_rows(missing_payment_rows, pull_hints)
+                    official_matches = _match_pull_hints_to_payment_rows(
+                        missing_payment_rows,
+                        pull_hints,
+                        open_count_by_tx=open_count_by_tx,
+                    )
                     for tx_hash, hint in official_matches.items():
                         existing_hint = pull_hint_matches.get(tx_hash)
                         merged_hint = _merge_profile_pack_hints(existing_hint, hint)
@@ -5828,6 +5916,8 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
     for tx_hash, tx in open_pack_txs.items():
         key = str(tx_hash or "").strip().lower()
         effective = dict(tx)
+        open_count = max(1, int(open_count_by_tx.get(key) or 1))
+        effective["open_count"] = open_count
         amount = _to_decimal(effective.get("amount"))
         counterparty = str(effective.get("counterparty") or "").strip().lower()
         hint = pull_hint_matches.get(key)
@@ -5843,7 +5933,7 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
             if pack_name:
                 effective["pack_name"] = pack_name
             if price > 0:
-                effective["amount"] = price
+                effective["unit_amount"] = price
             if _is_profile_virtual_pack_key(pack_key):
                 contract_display = str(contract_display or counterparty).strip().lower()
                 if contract_display:
@@ -5867,6 +5957,29 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
             if pack_name:
                 effective["pack_name"] = pack_name
             effective["pack_source"] = "payment_contract"
+
+        unit_amount = _to_decimal(effective.get("unit_amount"))
+        derived_unit_amount = _profile_payment_unit_amount(amount, open_count)
+        if derived_unit_amount > 0:
+            unit_amount = derived_unit_amount
+            effective["unit_amount"] = unit_amount
+
+        if open_count > 1 and counterparty:
+            cached_name = _lookup_pack_name(pack_name_map, counterparty)
+            cached_unit = _lookup_pack_unit_price(pack_price_map, contract_key=counterparty)
+            known_payment_name = _known_profile_payment_pack_name(counterparty, unit_amount)
+            if known_payment_name:
+                effective["pack_key"] = _profile_amount_pack_key(counterparty, unit_amount)
+                effective["pack_name"] = known_payment_name
+                effective["contract_display"] = counterparty
+            elif cached_name and (cached_unit <= 0 or _profile_amounts_match(cached_unit, unit_amount)):
+                effective["pack_key"] = counterparty
+                effective["pack_name"] = cached_name
+            elif str(effective.get("pack_key") or "").strip().lower().startswith("payment:"):
+                effective["pack_key"] = _profile_amount_pack_key(counterparty, unit_amount)
+                amount_key = _format_usdt_decimal(unit_amount).replace(",", "")
+                effective["pack_name"] = f"Unmatched Pack {amount_key} USDT"
+                effective["contract_display"] = counterparty
         effective_open_pack_txs[key] = effective
 
     contract_pull_price_counter: defaultdict[str, Counter] = defaultdict(Counter)
@@ -5895,7 +6008,7 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         if not token_id:
             continue
 
-        if to == wallet_norm and tx_hash in effective_open_pack_txs:
+        if to == wallet_norm and tx_hash in effective_open_pack_txs and _profile_nft_row_is_card(row):
             open_pack_tokens_by_tx[tx_hash].add(token_id)
             current = release_cards_by_token.get(token_id) or {}
             current_ts = int(_parse_int(current.get("timestamp_raw")) or 0)
@@ -5927,17 +6040,21 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         contract = str(tx.get("pack_key") or tx.get("counterparty") or "").strip().lower()
         if not contract:
             continue
+        open_count = max(1, int(_parse_int(tx.get("open_count")) or 1))
         amount = _to_decimal(tx.get("amount"))
+        unit_amount = _to_decimal(tx.get("unit_amount"))
+        if unit_amount <= 0:
+            unit_amount = _profile_payment_unit_amount(amount, open_count)
         pack_name = str(tx.get("pack_name") or "").strip()
-        contract_open_count[contract] += 1
-        contract_direct_count[contract] += 1
+        contract_open_count[contract] += open_count
+        contract_direct_count[contract] += open_count
         contract_spent_total[contract] += amount
         if pack_name:
-            contract_pack_counter[contract][pack_name] += 1
+            contract_pack_counter[contract][pack_name] += open_count
             if contract not in contract_pack_name:
                 contract_pack_name[contract] = pack_name
-        if amount > 0:
-            contract_pull_price_counter[contract][amount] += 1
+        if unit_amount > 0:
+            contract_pull_price_counter[contract][unit_amount] += open_count
 
     unresolved_pack_name_contracts: set[str] = set()
     for contract in sorted(contract_open_count.keys()):
@@ -6001,7 +6118,8 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         tx = effective_open_pack_txs.get(tx_hash) or open_pack_txs.get(tx_hash) or {}
         total_amount = _to_decimal(tx.get("amount"))
         ts = int(_parse_int(tx.get("timestamp")) or 0)
-        per_token_cost = (total_amount / Decimal(len(tokens))) if total_amount > 0 else Decimal("0")
+        open_count = max(1, int(_parse_int(tx.get("open_count")) or len(tokens) or 1))
+        per_token_cost = (total_amount / Decimal(open_count)) if total_amount > 0 else Decimal("0")
         for token_id in tokens:
             _remember_token_cost(token_pull_cost_by_ts, token_id, per_token_cost, ts)
 
@@ -6107,9 +6225,12 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
     if pack_name_map_dirty:
         _save_pack_name_map(pack_name_map)
 
-    opened_pack_ids = set(effective_open_pack_txs.keys())
+    opened_pack_count = sum(
+        (max(1, int(_parse_int(v.get("open_count")) or 1)) for v in effective_open_pack_txs.values()),
+        0,
+    )
     activity_rows = []
-    open_count = len(opened_pack_ids)
+    open_count = opened_pack_count
     buyback_count = len(buyback_txs)
     market_buy_count = len(market_buy_txs)
     market_sell_count = len(market_sell_txs)
@@ -6228,8 +6349,8 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         "history_range": history_range,
         "wallet_short": f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm,
         "activity_total_count": len(usdt_rows) + len(nft_rows),
-        "opened_packs_count": len(opened_pack_ids),
-        "direct_price_count": len(effective_open_pack_txs),
+        "opened_packs_count": opened_pack_count,
+        "direct_price_count": opened_pack_count,
         "inferred_price_count": 0,
         "unknown_price_count": 0,
         "pack_spent_total": pack_spent_total,
