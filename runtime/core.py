@@ -10970,6 +10970,9 @@ async def _run_ranking_sync_script(
 
     success = False
     async with RANK_SYNC_SCRIPT_LOCK:
+        proc_env = os.environ.copy()
+        if full_rebuild or full_rebuild_all:
+            proc_env["BOOTSTRAP_FROM_GIT"] = "0"
         RANK_SYNC_CURRENT_JOB = {
             "trigger": trigger,
             "started_at": datetime.now(_safe_tzinfo(RANK_SYNC_TZ)).isoformat(),
@@ -10991,6 +10994,7 @@ async def _run_ranking_sync_script(
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=BASE_DIR,
+                env=proc_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

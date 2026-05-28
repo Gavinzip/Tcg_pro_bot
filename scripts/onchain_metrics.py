@@ -25,6 +25,12 @@ class OnchainConfig:
     retries: int
     backoff_sec: float
     withdraw_addresses: tuple[str, ...] = ()
+    card_contract: str = ""
+
+
+ERC721_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+ERC1155_TRANSFER_SINGLE_TOPIC = "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62"
+ERC1155_TRANSFER_BATCH_TOPIC = "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb"
 
 
 def _to_decimal(v: Any) -> Decimal:
@@ -621,6 +627,153 @@ def _row_hash(row: dict[str, Any]) -> str:
     return str(row.get("hash") or "").strip().lower()
 
 
+def _topic_address(topic: Any) -> str:
+    raw = str(topic or "").strip().lower()
+    if raw.startswith("0x"):
+        raw = raw[2:]
+    if len(raw) < 40:
+        return ""
+    return "0x" + raw[-40:]
+
+
+def _hex_to_int(raw: Any) -> int:
+    text = str(raw or "").strip().lower()
+    if text.startswith("0x"):
+        text = text[2:]
+    if not text:
+        return 0
+    try:
+        return int(text, 16)
+    except ValueError:
+        return 0
+
+
+def _hex_words(data: Any) -> list[int]:
+    raw = str(data or "").strip().lower()
+    if raw.startswith("0x"):
+        raw = raw[2:]
+    if len(raw) < 64:
+        return []
+    return [_hex_to_int(raw[idx : idx + 64]) for idx in range(0, len(raw) - 63, 64)]
+
+
+def _erc1155_batch_value_count(data: Any) -> int:
+    words = _hex_words(data)
+    if len(words) < 3:
+        return 0
+    values_offset_words = int(words[1] // 32)
+    if values_offset_words < 0 or values_offset_words >= len(words):
+        return 0
+    values_len = int(words[values_offset_words])
+    first_value_idx = values_offset_words + 1
+    if values_len <= 0 or first_value_idx >= len(words):
+        return 0
+    return sum(max(0, int(x)) for x in words[first_value_idx : first_value_idx + values_len])
+
+
+def _nft_transfer_quantity(row: dict[str, Any]) -> int:
+    for key in ("tokenValue", "tokenAmount", "amount"):
+        raw = row.get(key)
+        if raw in (None, ""):
+            continue
+        qty = int(_to_decimal(raw) or 0)
+        if qty > 0:
+            return qty
+    return 1
+
+
+def _nft_row_is_card(cfg: OnchainConfig, row: dict[str, Any]) -> bool:
+    card_contract = str(cfg.card_contract or "").strip().lower()
+    contract = str(row.get("contractAddress") or row.get("address") or "").strip().lower()
+    if card_contract and contract:
+        return contract == card_contract
+    return True
+
+
+def _count_card_nft_in_by_tx(
+    cfg: OnchainConfig,
+    wallet: str,
+    nft_rows: list[dict[str, Any]],
+) -> dict[str, int]:
+    wallet_norm = str(wallet or "").strip().lower()
+    out: dict[str, int] = {}
+    for row in nft_rows:
+        if not isinstance(row, dict) or not _nft_row_is_card(cfg, row):
+            continue
+        tx_hash = _row_hash(row)
+        if not tx_hash:
+            continue
+        to_addr = str(row.get("to") or "").strip().lower()
+        if to_addr != wallet_norm:
+            continue
+        out[tx_hash] = out.get(tx_hash, 0) + max(1, _nft_transfer_quantity(row))
+    return out
+
+
+def _fetch_tx_receipt(cfg: OnchainConfig, tx_hash: str) -> dict[str, Any]:
+    params = {
+        "chainid": int(cfg.chain_id),
+        "module": "proxy",
+        "action": "eth_getTransactionReceipt",
+        "txhash": str(tx_hash or "").strip().lower(),
+        "apikey": cfg.api_key,
+    }
+    last_err: Exception | None = None
+    for attempt in range(1, max(1, cfg.retries) + 1):
+        try:
+            resp = requests.get(cfg.api_url, params=params, timeout=30)
+            status_code = int(resp.status_code or 0)
+            if status_code >= 500 or status_code == 429:
+                raise requests.HTTPError(f"HTTP {status_code}", response=resp)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("bscscan receipt invalid response")
+            result = data.get("result")
+            if isinstance(result, dict):
+                return result
+            raise RuntimeError(f"bscscan receipt error: {data.get('message') or result}")
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt < max(1, cfg.retries):
+                time.sleep(max(0.2, cfg.backoff_sec) * (2 ** (attempt - 1)))
+                continue
+            break
+    raise RuntimeError(f"bscscan receipt request failed: {last_err}")
+
+
+def _receipt_card_transfer_count(cfg: OnchainConfig, tx_hash: str, wallet: str) -> int:
+    card_contract = str(cfg.card_contract or "").strip().lower()
+    if not card_contract:
+        return 0
+    wallet_norm = str(wallet or "").strip().lower()
+    receipt = _fetch_tx_receipt(cfg, tx_hash)
+    logs = receipt.get("logs") if isinstance(receipt.get("logs"), list) else []
+    total = 0
+    for row in logs:
+        if not isinstance(row, dict):
+            continue
+        contract = str(row.get("address") or "").strip().lower()
+        if contract != card_contract:
+            continue
+        topics = row.get("topics") if isinstance(row.get("topics"), list) else []
+        if not topics:
+            continue
+        topic0 = str(topics[0] or "").strip().lower()
+        if topic0 == ERC721_TRANSFER_TOPIC:
+            if len(topics) >= 3 and _topic_address(topics[2]) == wallet_norm:
+                total += 1
+        elif topic0 == ERC1155_TRANSFER_SINGLE_TOPIC:
+            if len(topics) >= 4 and _topic_address(topics[3]) == wallet_norm:
+                words = _hex_words(row.get("data"))
+                qty = int(words[1]) if len(words) >= 2 else 1
+                total += max(1, qty)
+        elif topic0 == ERC1155_TRANSFER_BATCH_TOPIC:
+            if len(topics) >= 4 and _topic_address(topics[3]) == wallet_norm:
+                total += max(1, _erc1155_batch_value_count(row.get("data")))
+    return total
+
+
 def _fetch_block_number_by_timestamp(cfg: OnchainConfig, ts: int) -> int:
     params = {
         "chainid": int(cfg.chain_id),
@@ -714,6 +867,10 @@ def scan_pack_open_counts_incremental(
 
     api_calls = 0
     rows_scanned = 0
+    receipt_api_calls = 0
+    receipt_failed = 0
+    multi_open_txs = 0
+    fallback_open_txs = 0
     window_start_block = 0
     if reset_applied and start_ts > 0:
         try:
@@ -798,7 +955,22 @@ def scan_pack_open_counts_incremental(
                     continue
                 if from_addr == contract:
                     continue
-                wallet_counts[from_addr] = wallet_counts.get(from_addr, 0) + 1
+                open_count = 1
+                receipt_count_found = False
+                if cfg.card_contract:
+                    try:
+                        receipt_api_calls += 1
+                        receipt_count = _receipt_card_transfer_count(cfg, tx_hash, from_addr)
+                        if receipt_count > 0:
+                            receipt_count_found = True
+                            open_count = int(receipt_count)
+                    except Exception:
+                        receipt_failed += 1
+                    if not receipt_count_found:
+                        fallback_open_txs += 1
+                    elif open_count > 1:
+                        multi_open_txs += 1
+                wallet_counts[from_addr] = wallet_counts.get(from_addr, 0) + max(1, int(open_count))
 
             if stop_on_window_end:
                 break
@@ -835,7 +1007,11 @@ def scan_pack_open_counts_incremental(
         "stats": {
             "scan_mode": "contract_center_incremental",
             "api_calls": int(api_calls),
+            "receipt_api_calls": int(receipt_api_calls),
             "rows_scanned": int(rows_scanned),
+            "receipt_failed": int(receipt_failed),
+            "multi_open_txs": int(multi_open_txs),
+            "fallback_open_txs": int(fallback_open_txs),
             "contracts": contract_stats,
             "reset_applied": bool(reset_applied),
             "window_start_ts": int(start_ts),
@@ -974,7 +1150,12 @@ def _count_open_pack_txs(
     usdt_rows: list[dict[str, Any]],
     nft_rows: list[dict[str, Any]],
 ) -> int:
-    return len(_open_pack_tx_hashes(cfg, wallet, usdt_rows, nft_rows))
+    open_pack_hashes = _open_pack_tx_hashes(cfg, wallet, usdt_rows, nft_rows)
+    nft_in_count_by_tx = _count_card_nft_in_by_tx(cfg, wallet, nft_rows)
+    total = 0
+    for tx_hash in open_pack_hashes:
+        total += max(1, int(nft_in_count_by_tx.get(tx_hash) or 0))
+    return total
 
 
 def scan_wallet_open_counts_by_time_incremental(

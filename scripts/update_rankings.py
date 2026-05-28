@@ -700,6 +700,7 @@ class RankingConfig:
     full_rebuild_days: int
     full_rebuild_active_only: bool
     metrics_source: str
+    monthly_pack_source: str
     onchain_api_url: str
     onchain_chain_id: int
     onchain_api_key: str
@@ -741,6 +742,14 @@ class RankingConfig:
     @property
     def pack_rank_state_path(self) -> Path:
         return self.data_dir / "state" / "pack_rank_state.json"
+
+    @property
+    def pack_rank_latest_path(self) -> Path:
+        return self.data_dir / "pack_rank_latest.json"
+
+    @property
+    def monthly_pack_scan_state_path(self) -> Path:
+        return self.data_dir / "state" / "ranking_monthly_pack_state.json"
 
     def history_path(self, now_dt: datetime) -> Path:
         key = now_dt.strftime("%Y-%m-%d_%H")
@@ -807,6 +816,9 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
     metrics_source = str(os.getenv("RANK_METRICS_SOURCE", "hybrid")).strip().lower() or "hybrid"
     if metrics_source not in ("official", "onchain", "hybrid"):
         raise RuntimeError("RANK_METRICS_SOURCE must be official, onchain, or hybrid")
+    monthly_pack_source = str(os.getenv("RANK_MONTHLY_PACK_SOURCE", "pack_rank_latest")).strip().lower()
+    if monthly_pack_source not in ("pack_rank_latest", "onchain", "none"):
+        raise RuntimeError("RANK_MONTHLY_PACK_SOURCE must be pack_rank_latest, onchain, or none")
 
     onchain_api_url = str(os.getenv("BSCSCAN_API_URL", "https://api.etherscan.io/v2/api")).strip() or "https://api.etherscan.io/v2/api"
     onchain_chain_id = max(1, int(os.getenv("BSCSCAN_CHAIN_ID", "56")))
@@ -857,6 +869,7 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
         if bool(getattr(args, "full_rebuild_all", False))
         else _env_bool("RANK_SYNC_FULL_REBUILD_ACTIVE_ONLY", True),
         metrics_source=metrics_source,
+        monthly_pack_source=monthly_pack_source,
         onchain_api_url=onchain_api_url,
         onchain_chain_id=onchain_chain_id,
         onchain_api_key=onchain_api_key,
@@ -1057,6 +1070,41 @@ def git_push_market_cache(cfg: RankingConfig, commit_message: str) -> str:
     return head.stdout.strip() or "unknown"
 
 
+def _payload_updated_at_ts(path: Path) -> float | None:
+    data = _json_load(path)
+    if not isinstance(data, dict) or not data:
+        return None
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    raw = data.get("updated_at") or meta.get("updated_at")
+    dt = _parse_iso_dt(str(raw or ""))
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return float(dt.timestamp())
+
+
+def _should_bootstrap_ranking_payload(local_latest: Path, repo_latest: Path) -> bool:
+    if not repo_latest.exists():
+        return False
+    if not local_latest.exists():
+        return True
+
+    repo_ts = _payload_updated_at_ts(repo_latest)
+    local_ts = _payload_updated_at_ts(local_latest)
+    if repo_ts is not None and local_ts is not None:
+        return repo_ts > local_ts
+    if repo_ts is not None and local_ts is None:
+        return True
+    if repo_ts is None and local_ts is not None:
+        return False
+
+    try:
+        return repo_latest.stat().st_mtime > local_latest.stat().st_mtime
+    except OSError:
+        return False
+
+
 def bootstrap_from_git(cfg: RankingConfig) -> bool:
     if not cfg.backup_git_enabled:
         return False
@@ -1065,6 +1113,13 @@ def bootstrap_from_git(cfg: RankingConfig) -> bool:
         git_pull(cfg, repo_dir)
     repo_latest = cfg.repo_dataset_dir / "latest.json"
     if not repo_latest.exists():
+        return False
+    if not _should_bootstrap_ranking_payload(cfg.latest_path, repo_latest):
+        print(
+            "[INFO] bootstrap_from_git skipped: local ranking latest is newer or same "
+            f"local={cfg.latest_path} repo={repo_latest}",
+            flush=True,
+        )
         return False
 
     cfg.latest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1188,6 +1243,69 @@ def load_activity_checkpoints(cfg: RankingConfig) -> dict[str, dict[str, Any]]:
 def load_pack_rank_state(cfg: RankingConfig) -> dict[str, Any]:
     data = _json_load(cfg.pack_rank_state_path)
     return data if isinstance(data, dict) else {}
+
+
+def load_monthly_pack_counts_from_latest(
+    cfg: RankingConfig,
+    *,
+    expected_window_start: str,
+) -> tuple[dict[str, int], dict[str, Any], str]:
+    path = cfg.pack_rank_latest_path
+    payload = _json_load(path)
+    if not isinstance(payload, dict) or not payload:
+        return (
+            {},
+            {
+                "scan_mode": "pack_rank_latest_unavailable",
+                "api_calls": 0,
+                "rows_scanned": 0,
+                "reset_applied": False,
+                "source_latest_path": str(path),
+            },
+            f"pack_rank_latest not readable: {path}",
+        )
+
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    source_window_start = str(meta.get("monthly_gacha_window_start") or "").strip()
+    if expected_window_start and source_window_start != expected_window_start:
+        return (
+            {},
+            {
+                "scan_mode": "pack_rank_latest_window_mismatch",
+                "api_calls": 0,
+                "rows_scanned": 0,
+                "reset_applied": False,
+                "source_latest_path": str(path),
+                "source_window_start": source_window_start,
+            },
+            (
+                "pack_rank_latest monthly window mismatch: "
+                f"expected={expected_window_start} actual={source_window_start or '-'}"
+            ),
+        )
+
+    rows = payload.get("wallets") if isinstance(payload.get("wallets"), list) else []
+    counts: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        addr = str(row.get("address") or "").strip().lower()
+        if not addr.startswith("0x") or len(addr) != 42:
+            continue
+        counts[addr] = max(0, int(_to_decimal(row.get("monthly_gacha_open_count"))))
+
+    stats = {
+        "scan_mode": "pack_rank_latest",
+        "api_calls": 0,
+        "rows_scanned": len(rows),
+        "reset_applied": False,
+        "source_latest_path": str(path),
+        "source_updated_at": str(meta.get("updated_at") or ""),
+        "source_wallet_count": int(_to_decimal(meta.get("wallet_count")) or len(rows)),
+        "source_total_monthly_opens": int(_to_decimal(meta.get("total_monthly_opens")) or 0),
+        "source_wallet_migration_pairs": int(_to_decimal(meta.get("wallet_migration_pairs")) or 0),
+    }
+    return counts, stats, ""
 
 
 def build_checkpoint_dump(
@@ -1330,6 +1448,12 @@ def _build_onchain_cfg(cfg: RankingConfig) -> OnchainConfig:
         retries=API_MAX_RETRIES,
         backoff_sec=API_RETRY_BACKOFF_SEC,
         withdraw_addresses=tuple(sorted(_withdraw_target_set())),
+        card_contract=str(
+            os.getenv(
+                "PROFILE_CHAIN_CARD_CONTRACT",
+                os.getenv("WALLET_MIGRATION_CARD_CONTRACT", "0xf8646a3ca093e97bb404c3b25e675c0394dd5b30"),
+            )
+        ).strip().lower(),
     )
 
 
@@ -1827,7 +1951,7 @@ def build_payload(
                 "hunter": "top50",
                 "seeker": "top200",
             },
-            "monthly_gacha_scan_mode": str((monthly_pack_scan_stats or {}).get("scan_mode") or "wallet_time_incremental"),
+            "monthly_gacha_scan_mode": str((monthly_pack_scan_stats or {}).get("scan_mode") or "none"),
             "monthly_gacha_scan_api_calls": int(_to_decimal((monthly_pack_scan_stats or {}).get("api_calls")) or 0),
             "monthly_gacha_scan_rows_scanned": int(_to_decimal((monthly_pack_scan_stats or {}).get("rows_scanned")) or 0),
             "monthly_gacha_scan_reset": bool((monthly_pack_scan_stats or {}).get("reset_applied")),
@@ -1909,9 +2033,23 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     monthly_pack_counts_map: dict[str, int] = {}
     monthly_pack_scan_stats: dict[str, Any] | None = None
     monthly_pack_scan_ok = False
-    if pack_rank_onchain_cfg is not None:
+    if cfg.monthly_pack_source == "pack_rank_latest":
+        monthly_pack_counts_map, monthly_pack_scan_stats, pack_latest_reason = load_monthly_pack_counts_from_latest(
+            cfg,
+            expected_window_start=monthly_window_start_iso,
+        )
+        if pack_latest_reason:
+            print(f"[WARN] monthly pack latest unavailable: {pack_latest_reason}", flush=True)
+        else:
+            monthly_pack_scan_ok = True
+            print(
+                "[INFO] monthly pack counts loaded from pack_rank_latest "
+                f"wallets={len(monthly_pack_counts_map)} path={cfg.pack_rank_latest_path}",
+                flush=True,
+            )
+    elif cfg.monthly_pack_source == "onchain" and pack_rank_onchain_cfg is not None:
         try:
-            pack_rank_prev_state = {} if full_rebuild else load_pack_rank_state(cfg)
+            pack_rank_prev_state = {} if full_rebuild else _json_load(cfg.monthly_pack_scan_state_path)
             pack_scan = scan_wallet_open_counts_by_time_incremental(
                 pack_rank_onchain_cfg,
                 wallets=sorted(current_addrs),
@@ -1921,7 +2059,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             )
             pack_state = pack_scan.get("state") if isinstance(pack_scan.get("state"), dict) else {}
             if pack_state:
-                _atomic_write_json(cfg.pack_rank_state_path, pack_state)
+                _atomic_write_json(cfg.monthly_pack_scan_state_path, pack_state)
             monthly_pack_scan_stats = pack_scan.get("stats") if isinstance(pack_scan.get("stats"), dict) else {}
             raw_counts = pack_scan.get("wallet_counts")
             if isinstance(raw_counts, dict):
@@ -1933,6 +2071,21 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             monthly_pack_scan_ok = True
         except Exception as e:
             print(f"[WARN] wallet-time monthly pack scan failed: {e}", flush=True)
+    elif cfg.monthly_pack_source == "onchain":
+        monthly_pack_scan_stats = {
+            "scan_mode": "onchain_unavailable",
+            "api_calls": 0,
+            "rows_scanned": 0,
+            "reset_applied": False,
+        }
+        print("[WARN] monthly pack onchain scan skipped: missing BSCSCAN_API_KEY", flush=True)
+    else:
+        monthly_pack_scan_stats = {
+            "scan_mode": "disabled",
+            "api_calls": 0,
+            "rows_scanned": 0,
+            "reset_applied": False,
+        }
     latest_activity_map: dict[str, str] = {}
     latest_usdt_tx_map: dict[str, str] = {}
     changed_by_activity: set[str] = set()
@@ -2406,6 +2559,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     if isinstance(payload.get("meta"), dict):
         payload["meta"]["trigger"] = cfg.trigger
         payload["meta"]["metrics_source"] = cfg.metrics_source
+        payload["meta"]["monthly_gacha_source"] = cfg.monthly_pack_source
         payload["meta"]["full_rebuild_active_only"] = bool(cfg.full_rebuild_active_only)
         payload["meta"]["collection_snapshot_fallback"] = bool(collection_fallback_reason)
         payload["meta"]["collection_snapshot_fallback_reason"] = collection_fallback_reason
@@ -2440,11 +2594,14 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "refreshed_wallets": refresh_cnt,
         "removed_wallets": removed_wallets,
         "duration_sec": (finished_at - started_at).total_seconds(),
+        "monthly_pack_source": cfg.monthly_pack_source,
         "monthly_pack_scan_mode": str((monthly_pack_scan_stats or {}).get("scan_mode") or ""),
         "monthly_pack_scan_api_calls": int(_to_decimal((monthly_pack_scan_stats or {}).get("api_calls")) or 0),
         "monthly_pack_scan_rows_scanned": int(_to_decimal((monthly_pack_scan_stats or {}).get("rows_scanned")) or 0),
         "monthly_pack_scan_reset": bool((monthly_pack_scan_stats or {}).get("reset_applied")),
         "pack_rank_state_path": str(cfg.pack_rank_state_path),
+        "pack_rank_latest_path": str(cfg.pack_rank_latest_path),
+        "monthly_pack_scan_state_path": str(cfg.monthly_pack_scan_state_path),
     }
     _atomic_write_json(cfg.state_path, state_payload)
 
@@ -2471,6 +2628,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "full_rebuild_active_only": bool(cfg.full_rebuild_active_only),
         "duration_sec": (finished_at - started_at).total_seconds(),
         "push_required": (len(changed_addrs) > 0 or removed_wallets > 0 or full_rebuild),
+        "monthly_pack_source": cfg.monthly_pack_source,
         "monthly_pack_scan_mode": str((monthly_pack_scan_stats or {}).get("scan_mode") or ""),
         "monthly_pack_scan_api_calls": int(_to_decimal((monthly_pack_scan_stats or {}).get("api_calls")) or 0),
         "monthly_pack_scan_rows_scanned": int(_to_decimal((monthly_pack_scan_stats or {}).get("rows_scanned")) or 0),
@@ -2583,6 +2741,7 @@ def main() -> int:
         f"checkpoints={result['checkpoint_count']} probe_failed={result['activity_probe_failed']} "
         f"metric_fail={result['metric_failed_initial']} metric_resolved={result['metric_failed_resolved']} "
         f"metric_unresolved={result['metric_failed_unresolved']} "
+        f"pack_source={result['monthly_pack_source']} "
         f"pack_scan_mode={result['monthly_pack_scan_mode'] or '-'} "
         f"pack_scan_calls={result['monthly_pack_scan_api_calls']} "
         f"pack_scan_rows={result['monthly_pack_scan_rows_scanned']} "
@@ -2613,6 +2772,7 @@ def main() -> int:
             "full_rebuild_reason": result["full_rebuild_reason"],
             "full_rebuild_active_only": result["full_rebuild_active_only"],
             "duration_sec": result["duration_sec"],
+            "monthly_pack_source": result["monthly_pack_source"],
             "monthly_pack_scan_mode": result["monthly_pack_scan_mode"],
             "monthly_pack_scan_api_calls": result["monthly_pack_scan_api_calls"],
             "monthly_pack_scan_rows_scanned": result["monthly_pack_scan_rows_scanned"],
@@ -2623,6 +2783,8 @@ def main() -> int:
             "history_path": str(cfg.history_path(now_dt)),
             "checkpoint_path": str(cfg.checkpoint_path),
             "pack_rank_state_path": str(cfg.pack_rank_state_path),
+            "pack_rank_latest_path": str(cfg.pack_rank_latest_path),
+            "monthly_pack_scan_state_path": str(cfg.monthly_pack_scan_state_path),
         },
     )
     send_webhook(cfg, msg, success=True)

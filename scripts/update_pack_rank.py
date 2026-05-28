@@ -300,6 +300,12 @@ def _build_onchain_cfg(cfg: PackRankConfig) -> OnchainConfig:
         page_size=cfg.onchain_page_size,
         retries=max(1, _to_int(os.getenv("API_MAX_RETRIES", "3"), 3)),
         backoff_sec=max(0.2, float(os.getenv("API_RETRY_BACKOFF_SEC", "0.5"))),
+        card_contract=str(
+            os.getenv(
+                "PROFILE_CHAIN_CARD_CONTRACT",
+                os.getenv("WALLET_MIGRATION_CARD_CONTRACT", "0xf8646a3ca093e97bb404c3b25e675c0394dd5b30"),
+            )
+        ).strip().lower(),
     )
 
 
@@ -426,9 +432,13 @@ def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, An
             "hunter": "top50",
             "seeker": "top200",
         },
-        "monthly_gacha_scan_mode": str(stats.get("scan_mode") or "wallet_time_incremental"),
+        "monthly_gacha_scan_mode": str(stats.get("scan_mode") or "contract_center_incremental"),
         "monthly_gacha_scan_api_calls": int(_to_int(stats.get("api_calls"), 0)),
+        "monthly_gacha_receipt_api_calls": int(_to_int(stats.get("receipt_api_calls"), 0)),
         "monthly_gacha_scan_rows_scanned": int(_to_int(stats.get("rows_scanned"), 0)),
+        "monthly_gacha_receipt_failed": int(_to_int(stats.get("receipt_failed"), 0)),
+        "monthly_gacha_multi_open_txs": int(_to_int(stats.get("multi_open_txs"), 0)),
+        "monthly_gacha_fallback_open_txs": int(_to_int(stats.get("fallback_open_txs"), 0)),
         "monthly_gacha_scan_reset": bool(stats.get("reset_applied")),
         "pack_contracts": list(pack_contracts),
         "pack_contract_count": len(pack_contracts),
@@ -456,8 +466,12 @@ def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, An
         "wallet_count": len(rows),
         "duration_sec": duration_sec,
         "api_calls": int(_to_int(stats.get("api_calls"), 0)),
+        "receipt_api_calls": int(_to_int(stats.get("receipt_api_calls"), 0)),
         "rows_scanned": int(_to_int(stats.get("rows_scanned"), 0)),
-        "scan_mode": str(stats.get("scan_mode") or "wallet_time_incremental"),
+        "receipt_failed": int(_to_int(stats.get("receipt_failed"), 0)),
+        "multi_open_txs": int(_to_int(stats.get("multi_open_txs"), 0)),
+        "fallback_open_txs": int(_to_int(stats.get("fallback_open_txs"), 0)),
+        "scan_mode": str(stats.get("scan_mode") or "contract_center_incremental"),
         "reset_applied": bool(stats.get("reset_applied")),
         "latest_path": str(cfg.latest_path),
         "history_path": str(cfg.history_path),
@@ -480,7 +494,9 @@ def main() -> int:
     result = run_sync(cfg, full_rebuild=bool(args.full_rebuild))
     msg = (
         f"trigger={cfg.trigger} scan_mode={result['scan_mode']} wallets={result['wallet_count']} "
-        f"api_calls={result['api_calls']} rows_scanned={result['rows_scanned']} "
+        f"api_calls={result['api_calls']} receipt_calls={result['receipt_api_calls']} "
+        f"rows_scanned={result['rows_scanned']} multi_open_txs={result['multi_open_txs']} "
+        f"receipt_failed={result['receipt_failed']} "
         f"reset={1 if result['reset_applied'] else 0} full_rebuild={1 if result['full_rebuild'] else 0} "
         f"duration_sec={result['duration_sec']:.2f}"
     )
@@ -493,7 +509,11 @@ def main() -> int:
             "wallet_count": result["wallet_count"],
             "scan_mode": result["scan_mode"],
             "api_calls": result["api_calls"],
+            "receipt_api_calls": result["receipt_api_calls"],
             "rows_scanned": result["rows_scanned"],
+            "receipt_failed": result["receipt_failed"],
+            "multi_open_txs": result["multi_open_txs"],
+            "fallback_open_txs": result["fallback_open_txs"],
             "reset_applied": result["reset_applied"],
             "duration_sec": result["duration_sec"],
             "latest_path": result["latest_path"],
