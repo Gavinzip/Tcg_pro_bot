@@ -178,6 +178,67 @@ def _fetch_token1155tx_page(
     raise RuntimeError(f"bscscan token1155tx request failed: {last_err}")
 
 
+def _fetch_token1155_contract_page(
+    cfg: OnchainConfig,
+    contract: str,
+    *,
+    page: int,
+    sort: str,
+    startblock: int | None = None,
+    endblock: int | None = None,
+) -> list[dict[str, Any]]:
+    page_limit = int(max(1, min(1000, cfg.page_size)))
+    params = {
+        "chainid": int(cfg.chain_id),
+        "module": "account",
+        "action": "token1155tx",
+        "contractaddress": str(contract or "").strip().lower(),
+        "page": int(page),
+        "offset": page_limit,
+        "sort": sort,
+        "apikey": cfg.api_key,
+    }
+    if startblock is not None and int(startblock) > 0:
+        params["startblock"] = int(startblock)
+    if endblock is not None and int(endblock) > 0:
+        params["endblock"] = int(endblock)
+
+    last_err: Exception | None = None
+    for attempt in range(1, max(1, cfg.retries) + 1):
+        try:
+            resp = requests.get(cfg.api_url, params=params, timeout=30)
+            status_code = int(resp.status_code or 0)
+            if status_code >= 500 or status_code == 429:
+                raise requests.HTTPError(f"HTTP {status_code}", response=resp)
+            resp.raise_for_status()
+
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("bscscan token1155tx contract invalid response")
+
+            message = str(data.get("message") or "").strip()
+            result = data.get("result")
+
+            if message == "No transactions found":
+                return []
+            if isinstance(result, list):
+                return [x for x in result if isinstance(x, dict)]
+            if isinstance(result, str):
+                lowered = result.lower()
+                if "max rate limit" in lowered or "query timeout" in lowered:
+                    raise RuntimeError(result)
+                if "no transactions found" in lowered:
+                    return []
+            raise RuntimeError(f"bscscan token1155tx contract error: {message or result}")
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt < max(1, cfg.retries):
+                time.sleep(max(0.2, cfg.backoff_sec) * (2 ** (attempt - 1)))
+                continue
+            break
+    raise RuntimeError(f"bscscan token1155tx contract request failed: {last_err}")
+
+
 def _fetch_nfttx_page(
     cfg: OnchainConfig,
     wallet: str,
@@ -279,6 +340,187 @@ def fetch_all_erc1155_transfers(cfg: OnchainConfig, wallet: str, contract: str) 
             break
         page += 1
     return out
+
+
+def scan_erc1155_contract_balances(
+    cfg: OnchainConfig,
+    contract: str,
+    *,
+    target_wallets: set[str] | None = None,
+    prev_state: dict[str, Any] | None = None,
+    start_block: int = 0,
+    end_block: int = 0,
+    block_chunk: int = 0,
+) -> dict[str, Any]:
+    contract_norm = str(contract or "").strip().lower()
+    if not contract_norm.startswith("0x") or len(contract_norm) != 42:
+        raise RuntimeError("erc1155 contract address is invalid")
+
+    target_set = {
+        str(x or "").strip().lower()
+        for x in (target_wallets or set())
+        if str(x or "").strip().lower().startswith("0x") and len(str(x or "").strip().lower()) == 42
+    }
+    prev = prev_state if isinstance(prev_state, dict) else {}
+    prev_contract = str(prev.get("contract") or "").strip().lower()
+    prev_to_block = int(_to_decimal(prev.get("to_block")) or 0)
+    reset_applied = prev_contract != contract_norm or prev_to_block <= 0
+
+    balances: dict[str, dict[str, int]] = {}
+    if not reset_applied:
+        raw_balances = prev.get("wallet_token_balances")
+        if isinstance(raw_balances, dict):
+            for addr_raw, per_token_raw in raw_balances.items():
+                addr = str(addr_raw or "").strip().lower()
+                if not addr.startswith("0x") or len(addr) != 42:
+                    continue
+                if not isinstance(per_token_raw, dict):
+                    continue
+                cleaned = {
+                    str(token_id): int(_to_decimal(amount) or 0)
+                    for token_id, amount in per_token_raw.items()
+                    if str(token_id).strip() and int(_to_decimal(amount) or 0) > 0
+                }
+                if cleaned:
+                    balances[addr] = cleaned
+    api_calls = 0
+    rows_scanned = 0
+    limit = int(max(1, min(1000, cfg.page_size)))
+    max_pages_per_window = max(1, 10000 // limit)
+    configured_chunk = int(_to_decimal(os.getenv("ONCHAIN_ERC1155_CONTRACT_BLOCK_CHUNK", "")) or 0)
+    chunk_size = max(1000, int(block_chunk or configured_chunk or 500000))
+
+    scan_start_block = int(max(0, start_block or 0))
+    if scan_start_block <= 0 and not reset_applied:
+        scan_start_block = prev_to_block + 1
+    if scan_start_block <= 0:
+        first_rows = _fetch_token1155_contract_page(cfg, contract_norm, page=1, sort="asc")
+        api_calls += 1
+        if not first_rows:
+            state_balances: dict[str, dict[str, int]] = {}
+            return {
+                "wallets": {},
+                "state": {
+                    "contract": contract_norm,
+                    "to_block": 0,
+                    "wallet_token_balances": state_balances,
+                },
+                "stats": {
+                    "scan_mode": "erc1155_contract_token1155tx_by_block",
+                    "api_calls": int(api_calls),
+                    "rows_scanned": 0,
+                    "wallets": 0,
+                    "contract": contract_norm,
+                    "from_block": 0,
+                    "to_block": 0,
+                    "block_chunk": int(chunk_size),
+                    "reset_applied": bool(reset_applied),
+                },
+            }
+        first_blocks = [_row_block_number(row) for row in first_rows if _row_block_number(row) > 0]
+        if not first_blocks:
+            raise RuntimeError("erc1155 contract first transfer block not found")
+        scan_start_block = min(first_blocks)
+
+    final_to_block = int(max(0, end_block or 0))
+    if final_to_block <= 0:
+        final_to_block = _fetch_block_number_by_timestamp(cfg, int(time.time()))
+        api_calls += 1
+
+    def apply_delta(wallet: str, token_id: str, amount: int) -> None:
+        addr = str(wallet or "").strip().lower()
+        if not addr.startswith("0x") or len(addr) != 42:
+            return
+        if addr == "0x0000000000000000000000000000000000000000":
+            return
+        per_token = balances.setdefault(addr, {})
+        per_token[token_id] = int(per_token.get(token_id, 0)) + int(amount)
+
+    current_start_block = scan_start_block
+    while current_start_block > 0 and current_start_block <= final_to_block:
+        current_to_block = min(final_to_block, current_start_block + chunk_size - 1)
+        page = 1
+        max_block_seen = current_start_block
+        while True:
+            if page > max_pages_per_window:
+                next_start_block = int(max(max_block_seen, current_start_block) + 1)
+                current_start_block = next_start_block if next_start_block > current_start_block else current_to_block + 1
+                break
+            try:
+                rows = _fetch_token1155_contract_page(
+                    cfg,
+                    contract_norm,
+                    page=page,
+                    sort="asc",
+                    startblock=current_start_block,
+                    endblock=current_to_block,
+                )
+            except Exception as e:
+                text = str(e).lower()
+                if chunk_size > 1000 and ("query timeout" in text or "timeout" in text):
+                    chunk_size = max(1000, chunk_size // 2)
+                    print(
+                        "[WARN] erc1155_contract_scan reducing block chunk "
+                        f"contract={contract_norm} chunk={chunk_size} error={e}",
+                        flush=True,
+                    )
+                    break
+                raise
+            api_calls += 1
+            if not rows:
+                current_start_block = current_to_block + 1
+                break
+            for row in rows:
+                rows_scanned += 1
+                block = _row_block_number(row)
+                if block > max_block_seen:
+                    max_block_seen = block
+                token_id = str(row.get("tokenID") or row.get("tokenId") or "").strip()
+                if not token_id:
+                    continue
+                amount = int(_to_decimal(row.get("tokenValue") or row.get("tokenValueRaw") or row.get("value")) or 0)
+                if amount <= 0:
+                    continue
+                apply_delta(str(row.get("from") or ""), token_id, -amount)
+                apply_delta(str(row.get("to") or ""), token_id, amount)
+            if len(rows) < limit:
+                current_start_block = current_to_block + 1
+                break
+            page += 1
+
+    state_balances: dict[str, dict[str, int]] = {}
+    wallet_totals: dict[str, dict[str, int]] = {}
+    for addr, per_token in balances.items():
+        positive = {token_id: int(amount) for token_id, amount in per_token.items() if int(amount) > 0}
+        if not positive:
+            continue
+        state_balances[addr] = positive
+        if target_set and addr not in target_set:
+            continue
+        wallet_totals[addr] = {
+            "owned_total": int(sum(positive.values())),
+            "owned_badge_count": int(len(positive)),
+        }
+
+    return {
+        "wallets": wallet_totals,
+        "state": {
+            "contract": contract_norm,
+            "to_block": int(final_to_block),
+            "wallet_token_balances": state_balances,
+        },
+        "stats": {
+            "scan_mode": "erc1155_contract_token1155tx_by_block",
+            "api_calls": int(api_calls),
+            "rows_scanned": int(rows_scanned),
+            "wallets": int(len(wallet_totals)),
+            "contract": contract_norm,
+            "from_block": int(scan_start_block),
+            "to_block": int(final_to_block),
+            "block_chunk": int(chunk_size),
+            "reset_applied": bool(reset_applied),
+        },
+    }
 
 
 def fetch_all_nft_transfers(cfg: OnchainConfig, wallet: str) -> list[dict[str, Any]]:

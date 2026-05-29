@@ -27,6 +27,7 @@ from onchain_metrics import (
     OnchainConfig,
     analyze_wallet as analyze_wallet_onchain,
     fetch_latest_usdt_tx_hash,
+    scan_erc1155_contract_balances,
     scan_wallet_open_counts_by_time_incremental,
 )
 
@@ -701,10 +702,12 @@ class RankingConfig:
     full_rebuild_active_only: bool
     metrics_source: str
     monthly_pack_source: str
+    sbt_source: str
     onchain_api_url: str
     onchain_chain_id: int
     onchain_api_key: str
     onchain_usdt_contract: str
+    onchain_sbt_contract: str
     onchain_pack_contracts: tuple[str, ...]
     onchain_marketplace_contract: str
     onchain_page_size: int
@@ -750,6 +753,10 @@ class RankingConfig:
     @property
     def monthly_pack_scan_state_path(self) -> Path:
         return self.data_dir / "state" / "ranking_monthly_pack_state.json"
+
+    @property
+    def sbt_state_path(self) -> Path:
+        return self.data_dir / "state" / "ranking_sbt_state.json"
 
     def history_path(self, now_dt: datetime) -> Path:
         key = now_dt.strftime("%Y-%m-%d_%H")
@@ -819,12 +826,18 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
     monthly_pack_source = str(os.getenv("RANK_MONTHLY_PACK_SOURCE", "pack_rank_latest")).strip().lower()
     if monthly_pack_source not in ("pack_rank_latest", "onchain", "none"):
         raise RuntimeError("RANK_MONTHLY_PACK_SOURCE must be pack_rank_latest, onchain, or none")
+    sbt_source = str(os.getenv("RANK_SBT_SOURCE", "onchain_contract")).strip().lower() or "onchain_contract"
+    if sbt_source not in ("onchain_contract", "official"):
+        raise RuntimeError("RANK_SBT_SOURCE must be onchain_contract or official")
 
     onchain_api_url = str(os.getenv("BSCSCAN_API_URL", "https://api.etherscan.io/v2/api")).strip() or "https://api.etherscan.io/v2/api"
     onchain_chain_id = max(1, int(os.getenv("BSCSCAN_CHAIN_ID", "56")))
     onchain_api_key = str(os.getenv("BSCSCAN_API_KEY", "")).strip()
     onchain_usdt_contract = str(
         os.getenv("ONCHAIN_USDT_CONTRACT", "0x55d398326f99059ff775485246999027b3197955")
+    ).strip().lower()
+    onchain_sbt_contract = str(
+        os.getenv("ONCHAIN_SBT_CONTRACT", "0x7d1b7db704d722295fbaa284008f526634673dbf")
     ).strip().lower()
     onchain_pack_contracts = _ranking_onchain_pack_contracts()
     onchain_marketplace_contract = str(
@@ -870,10 +883,12 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
         else _env_bool("RANK_SYNC_FULL_REBUILD_ACTIVE_ONLY", True),
         metrics_source=metrics_source,
         monthly_pack_source=monthly_pack_source,
+        sbt_source=sbt_source,
         onchain_api_url=onchain_api_url,
         onchain_chain_id=onchain_chain_id,
         onchain_api_key=onchain_api_key,
         onchain_usdt_contract=onchain_usdt_contract,
+        onchain_sbt_contract=onchain_sbt_contract,
         onchain_pack_contracts=onchain_pack_contracts,
         onchain_marketplace_contract=onchain_marketplace_contract,
         onchain_page_size=onchain_page_size,
@@ -902,6 +917,11 @@ def validate_config(cfg: RankingConfig) -> None:
     if cfg.metrics_source in ("onchain", "hybrid"):
         if not cfg.onchain_api_key:
             raise RuntimeError("BSCSCAN_API_KEY is required when RANK_METRICS_SOURCE is onchain/hybrid")
+    if cfg.sbt_source == "onchain_contract":
+        if not cfg.onchain_api_key:
+            raise RuntimeError("BSCSCAN_API_KEY is required when RANK_SBT_SOURCE=onchain_contract")
+        if not (cfg.onchain_sbt_contract.startswith("0x") and len(cfg.onchain_sbt_contract) == 42):
+            raise RuntimeError("ONCHAIN_SBT_CONTRACT is required when RANK_SBT_SOURCE=onchain_contract")
 
 
 def send_webhook(cfg: RankingConfig, message: str, success: bool = True) -> None:
@@ -1755,7 +1775,7 @@ def compute_activity_metrics_for_wallet(
     }
 
 
-def compute_sbt_for_wallet(username: str | None) -> tuple[int, int]:
+def compute_sbt_for_wallet_official(username: str | None) -> tuple[int, int]:
     if not username:
         return 0, 0
     badges = _trpc_user_badges(username)
@@ -1774,8 +1794,14 @@ def compute_sbt_for_wallet(username: str | None) -> tuple[int, int]:
     return owned_total, owned_badge_count
 
 
-def assign_rank(records: list[WalletRecord], value_getter, attr_name: str) -> None:
-    sorted_records = sorted(records, key=lambda x: (value_getter(x), x.address), reverse=True)
+def assign_rank(records: list[WalletRecord], value_getter, attr_name: str, *, require_positive: bool = False) -> None:
+    for rec in records:
+        setattr(rec, attr_name, None)
+    if require_positive:
+        sorted_records = [rec for rec in records if _to_decimal(value_getter(rec)) > 0]
+        sorted_records.sort(key=lambda x: (value_getter(x), x.address), reverse=True)
+    else:
+        sorted_records = sorted(records, key=lambda x: (value_getter(x), x.address), reverse=True)
     prev_val = None
     current_rank = 0
     for idx, rec in enumerate(sorted_records, start=1):
@@ -1853,6 +1879,7 @@ def build_payload(
     monthly_pack_window_start: datetime,
     monthly_pack_window_end: datetime,
     monthly_pack_scan_stats: dict[str, Any] | None = None,
+    sbt_scan_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     def _gacha_level(rank_value: int | None) -> str:
         rv = int(rank_value or 0)
@@ -1874,7 +1901,7 @@ def build_payload(
     assign_rank(records, lambda r: r.holdings_value_usdt, "holdings_rank")
     assign_rank(records, lambda r: r.total_pnl_usdt, "pnl_rank")
     assign_rank(records, lambda r: r.participation_days_count, "participation_days_rank")
-    assign_rank(records, lambda r: r.sbt_owned_total, "sbt_rank")
+    assign_rank(records, lambda r: r.sbt_owned_total, "sbt_rank", require_positive=True)
     assign_rank(records, lambda r: r.monthly_gacha_open_count, "monthly_gacha_open_rank")
 
     for rec in records:
@@ -1889,7 +1916,11 @@ def build_payload(
     by_holdings = sorted(records, key=lambda x: (x.holdings_value_usdt, x.address), reverse=True)
     by_pnl = sorted(records, key=lambda x: (x.total_pnl_usdt, x.address), reverse=True)
     by_participation = sorted(records, key=lambda x: (x.participation_days_count, x.address), reverse=True)
-    by_sbt = sorted(records, key=lambda x: (x.sbt_owned_total, x.address), reverse=True)
+    by_sbt = sorted(
+        (x for x in records if x.sbt_owned_total > 0),
+        key=lambda x: (x.sbt_owned_total, x.address),
+        reverse=True,
+    )
     by_monthly_gacha = sorted(
         (x for x in records if x.monthly_gacha_open_count > 0),
         key=lambda x: (x.monthly_gacha_open_count, x.address),
@@ -1955,6 +1986,14 @@ def build_payload(
             "monthly_gacha_scan_api_calls": int(_to_decimal((monthly_pack_scan_stats or {}).get("api_calls")) or 0),
             "monthly_gacha_scan_rows_scanned": int(_to_decimal((monthly_pack_scan_stats or {}).get("rows_scanned")) or 0),
             "monthly_gacha_scan_reset": bool((monthly_pack_scan_stats or {}).get("reset_applied")),
+            "sbt_source": str((sbt_scan_stats or {}).get("source") or ""),
+            "sbt_scan_mode": str((sbt_scan_stats or {}).get("scan_mode") or ""),
+            "sbt_scan_api_calls": int(_to_decimal((sbt_scan_stats or {}).get("api_calls")) or 0),
+            "sbt_scan_rows_scanned": int(_to_decimal((sbt_scan_stats or {}).get("rows_scanned")) or 0),
+            "sbt_scan_reset": bool((sbt_scan_stats or {}).get("reset_applied")),
+            "sbt_refresh_wallets": int(_to_decimal((sbt_scan_stats or {}).get("refresh_wallets")) or 0),
+            "sbt_fallback_wallets": int(_to_decimal((sbt_scan_stats or {}).get("fallback_wallets")) or 0),
+            "sbt_failed_wallets": int(_to_decimal((sbt_scan_stats or {}).get("failed_wallets")) or 0),
         },
         "top": {
             "volume": [to_wallet_dict(x) for x in by_volume[:100]],
@@ -1981,6 +2020,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     monthly_window_changed = bool(prev_monthly_window_start and prev_monthly_window_start != monthly_window_start_iso)
     prev_wallets = load_previous_wallets(cfg)
     prev_state = _json_load(cfg.state_path)
+    prev_sbt_state = _json_load(cfg.sbt_state_path)
     prev_checkpoints = load_activity_checkpoints(cfg)
 
     current_wallets, collectible_pages, collection_fallback_reason = fetch_all_wallets(
@@ -2500,29 +2540,99 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         metric_failed_resolved = 0
         metric_failed_unresolved = 0
 
-    sbt_records = [r for r in records if r.address in sbt_refresh_addrs]
+    sbt_scan_stats: dict[str, Any] = {
+        "source": cfg.sbt_source,
+        "scan_mode": "not_run",
+        "api_calls": 0,
+        "rows_scanned": 0,
+        "refresh_wallets": 0,
+        "fallback_wallets": 0,
+        "failed_wallets": 0,
+    }
+
+    def _apply_sbt_fallback(rec: WalletRecord) -> None:
+        prev = prev_wallets.get(rec.address)
+        if prev is not None:
+            rec.sbt_owned_total = prev.sbt_owned_total
+            rec.sbt_owned_badge_count = prev.sbt_owned_badge_count
+        else:
+            rec.sbt_owned_total = 0
+            rec.sbt_owned_badge_count = 0
+
+    sbt_records = records if cfg.sbt_source == "onchain_contract" else [r for r in records if r.address in sbt_refresh_addrs]
     if sbt_records:
         sbt_phase_total = len(sbt_records)
-        sbt_completed = 0
-        _print_progress("sbt", 0, sbt_phase_total)
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(sbt_records)))) as pool:
-            future_map = {pool.submit(compute_sbt_for_wallet, rec.username): rec for rec in sbt_records}
-            for future in as_completed(future_map):
-                rec = future_map[future]
-                try:
-                    sbt_owned_total, sbt_badge_count = future.result()
-                except Exception as e:  # noqa: BLE001
-                    print(f"[WARN] sbt failed for {rec.address} ({rec.username}): {e}")
-                    prev = prev_wallets.get(rec.address)
-                    if prev is not None:
-                        sbt_owned_total = prev.sbt_owned_total
-                        sbt_badge_count = prev.sbt_owned_badge_count
+        sbt_scan_stats["refresh_wallets"] = sbt_phase_total
+        if cfg.sbt_source == "onchain_contract":
+            try:
+                print(
+                    f"[INFO] sbt source=onchain_contract contract={cfg.onchain_sbt_contract} "
+                    f"wallets={len(records)}",
+                    flush=True,
+                )
+                scan_result = scan_erc1155_contract_balances(
+                    _build_onchain_cfg(cfg),
+                    cfg.onchain_sbt_contract,
+                    target_wallets={rec.address for rec in records},
+                    prev_state=prev_sbt_state,
+                )
+                wallet_sbt_map = scan_result.get("wallets") if isinstance(scan_result.get("wallets"), dict) else {}
+                next_sbt_state = scan_result.get("state") if isinstance(scan_result.get("state"), dict) else {}
+                raw_stats = scan_result.get("stats") if isinstance(scan_result.get("stats"), dict) else {}
+                sbt_scan_stats.update(
+                    {
+                        "scan_mode": str(raw_stats.get("scan_mode") or "erc1155_contract_token1155tx"),
+                        "api_calls": int(_to_decimal(raw_stats.get("api_calls")) or 0),
+                        "rows_scanned": int(_to_decimal(raw_stats.get("rows_scanned")) or 0),
+                        "reset_applied": bool(raw_stats.get("reset_applied")),
+                        "contract": cfg.onchain_sbt_contract,
+                    }
+                )
+                if next_sbt_state:
+                    _atomic_write_json(cfg.sbt_state_path, next_sbt_state)
+                for rec in sbt_records:
+                    row = wallet_sbt_map.get(rec.address) if isinstance(wallet_sbt_map, dict) else None
+                    if isinstance(row, dict):
+                        rec.sbt_owned_total = max(0, int(_to_decimal(row.get("owned_total")) or 0))
+                        rec.sbt_owned_badge_count = max(0, int(_to_decimal(row.get("owned_badge_count")) or 0))
                     else:
-                        sbt_owned_total, sbt_badge_count = 0, 0
-                sbt_completed += 1
-                _maybe_print_progress("sbt", sbt_completed, sbt_phase_total, cfg.progress_every)
-                rec.sbt_owned_total = sbt_owned_total
-                rec.sbt_owned_badge_count = sbt_badge_count
+                        rec.sbt_owned_total = 0
+                        rec.sbt_owned_badge_count = 0
+                print(
+                    "[INFO] sbt onchain_contract done "
+                    f"api_calls={sbt_scan_stats['api_calls']} rows={sbt_scan_stats['rows_scanned']} "
+                    f"holders={len(wallet_sbt_map)}",
+                    flush=True,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[WARN] sbt onchain_contract failed, fallback to previous snapshot: {e}", flush=True)
+                sbt_scan_stats["scan_mode"] = "fallback_previous_snapshot"
+                sbt_scan_stats["fallback_wallets"] = sbt_phase_total
+                sbt_scan_stats["failed_wallets"] = sbt_phase_total
+                for rec in sbt_records:
+                    _apply_sbt_fallback(rec)
+        else:
+            sbt_completed = 0
+            _print_progress("sbt", 0, sbt_phase_total)
+            with ThreadPoolExecutor(max_workers=max(1, min(workers, len(sbt_records)))) as pool:
+                future_map = {pool.submit(compute_sbt_for_wallet_official, rec.username): rec for rec in sbt_records}
+                for future in as_completed(future_map):
+                    rec = future_map[future]
+                    try:
+                        sbt_owned_total, sbt_badge_count = future.result()
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[WARN] sbt failed for {rec.address} ({rec.username}): {e}")
+                        sbt_scan_stats["fallback_wallets"] = int(sbt_scan_stats.get("fallback_wallets") or 0) + 1
+                        sbt_scan_stats["failed_wallets"] = int(sbt_scan_stats.get("failed_wallets") or 0) + 1
+                        _apply_sbt_fallback(rec)
+                        sbt_completed += 1
+                        _maybe_print_progress("sbt", sbt_completed, sbt_phase_total, cfg.progress_every)
+                        continue
+                    sbt_completed += 1
+                    _maybe_print_progress("sbt", sbt_completed, sbt_phase_total, cfg.progress_every)
+                    rec.sbt_owned_total = sbt_owned_total
+                    rec.sbt_owned_badge_count = sbt_badge_count
+            sbt_scan_stats["scan_mode"] = "official_username"
 
     finished_at = datetime.now(tz=cfg.tzinfo)
     for rec in records:
@@ -2555,11 +2665,13 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         monthly_pack_window_start=monthly_pack_window_start,
         monthly_pack_window_end=monthly_pack_window_end,
         monthly_pack_scan_stats=monthly_pack_scan_stats,
+        sbt_scan_stats=sbt_scan_stats,
     )
     if isinstance(payload.get("meta"), dict):
         payload["meta"]["trigger"] = cfg.trigger
         payload["meta"]["metrics_source"] = cfg.metrics_source
         payload["meta"]["monthly_gacha_source"] = cfg.monthly_pack_source
+        payload["meta"]["sbt_source"] = cfg.sbt_source
         payload["meta"]["full_rebuild_active_only"] = bool(cfg.full_rebuild_active_only)
         payload["meta"]["collection_snapshot_fallback"] = bool(collection_fallback_reason)
         payload["meta"]["collection_snapshot_fallback_reason"] = collection_fallback_reason
@@ -2594,6 +2706,14 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "refreshed_wallets": refresh_cnt,
         "removed_wallets": removed_wallets,
         "duration_sec": (finished_at - started_at).total_seconds(),
+        "sbt_source": cfg.sbt_source,
+        "sbt_scan_mode": str(sbt_scan_stats.get("scan_mode") or ""),
+        "sbt_scan_api_calls": int(_to_decimal(sbt_scan_stats.get("api_calls")) or 0),
+        "sbt_scan_rows_scanned": int(_to_decimal(sbt_scan_stats.get("rows_scanned")) or 0),
+        "sbt_scan_reset": bool(sbt_scan_stats.get("reset_applied")),
+        "sbt_refresh_wallets": int(_to_decimal(sbt_scan_stats.get("refresh_wallets")) or 0),
+        "sbt_fallback_wallets": int(_to_decimal(sbt_scan_stats.get("fallback_wallets")) or 0),
+        "sbt_failed_wallets": int(_to_decimal(sbt_scan_stats.get("failed_wallets")) or 0),
         "monthly_pack_source": cfg.monthly_pack_source,
         "monthly_pack_scan_mode": str((monthly_pack_scan_stats or {}).get("scan_mode") or ""),
         "monthly_pack_scan_api_calls": int(_to_decimal((monthly_pack_scan_stats or {}).get("api_calls")) or 0),
@@ -2602,6 +2722,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "pack_rank_state_path": str(cfg.pack_rank_state_path),
         "pack_rank_latest_path": str(cfg.pack_rank_latest_path),
         "monthly_pack_scan_state_path": str(cfg.monthly_pack_scan_state_path),
+        "sbt_state_path": str(cfg.sbt_state_path),
     }
     _atomic_write_json(cfg.state_path, state_payload)
 
@@ -2628,6 +2749,14 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "full_rebuild_active_only": bool(cfg.full_rebuild_active_only),
         "duration_sec": (finished_at - started_at).total_seconds(),
         "push_required": (len(changed_addrs) > 0 or removed_wallets > 0 or full_rebuild),
+        "sbt_source": cfg.sbt_source,
+        "sbt_scan_mode": str(sbt_scan_stats.get("scan_mode") or ""),
+        "sbt_scan_api_calls": int(_to_decimal(sbt_scan_stats.get("api_calls")) or 0),
+        "sbt_scan_rows_scanned": int(_to_decimal(sbt_scan_stats.get("rows_scanned")) or 0),
+        "sbt_scan_reset": bool(sbt_scan_stats.get("reset_applied")),
+        "sbt_refresh_wallets": int(_to_decimal(sbt_scan_stats.get("refresh_wallets")) or 0),
+        "sbt_fallback_wallets": int(_to_decimal(sbt_scan_stats.get("fallback_wallets")) or 0),
+        "sbt_failed_wallets": int(_to_decimal(sbt_scan_stats.get("failed_wallets")) or 0),
         "monthly_pack_source": cfg.monthly_pack_source,
         "monthly_pack_scan_mode": str((monthly_pack_scan_stats or {}).get("scan_mode") or ""),
         "monthly_pack_scan_api_calls": int(_to_decimal((monthly_pack_scan_stats or {}).get("api_calls")) or 0),
@@ -2741,6 +2870,12 @@ def main() -> int:
         f"checkpoints={result['checkpoint_count']} probe_failed={result['activity_probe_failed']} "
         f"metric_fail={result['metric_failed_initial']} metric_resolved={result['metric_failed_resolved']} "
         f"metric_unresolved={result['metric_failed_unresolved']} "
+        f"sbt_source={result['sbt_source']} "
+        f"sbt_scan_mode={result['sbt_scan_mode'] or '-'} "
+        f"sbt_scan_calls={result['sbt_scan_api_calls']} "
+        f"sbt_scan_rows={result['sbt_scan_rows_scanned']} "
+        f"sbt_scan_reset={1 if result['sbt_scan_reset'] else 0} "
+        f"sbt_fallback={result['sbt_fallback_wallets']} "
         f"pack_source={result['monthly_pack_source']} "
         f"pack_scan_mode={result['monthly_pack_scan_mode'] or '-'} "
         f"pack_scan_calls={result['monthly_pack_scan_api_calls']} "
@@ -2772,6 +2907,14 @@ def main() -> int:
             "full_rebuild_reason": result["full_rebuild_reason"],
             "full_rebuild_active_only": result["full_rebuild_active_only"],
             "duration_sec": result["duration_sec"],
+            "sbt_source": result["sbt_source"],
+            "sbt_scan_mode": result["sbt_scan_mode"],
+            "sbt_scan_api_calls": result["sbt_scan_api_calls"],
+            "sbt_scan_rows_scanned": result["sbt_scan_rows_scanned"],
+            "sbt_scan_reset": result["sbt_scan_reset"],
+            "sbt_refresh_wallets": result["sbt_refresh_wallets"],
+            "sbt_fallback_wallets": result["sbt_fallback_wallets"],
+            "sbt_failed_wallets": result["sbt_failed_wallets"],
             "monthly_pack_source": result["monthly_pack_source"],
             "monthly_pack_scan_mode": result["monthly_pack_scan_mode"],
             "monthly_pack_scan_api_calls": result["monthly_pack_scan_api_calls"],
@@ -2785,6 +2928,7 @@ def main() -> int:
             "pack_rank_state_path": str(cfg.pack_rank_state_path),
             "pack_rank_latest_path": str(cfg.pack_rank_latest_path),
             "monthly_pack_scan_state_path": str(cfg.monthly_pack_scan_state_path),
+            "sbt_state_path": str(cfg.sbt_state_path),
         },
     )
     send_webhook(cfg, msg, success=True)
