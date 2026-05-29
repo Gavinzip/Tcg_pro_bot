@@ -688,6 +688,19 @@ try:
 except Exception:
     PROFILE_TEST_OMEGA_PRICE_USDT = Decimal("100")
 PROFILE_TEST_OMEGA_LABEL = str(os.getenv("PROFILE_TEST_OMEGA_LABEL", "Test OMEGA | Pokémon")).strip() or "Test OMEGA | Pokémon"
+PROFILE_OMEGA_LABEL = str(os.getenv("PROFILE_OMEGA_LABEL", "OMEGA | Pokémon")).strip() or "OMEGA | Pokémon"
+try:
+    PROFILE_OMEGA_PRICE_USDT = Decimal(str(os.getenv("PROFILE_OMEGA_PRICE_USDT", "48")).strip() or "48")
+except Exception:
+    PROFILE_OMEGA_PRICE_USDT = Decimal("48")
+PROFILE_EDEN_PACK_CONTRACT = str(
+    os.getenv("PROFILE_EDEN_PACK_CONTRACT", "0xfda4a907d23d9f24271bc47483c5b983831e325e")
+).strip().lower()
+try:
+    PROFILE_EDEN_PACK_PRICE_USDT = Decimal(str(os.getenv("PROFILE_EDEN_PACK_PRICE_USDT", "150")).strip() or "150")
+except Exception:
+    PROFILE_EDEN_PACK_PRICE_USDT = Decimal("150")
+PROFILE_EDEN_PACK_LABEL = str(os.getenv("PROFILE_EDEN_PACK_LABEL", "Eden Pack")).strip() or "Eden Pack"
 PROFILE_CHAIN_RECEIPT_PACK_ID_ENABLED = _env_true("PROFILE_CHAIN_RECEIPT_PACK_ID_ENABLED", True)
 PROFILE_CHAIN_RECEIPT_WORKERS = max(1, min(16, int(os.getenv("PROFILE_CHAIN_RECEIPT_WORKERS", "8"))))
 PROFILE_CHAIN_RECEIPT_FALLBACK_LIMIT = max(0, int(os.getenv("PROFILE_CHAIN_RECEIPT_FALLBACK_LIMIT", "24")))
@@ -3715,8 +3728,17 @@ def _normalize_profile_activity_pack_hint(pack_key: str | None, pack_name: str |
 
 def _known_profile_payment_pack_name(contract_key: str | None, amount: Decimal) -> str:
     contract = str(contract_key or "").strip().lower()
-    if _is_profile_test_omega_pack(contract, "OMEGA | Pokémon", amount):
-        return PROFILE_TEST_OMEGA_LABEL
+    amount_norm = _to_decimal(amount)
+    rules = (
+        (PROFILE_TEST_OMEGA_CONTRACT, PROFILE_OMEGA_PRICE_USDT, PROFILE_OMEGA_LABEL),
+        (PROFILE_TEST_OMEGA_CONTRACT, PROFILE_TEST_OMEGA_PRICE_USDT, PROFILE_TEST_OMEGA_LABEL),
+        (PROFILE_EDEN_PACK_CONTRACT, PROFILE_EDEN_PACK_PRICE_USDT, PROFILE_EDEN_PACK_LABEL),
+    )
+    for rule_contract, rule_price, rule_label in rules:
+        if not rule_contract or not rule_label or _to_decimal(rule_price) <= 0:
+            continue
+        if contract == str(rule_contract or "").strip().lower() and _profile_amounts_match(amount_norm, _to_decimal(rule_price)):
+            return str(rule_label or "").strip()
     return ""
 
 
@@ -3738,6 +3760,29 @@ def _profile_payment_unit_amount(payment_amount: Decimal, open_count: int) -> De
     if amount <= 0 or count <= 1:
         return amount
     return amount / Decimal(count)
+
+
+def _profile_static_payment_pack_hint(payment_row: dict, open_count: int = 1) -> dict | None:
+    if not isinstance(payment_row, dict):
+        return None
+    tx_hash = str(payment_row.get("hash") or "").strip().lower()
+    contract = str(payment_row.get("to") or "").strip().lower()
+    if not tx_hash or not contract:
+        return None
+    amount = _tokentx_usdt_amount(payment_row)
+    unit_amount = _profile_payment_unit_amount(amount, open_count)
+    pack_name = _known_profile_payment_pack_name(contract, unit_amount)
+    if not pack_name or unit_amount <= 0:
+        return None
+    return {
+        "pack_key": _profile_amount_pack_key(contract, unit_amount),
+        "pack_name": pack_name,
+        "contract_address": contract,
+        "timestamp": int(_parse_int(payment_row.get("timeStamp")) or _parse_int(payment_row.get("timestamp")) or 0),
+        "price": unit_amount,
+        "tx_hash": tx_hash,
+        "source": "static_payment_rule",
+    }
 
 
 def _profile_nft_transfer_quantity(row: dict | None) -> Decimal:
@@ -3774,6 +3819,18 @@ def _profile_hint_price_matches_payment(price: Decimal, payment_amount: Decimal,
     if _profile_amounts_match(unit_price, total_amount):
         return True
     return bool(count > 1 and _profile_amounts_match(unit_price * Decimal(count), total_amount))
+
+
+def _profile_normalize_hint_price_for_payment(hint: dict, payment_amount: Decimal, open_count: int = 1) -> dict:
+    out = dict(hint or {})
+    price = _to_decimal(out.get("price"))
+    total_amount = _to_decimal(payment_amount)
+    count = max(1, int(open_count or 1))
+    if count > 1 and price > 0 and _profile_amounts_match(price, total_amount):
+        unit_price = total_amount / Decimal(count)
+        if unit_price > 0:
+            out["price"] = unit_price
+    return out
 
 
 def _profile_payment_has_local_pack_identity(
@@ -4365,13 +4422,13 @@ def _fetch_pull_activity_hints(wallet_address: str, *, max_pages: int | None = N
             if not isinstance(row, dict):
                 continue
             row_type = str(row.get("__typename") or "").strip()
-            if row_type not in ("PullActivity", "PerpetualPullActivity"):
+            if row_type not in ("PullActivity", "PerpetualPullActivity", "PerpetualBatchPullActivity"):
                 continue
             row_item = row.get("item") if isinstance(row.get("item"), dict) else {}
             contract = str(row.get("contractAddress") or "").strip().lower()
             pack_id = str(row.get("packId") or "").strip()
             pack_label = _pack_label_from_pull_item(row_item)
-            if row_type == "PerpetualPullActivity" and contract.startswith("0x") and len(contract) == 42:
+            if row_type in ("PerpetualPullActivity", "PerpetualBatchPullActivity") and contract.startswith("0x") and len(contract) == 42:
                 pack_key = contract
             else:
                 pack_key = f"legacy:{pack_id}" if pack_id else f"legacy-name:{pack_label}"
@@ -4453,7 +4510,7 @@ def _match_pull_hints_to_payment_rows(
             price = _to_decimal((hint or {}).get("price"))
             if price <= 0 or not _profile_hint_price_matches_payment(price, payment_amount, open_count):
                 continue
-            matched[tx_hash] = hint
+            matched[tx_hash] = _profile_normalize_hint_price_for_payment(hint, payment_amount, open_count)
             used_hint_ids.add(id(hint))
             break
         if tx_hash in matched:
@@ -4480,7 +4537,7 @@ def _match_pull_hints_to_payment_rows(
                 best = hint
                 best_id = id(hint)
         if best:
-            matched[tx_hash] = best
+            matched[tx_hash] = _profile_normalize_hint_price_for_payment(best, payment_amount, open_count)
             used_hint_ids.add(best_id)
 
     return matched
@@ -5819,12 +5876,17 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
                 tx_hash = str(row.get("hash") or "").strip().lower()
                 if not tx_hash:
                     continue
+                open_count = max(1, int(open_count_by_tx.get(tx_hash) or 1))
+                static_hint = _profile_static_payment_pack_hint(row, open_count=open_count)
+                if isinstance(static_hint, dict):
+                    pull_hint_matches[tx_hash] = static_hint
+                    activity_tx_map_dirty = _record_pack_activity_tx_hint(activity_tx_map, static_hint) or activity_tx_map_dirty
+                    continue
                 cached_hint = _lookup_pack_activity_tx_hint(activity_tx_map, tx_hash)
                 if not isinstance(cached_hint, dict):
                     continue
                 payment_amount = _tokentx_usdt_amount(row)
                 hint_price = _to_decimal(cached_hint.get("price"))
-                open_count = max(1, int(open_count_by_tx.get(tx_hash) or 1))
                 if payment_amount > 0 and hint_price > 0 and _profile_hint_price_matches_payment(hint_price, payment_amount, open_count):
                     pull_hint_matches[tx_hash] = cached_hint
 
