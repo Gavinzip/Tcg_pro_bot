@@ -45,6 +45,8 @@ from sync_nft13_incremental import (  # type: ignore
 
 ERC721_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 DEFAULT_START_BLOCK = 99465073
+DEFAULT_HELPER_CONTRACT = "0x2e737d552b3c601ada4fcd167bfbd8d4e1043b2c"
+DEFAULT_HELPER_MIGRATION_TOPIC = "0xa8842895c03659cf75d4e5e2202ace2ef1981a77551fc02961bc661af0950830"
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -105,6 +107,9 @@ class WalletMigrationConfig:
     sbt_contract: str
     sbt_token_id: int
     card_contract: str
+    helper_contract: str
+    helper_event_topic: str
+    include_card_evidence: bool
     start_block: int
     block_chunk_size: int
     log_page_limit: int
@@ -174,6 +179,9 @@ def load_config(args: argparse.Namespace) -> WalletMigrationConfig:
         ).strip().lower(),
         sbt_token_id=max(0, int(os.getenv("WALLET_MIGRATION_SBT_TOKEN_ID", os.getenv("NFT_TOKEN_ID", "13")))),
         card_contract=str(os.getenv("WALLET_MIGRATION_CARD_CONTRACT", "0xf8646a3ca093e97bb404c3b25e675c0394dd5b30")).strip().lower(),
+        helper_contract=str(os.getenv("WALLET_MIGRATION_HELPER_CONTRACT", DEFAULT_HELPER_CONTRACT)).strip().lower(),
+        helper_event_topic=str(os.getenv("WALLET_MIGRATION_HELPER_TOPIC", DEFAULT_HELPER_MIGRATION_TOPIC)).strip().lower(),
+        include_card_evidence=_env_bool("WALLET_MIGRATION_INCLUDE_CARD_EVIDENCE", False),
         start_block=max(0, int(os.getenv("WALLET_MIGRATION_START_BLOCK", str(DEFAULT_START_BLOCK)))),
         block_chunk_size=max(100, int(os.getenv("WALLET_MIGRATION_BLOCK_CHUNK", "200000"))),
         log_page_limit=max(1, min(1000, int(os.getenv("WALLET_MIGRATION_LOG_PAGE_LIMIT", "1000")))),
@@ -190,9 +198,15 @@ def load_config(args: argparse.Namespace) -> WalletMigrationConfig:
 def validate_config(cfg: WalletMigrationConfig, *, require_api_key: bool = True) -> None:
     if require_api_key and not cfg.bsc_api_key:
         raise RuntimeError("BSCSCAN_API_KEY is required for wallet migration sync")
-    for name, addr in (("sbt_contract", cfg.sbt_contract), ("card_contract", cfg.card_contract)):
+    for name, addr in (
+        ("sbt_contract", cfg.sbt_contract),
+        ("card_contract", cfg.card_contract),
+        ("helper_contract", cfg.helper_contract),
+    ):
         if not addr.startswith("0x") or len(addr) != 42:
             raise RuntimeError(f"{name} invalid")
+    if not cfg.helper_event_topic.startswith("0x") or len(cfg.helper_event_topic) != 66:
+        raise RuntimeError("helper_event_topic invalid")
     if cfg.backup_git_enabled and not cfg.backup_git_repo:
         raise RuntimeError("BACKUP_GIT_REPO is required when BACKUP_GIT_ENABLED=1")
 
@@ -238,6 +252,39 @@ def _is_target_sbt_mint(cfg: WalletMigrationConfig, row: dict[str, Any]) -> tupl
     return False, ""
 
 
+def _target_sbt_transfers(cfg: WalletMigrationConfig, row: dict[str, Any]) -> list[tuple[str, str, int]]:
+    topics = row.get("topics") if isinstance(row.get("topics"), list) else []
+    if len(topics) < 4:
+        return []
+    topic0 = str(topics[0] or "").strip().lower()
+    from_addr = _topic_to_address(topics[2]).lower()
+    to_addr = _topic_to_address(topics[3]).lower()
+    if not _normalize_address(from_addr) or not _normalize_address(to_addr):
+        return []
+
+    if topic0 == TRANSFER_SINGLE_TOPIC:
+        decoded = _decode_transfer_single(row.get("data"))
+        if decoded is None:
+            return []
+        token_id, amount = decoded
+        if token_id == cfg.sbt_token_id and amount > 0:
+            return [(from_addr, to_addr, int(amount))]
+        return []
+
+    if topic0 == TRANSFER_BATCH_TOPIC:
+        decoded_batch = _decode_transfer_batch(row.get("data"))
+        if decoded_batch is None:
+            return []
+        ids, values = decoded_batch
+        out: list[tuple[str, str, int]] = []
+        for token_id, amount in zip(ids, values):
+            if token_id == cfg.sbt_token_id and amount > 0:
+                out.append((from_addr, to_addr, int(amount)))
+        return out
+
+    return []
+
+
 def _topic_address(topic: Any) -> str:
     text = str(topic or "").strip().lower()
     if text.startswith("0x"):
@@ -247,38 +294,120 @@ def _topic_address(topic: Any) -> str:
     return _normalize_address("0x" + text[-40:])
 
 
+def _helper_migration_pair(row: dict[str, Any]) -> tuple[str, str] | None:
+    topics = row.get("topics") if isinstance(row.get("topics"), list) else []
+    if len(topics) < 4:
+        return None
+    old_wallet = _topic_address(topics[2])
+    new_wallet = _topic_address(topics[3])
+    if not old_wallet or not new_wallet:
+        return None
+    if old_wallet == ZERO_ADDRESS or new_wallet == ZERO_ADDRESS or old_wallet == new_wallet:
+        return None
+    return old_wallet, new_wallet
+
+
 def _scan_confirmed_migrations(cfg: WalletMigrationConfig, *, from_block: int, to_block: int) -> tuple[list[dict[str, Any]], dict[str, int]]:
     if from_block > to_block:
-        return [], {"ranges": 0, "sbt_logs": 0, "sbt_mints": 0, "card_logs": 0, "confirmed_pairs": 0}
+        return [], {
+            "ranges": 0,
+            "sbt_logs": 0,
+            "sbt_token_events": 0,
+            "sbt_mints": 0,
+            "helper_logs": 0,
+            "helper_candidates": 0,
+            "helper_confirmed_pairs": 0,
+            "card_logs": 0,
+            "card_confirmed_pairs": 0,
+            "confirmed_pairs": 0,
+        }
 
     sbt_logs: list[dict[str, Any]] = []
+    helper_logs: list[dict[str, Any]] = []
     cursor = from_block
     ranges = 0
     while cursor <= to_block:
         chunk_end = min(to_block, cursor + cfg.block_chunk_size - 1)
         for topic in (TRANSFER_SINGLE_TOPIC, TRANSFER_BATCH_TOPIC):
             sbt_logs.extend(_bsc_get_logs(cfg, cfg.sbt_contract, cursor, chunk_end, topic))
+        helper_logs.extend(_bsc_get_logs(cfg, cfg.helper_contract, cursor, chunk_end, cfg.helper_event_topic))
         ranges += 1
         cursor = chunk_end + 1
     sbt_logs.sort(key=_event_sort_key)
+    helper_logs.sort(key=_event_sort_key)
 
     migration_txs: set[str] = set()
     new_by_tx: dict[str, set[str]] = defaultdict(set)
     mint_blocks: dict[tuple[str, str], int] = {}
+    sbt_deltas_by_tx: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    sbt_token_events = 0
     for row in sbt_logs:
-        ok, new_wallet = _is_target_sbt_mint(cfg, row)
-        if not ok:
-            continue
         tx_hash = str(row.get("transactionHash") or "").strip().lower()
         if not tx_hash:
             continue
         block_number = _parse_int(row.get("blockNumber"))
+        for from_addr, to_addr, amount in _target_sbt_transfers(cfg, row):
+            sbt_token_events += 1
+            if from_addr != ZERO_ADDRESS:
+                sbt_deltas_by_tx[tx_hash][from_addr] -= int(amount)
+            if to_addr != ZERO_ADDRESS:
+                sbt_deltas_by_tx[tx_hash][to_addr] += int(amount)
+
+        ok, new_wallet = _is_target_sbt_mint(cfg, row)
+        if not ok:
+            continue
         migration_txs.add(tx_hash)
         new_by_tx[tx_hash].add(new_wallet)
         mint_blocks[(tx_hash, new_wallet)] = block_number
 
+    rows_by_old: dict[str, dict[str, Any]] = {}
+
+    def _candidate_priority(row: dict[str, Any]) -> tuple[int, int]:
+        source = str(row.get("source") or "")
+        priority = 2 if source.startswith("sbt13_helper") else 1
+        return _parse_int(row.get("block")), priority
+
+    def _add_candidate(row: dict[str, Any]) -> None:
+        old_addr = _normalize_address(row.get("old"))
+        new_addr = _normalize_address(row.get("new"))
+        if not old_addr or not new_addr or old_addr == new_addr:
+            return
+        prev = rows_by_old.get(old_addr)
+        if prev is None or _candidate_priority(row) >= _candidate_priority(prev):
+            rows_by_old[old_addr] = row
+
+    helper_candidates = 0
+    for row in helper_logs:
+        tx_hash = str(row.get("transactionHash") or "").strip().lower()
+        if not tx_hash:
+            continue
+        pair = _helper_migration_pair(row)
+        if pair is None:
+            continue
+        helper_candidates += 1
+        old_wallet, new_wallet = pair
+        deltas = sbt_deltas_by_tx.get(tx_hash) or {}
+        if int(deltas.get(new_wallet, 0)) <= 0:
+            continue
+        migration_txs.add(tx_hash)
+        new_by_tx[tx_hash].add(new_wallet)
+        block_number = _parse_int(row.get("blockNumber"))
+        mint_blocks.setdefault((tx_hash, new_wallet), block_number)
+        _add_candidate(
+            {
+                "old": old_wallet,
+                "new": new_wallet,
+                "tx": tx_hash,
+                "block": block_number,
+                "cards": 0,
+                "sbt_old_delta": int(deltas.get(old_wallet, 0)),
+                "sbt_new_delta": int(deltas.get(new_wallet, 0)),
+                "source": "sbt13_helper_event_and_sbt_mint_same_tx",
+            }
+        )
+
     card_logs: list[dict[str, Any]] = []
-    if migration_txs:
+    if cfg.include_card_evidence and migration_txs:
         cursor = from_block
         while cursor <= to_block:
             chunk_end = min(to_block, cursor + cfg.block_chunk_size - 1)
@@ -302,13 +431,12 @@ def _scan_confirmed_migrations(cfg: WalletMigrationConfig, *, from_block: int, t
             continue
         card_pairs_by_tx[tx_hash].append((old_wallet, new_wallet))
 
-    rows: list[dict[str, Any]] = []
     for tx_hash, pairs in card_pairs_by_tx.items():
         if not pairs:
             continue
         pair, count = Counter(pairs).most_common(1)[0]
         old_wallet, new_wallet = pair
-        rows.append(
+        _add_candidate(
             {
                 "old": old_wallet,
                 "new": new_wallet,
@@ -319,12 +447,17 @@ def _scan_confirmed_migrations(cfg: WalletMigrationConfig, *, from_block: int, t
             }
         )
 
-    rows.sort(key=lambda x: (int(x.get("block") or 0), str(x.get("old") or ""), str(x.get("new") or "")))
+    rows = sorted(rows_by_old.values(), key=lambda x: (int(x.get("block") or 0), str(x.get("old") or ""), str(x.get("new") or "")))
     stats = {
         "ranges": int(ranges),
         "sbt_logs": len(sbt_logs),
+        "sbt_token_events": int(sbt_token_events),
         "sbt_mints": sum(len(v) for v in new_by_tx.values()),
+        "helper_logs": len(helper_logs),
+        "helper_candidates": int(helper_candidates),
+        "helper_confirmed_pairs": sum(1 for x in rows if str(x.get("source") or "").startswith("sbt13_helper")),
         "card_logs": len(card_logs),
+        "card_confirmed_pairs": len(card_pairs_by_tx),
         "confirmed_pairs": len(rows),
     }
     return rows, stats
@@ -350,6 +483,16 @@ def _merge_mapping_payload(cfg: WalletMigrationConfig, new_rows: list[dict[str, 
                 "tx": str(row.get("tx") or "").strip().lower(),
                 "cards": _parse_int(row.get("cards")),
                 "source": str(row.get("source") or "existing"),
+                **(
+                    {"sbt_old_delta": _parse_int(row.get("sbt_old_delta"))}
+                    if row.get("sbt_old_delta") is not None
+                    else {}
+                ),
+                **(
+                    {"sbt_new_delta": _parse_int(row.get("sbt_new_delta"))}
+                    if row.get("sbt_new_delta") is not None
+                    else {}
+                ),
             }
     else:
         for old_addr, new_addr in existing_map.items():
@@ -370,7 +513,7 @@ def _merge_mapping_payload(cfg: WalletMigrationConfig, new_rows: list[dict[str, 
         prev = rows_by_old.get(old_addr)
         row_block = _parse_int(row.get("block"))
         if prev is None or row_block >= _parse_int(prev.get("block")):
-            rows_by_old[old_addr] = {
+            normalized_row = {
                 "old": old_addr,
                 "new": new_addr,
                 "block": row_block,
@@ -378,16 +521,24 @@ def _merge_mapping_payload(cfg: WalletMigrationConfig, new_rows: list[dict[str, 
                 "cards": _parse_int(row.get("cards")),
                 "source": str(row.get("source") or "sbt13_mint_and_card_transfer_same_tx"),
             }
+            if row.get("sbt_old_delta") is not None:
+                normalized_row["sbt_old_delta"] = _parse_int(row.get("sbt_old_delta"))
+            if row.get("sbt_new_delta") is not None:
+                normalized_row["sbt_new_delta"] = _parse_int(row.get("sbt_new_delta"))
+            rows_by_old[old_addr] = normalized_row
 
     mappings = sorted(rows_by_old.values(), key=lambda x: (str(x.get("old") or ""), str(x.get("new") or "")))
     now = _now_tpe(cfg.tzinfo).isoformat()
     return {
         "version": 1,
         "updated_at": now,
-        "source": "bsc_logs:sbt13_mint_plus_card_transfer",
+        "source": "bsc_logs:sbt13_helper_event_plus_sbt_mint",
         "sbt_contract": cfg.sbt_contract,
         "sbt_token_id": str(cfg.sbt_token_id),
         "card_contract": cfg.card_contract,
+        "helper_contract": cfg.helper_contract,
+        "helper_event_topic": cfg.helper_event_topic,
+        "include_card_evidence": bool(cfg.include_card_evidence),
         "last_scanned_block": int(last_scanned_block),
         "mappings": mappings,
     }
@@ -403,6 +554,9 @@ def _status_payload(cfg: WalletMigrationConfig, *, success: bool, message: str, 
         "sbt_contract": cfg.sbt_contract,
         "sbt_token_id": str(cfg.sbt_token_id),
         "card_contract": cfg.card_contract,
+        "helper_contract": cfg.helper_contract,
+        "helper_event_topic": cfg.helper_event_topic,
+        "include_card_evidence": bool(cfg.include_card_evidence),
     }
     if extra:
         payload["extra"] = extra
@@ -529,7 +683,8 @@ def main() -> int:
     result = run_sync(cfg, full_rebuild=bool(args.full_rebuild))
     msg = (
         f"trigger={cfg.trigger} blocks={result['from_block']}-{result['to_block']} "
-        f"sbt_mints={result['sbt_mints']} confirmed={result['confirmed_pairs']} "
+        f"sbt_mints={result['sbt_mints']} helper_confirmed={result['helper_confirmed_pairs']} "
+        f"confirmed={result['confirmed_pairs']} "
         f"mappings={result['mapping_count']} map={cfg.map_path}"
     )
     write_status(cfg, success=True, message=msg, extra=result)
