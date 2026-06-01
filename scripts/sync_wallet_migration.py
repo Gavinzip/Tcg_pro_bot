@@ -359,12 +359,18 @@ def _scan_confirmed_migrations(cfg: WalletMigrationConfig, *, from_block: int, t
         migration_txs.add(tx_hash)
         new_by_tx[tx_hash].add(new_wallet)
         mint_blocks[(tx_hash, new_wallet)] = block_number
+    sbt_mint_wallets = sum(len(v) for v in new_by_tx.values())
 
     rows_by_old: dict[str, dict[str, Any]] = {}
 
     def _candidate_priority(row: dict[str, Any]) -> tuple[int, int]:
         source = str(row.get("source") or "")
-        priority = 2 if source.startswith("sbt13_helper") else 1
+        if source.startswith("helper_event_with_sbt13") or source.startswith("sbt13_helper"):
+            priority = 3
+        elif source.startswith("helper_event"):
+            priority = 2
+        else:
+            priority = 1
         return _parse_int(row.get("block")), priority
 
     def _add_candidate(row: dict[str, Any]) -> None:
@@ -387,12 +393,12 @@ def _scan_confirmed_migrations(cfg: WalletMigrationConfig, *, from_block: int, t
         helper_candidates += 1
         old_wallet, new_wallet = pair
         deltas = sbt_deltas_by_tx.get(tx_hash) or {}
-        if int(deltas.get(new_wallet, 0)) <= 0:
-            continue
         migration_txs.add(tx_hash)
         new_by_tx[tx_hash].add(new_wallet)
         block_number = _parse_int(row.get("blockNumber"))
         mint_blocks.setdefault((tx_hash, new_wallet), block_number)
+        sbt_old_delta = int(deltas.get(old_wallet, 0))
+        sbt_new_delta = int(deltas.get(new_wallet, 0))
         _add_candidate(
             {
                 "old": old_wallet,
@@ -400,9 +406,13 @@ def _scan_confirmed_migrations(cfg: WalletMigrationConfig, *, from_block: int, t
                 "tx": tx_hash,
                 "block": block_number,
                 "cards": 0,
-                "sbt_old_delta": int(deltas.get(old_wallet, 0)),
-                "sbt_new_delta": int(deltas.get(new_wallet, 0)),
-                "source": "sbt13_helper_event_and_sbt_mint_same_tx",
+                "sbt_old_delta": sbt_old_delta,
+                "sbt_new_delta": sbt_new_delta,
+                "source": (
+                    "helper_event_with_sbt13_delta_same_tx"
+                    if sbt_new_delta > 0
+                    else "helper_event_only"
+                ),
             }
         )
 
@@ -452,10 +462,14 @@ def _scan_confirmed_migrations(cfg: WalletMigrationConfig, *, from_block: int, t
         "ranges": int(ranges),
         "sbt_logs": len(sbt_logs),
         "sbt_token_events": int(sbt_token_events),
-        "sbt_mints": sum(len(v) for v in new_by_tx.values()),
+        "sbt_mints": int(sbt_mint_wallets),
         "helper_logs": len(helper_logs),
         "helper_candidates": int(helper_candidates),
-        "helper_confirmed_pairs": sum(1 for x in rows if str(x.get("source") or "").startswith("sbt13_helper")),
+        "helper_confirmed_pairs": sum(1 for x in rows if str(x.get("source") or "").startswith("helper_event")),
+        "helper_event_only_pairs": sum(1 for x in rows if str(x.get("source") or "") == "helper_event_only"),
+        "helper_with_sbt_delta_pairs": sum(
+            1 for x in rows if str(x.get("source") or "") == "helper_event_with_sbt13_delta_same_tx"
+        ),
         "card_logs": len(card_logs),
         "card_confirmed_pairs": len(card_pairs_by_tx),
         "confirmed_pairs": len(rows),
@@ -532,7 +546,7 @@ def _merge_mapping_payload(cfg: WalletMigrationConfig, new_rows: list[dict[str, 
     return {
         "version": 1,
         "updated_at": now,
-        "source": "bsc_logs:sbt13_helper_event_plus_sbt_mint",
+        "source": "bsc_logs:helper_migration_event",
         "sbt_contract": cfg.sbt_contract,
         "sbt_token_id": str(cfg.sbt_token_id),
         "card_contract": cfg.card_contract,
