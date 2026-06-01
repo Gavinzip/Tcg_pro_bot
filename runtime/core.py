@@ -29,7 +29,9 @@ import market_report_vision
 import image_generator
 from dotenv import load_dotenv
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
+from runtime.wallet_migration import wallet_migration_api_payload
 # ============================================================
 # ⚠️ JINA AI RATE LIMITER 說明（重要！請勿刪除此說明）
 # ============================================================
@@ -48,7 +50,45 @@ from zoneinfo import ZoneInfo
 # ============================================================
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    def _send_json(self, status_code: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _authorized_wallet_migration_api(self, query: dict[str, list[str]]) -> bool:
+        expected = str(os.getenv("WALLET_MIGRATION_API_TOKEN", "")).strip()
+        if not expected:
+            return True
+        auth = str(self.headers.get("Authorization") or "").strip()
+        if auth == f"Bearer {expected}":
+            return True
+        token = str((query.get("token") or [""])[0] or "").strip()
+        return bool(token and token == expected)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.end_headers()
+
     def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        query = parse_qs(parsed.query)
+        if path in ("/api/wallet-migrations", "/api/wallet-migrations.json"):
+            if not self._authorized_wallet_migration_api(query):
+                self._send_json(401, {"success": False, "error": "unauthorized"})
+                return
+            payload = wallet_migration_api_payload()
+            self._send_json(200, payload)
+            return
+
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
