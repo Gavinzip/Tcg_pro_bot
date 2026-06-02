@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,6 +24,13 @@ except Exception:  # pragma: no cover
 
 import requests
 from dotenv import load_dotenv
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+for _path in (PROJECT_ROOT, SCRIPT_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
 from onchain_metrics import (
     OnchainConfig,
     analyze_wallet as analyze_wallet_onchain,
@@ -30,6 +38,7 @@ from onchain_metrics import (
     scan_erc1155_contract_balances,
     scan_wallet_open_counts_by_time_incremental,
 )
+from runtime.wallet_migration import load_wallet_migration_map, wallet_migration_map_path
 
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
 RENAISS_COLLECTIBLE_BY_TOKEN_URL = "https://www.renaiss.xyz/api/trpc/collectible.getCollectibleByTokenId"
@@ -78,6 +87,13 @@ def _parse_address_csv(raw: str | None, *, default_values: tuple[str, ...] = ())
         seen.add(addr)
         values.append(addr)
     return tuple(values)
+
+
+def _normalize_wallet_address(address: str | None) -> str:
+    text = str(address or "").strip().lower()
+    if text.startswith("0x") and len(text) == 42:
+        return text
+    return ""
 
 
 DEFAULT_ONCHAIN_PACK_CONTRACTS = (
@@ -722,6 +738,7 @@ class RankingConfig:
     checkpoint_flush_every: int
     wallet_source: str
     holders_file: Path | None
+    wallet_migration_map_path: Path | None
 
     @property
     def latest_path(self) -> Path:
@@ -758,6 +775,10 @@ class RankingConfig:
     @property
     def sbt_state_path(self) -> Path:
         return self.data_dir / "state" / "ranking_sbt_state.json"
+
+    @property
+    def source_wallet_state_path(self) -> Path:
+        return self.data_dir / "state" / "ranking_source_wallets_state.json"
 
     def history_path(self, now_dt: datetime) -> Path:
         key = now_dt.strftime("%Y-%m-%d_%H")
@@ -817,6 +838,12 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
 
     holders_file_raw = str(os.getenv("RANK_SYNC_HOLDERS_FILE", "")).strip()
     holders_file = Path(holders_file_raw).expanduser() if holders_file_raw else _default_holders_file(app_env)
+    migration_map_raw = str(os.getenv("WALLET_MIGRATION_MAP_PATH", "")).strip()
+    migration_map_path = (
+        Path(migration_map_raw).expanduser().resolve()
+        if migration_map_raw
+        else Path(wallet_migration_map_path()).expanduser().resolve()
+    )
 
     wallet_source = str(os.getenv("RANK_SYNC_WALLET_SOURCE", "holders_file")).strip().lower() or "holders_file"
     if wallet_source not in ("holders_file", "collectible", "auto"):
@@ -909,6 +936,7 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
         checkpoint_flush_every=checkpoint_flush_every,
         wallet_source=wallet_source,
         holders_file=selected_holders_file,
+        wallet_migration_map_path=migration_map_path,
     )
 
 
@@ -1028,6 +1056,8 @@ def git_push_rankings(cfg: RankingConfig, now_dt: datetime, commit_message: str)
         shutil.copy2(cfg.status_path, dataset_dir / "state" / cfg.status_path.name)
     if cfg.checkpoint_path.exists():
         shutil.copy2(cfg.checkpoint_path, dataset_dir / "state" / cfg.checkpoint_path.name)
+    if cfg.source_wallet_state_path.exists():
+        shutil.copy2(cfg.source_wallet_state_path, dataset_dir / "state" / cfg.source_wallet_state_path.name)
 
     had_repo_market_cache = cfg.repo_market_cache_dir.exists()
     if cfg.market_cache_dir.exists():
@@ -1168,6 +1198,11 @@ def bootstrap_from_git(cfg: RankingConfig) -> bool:
         cfg.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(repo_checkpoint, cfg.checkpoint_path)
 
+    repo_source_wallet_state = cfg.repo_dataset_dir / "state" / cfg.source_wallet_state_path.name
+    if repo_source_wallet_state.exists():
+        cfg.source_wallet_state_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(repo_source_wallet_state, cfg.source_wallet_state_path)
+
     if cfg.repo_market_cache_dir.exists():
         if cfg.market_cache_dir.exists():
             shutil.rmtree(cfg.market_cache_dir, ignore_errors=True)
@@ -1225,6 +1260,51 @@ def load_previous_wallets(cfg: RankingConfig) -> dict[str, WalletRecord]:
             continue
         out[rec.address] = rec
     return out
+
+
+def _wallet_record_to_dict(rec: WalletRecord) -> dict[str, Any]:
+    return {
+        "address": rec.address,
+        "username": rec.username,
+        "collectible_count": rec.collectible_count,
+        "pack_spent_usdt": _decimal_to_str(rec.pack_spent_usdt),
+        "trade_volume_usdt": _decimal_to_str(rec.trade_volume_usdt),
+        "trade_spent_usdt": _decimal_to_str(rec.trade_spent_usdt),
+        "trade_earned_usdt": _decimal_to_str(rec.trade_earned_usdt),
+        "buyback_earned_usdt": _decimal_to_str(rec.buyback_earned_usdt),
+        "card_withdraw_total_usdt": _decimal_to_str(rec.card_withdraw_total_usdt),
+        "total_spent_usdt": _decimal_to_str(rec.total_spent_usdt),
+        "total_earned_usdt": _decimal_to_str(rec.total_earned_usdt),
+        "cash_net_usdt": _decimal_to_str(rec.cash_net_usdt),
+        "holdings_value_usdt": _decimal_to_str(rec.holdings_value_usdt),
+        "total_pnl_usdt": _decimal_to_str(rec.total_pnl_usdt),
+        "participation_days_count": rec.participation_days_count,
+        "sbt_owned_total": rec.sbt_owned_total,
+        "sbt_owned_badge_count": rec.sbt_owned_badge_count,
+        "monthly_gacha_open_count": rec.monthly_gacha_open_count,
+        "volume_rank": rec.volume_rank,
+        "total_spent_rank": rec.total_spent_rank,
+        "holdings_rank": rec.holdings_rank,
+        "pnl_rank": rec.pnl_rank,
+        "participation_days_rank": rec.participation_days_rank,
+        "sbt_rank": rec.sbt_rank,
+        "monthly_gacha_open_rank": rec.monthly_gacha_open_rank,
+        "monthly_gacha_level": rec.monthly_gacha_level,
+    }
+
+
+def load_previous_source_wallets(cfg: RankingConfig) -> tuple[dict[str, WalletRecord], bool]:
+    data = _json_load(cfg.source_wallet_state_path)
+    rows = data.get("wallets") if isinstance(data.get("wallets"), list) else []
+    out: dict[str, WalletRecord] = {}
+    for row in rows:
+        rec = _from_wallet_row(row)
+        if rec is None:
+            continue
+        out[rec.address] = rec
+    if out:
+        return out, True
+    return load_previous_wallets(cfg), False
 
 
 def _clone_wallet_records(rows: dict[str, WalletRecord]) -> dict[str, WalletRecord]:
@@ -1392,6 +1472,63 @@ def load_holders_wallets(path: Path) -> dict[str, WalletRecord]:
     return wallets
 
 
+def _empty_wallet_record(address: str) -> WalletRecord:
+    return WalletRecord(
+        address=address,
+        username=None,
+        holdings_value_usdt=Decimal("0"),
+        collectible_count=0,
+    )
+
+
+def _canonical_wallet_address(address: str, old_to_new: dict[str, str]) -> str:
+    current = _normalize_wallet_address(address)
+    if not current:
+        return ""
+    seen: set[str] = set()
+    while current in old_to_new and current not in seen:
+        seen.add(current)
+        next_addr = _normalize_wallet_address(old_to_new.get(current))
+        if not next_addr:
+            break
+        current = next_addr
+    return current
+
+
+def _expand_wallets_for_migration(
+    wallets: dict[str, WalletRecord],
+    old_to_new: dict[str, str],
+) -> int:
+    if not old_to_new or not wallets:
+        return 0
+    linked_base = set(wallets.keys())
+    added = 0
+    for old_addr, new_addr in old_to_new.items():
+        old_norm = _normalize_wallet_address(old_addr)
+        new_norm = _normalize_wallet_address(new_addr)
+        if not old_norm or not new_norm or old_norm == new_norm:
+            continue
+        if old_norm not in linked_base and new_norm not in linked_base:
+            continue
+        for addr in (old_norm, new_norm):
+            if addr in wallets:
+                continue
+            wallets[addr] = _empty_wallet_record(addr)
+            added += 1
+    return added
+
+
+def _canonicalize_int_counts(counts: dict[str, int], old_to_new: dict[str, str]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for raw_addr, raw_count in (counts or {}).items():
+        addr = _normalize_wallet_address(raw_addr)
+        if not addr:
+            continue
+        canonical = _canonical_wallet_address(addr, old_to_new) or addr
+        out[canonical] = int(out.get(canonical, 0)) + max(0, int(_to_decimal(raw_count) or 0))
+    return out
+
+
 def fetch_latest_activity_id_for_wallet(address: str) -> tuple[str | None, bool]:
     wallet_norm = str(address or "").strip().lower()
     if not wallet_norm:
@@ -1492,6 +1629,7 @@ def fetch_all_wallets(
     cfg: RankingConfig,
     max_wallets: int | None = None,
     fallback_wallets: dict[str, WalletRecord] | None = None,
+    wallet_migration_map: dict[str, str] | None = None,
 ) -> tuple[dict[str, WalletRecord], int, str]:
     limit = 100
     offset = 0
@@ -1499,6 +1637,13 @@ def fetch_all_wallets(
     wallets: dict[str, WalletRecord] = {}
     if cfg.wallet_source == "holders_file" and cfg.holders_file is not None:
         wallets.update(load_holders_wallets(cfg.holders_file))
+    migration_added = _expand_wallets_for_migration(wallets, wallet_migration_map or {})
+    if migration_added:
+        print(
+            "[INFO] migration source wallets added "
+            f"added={migration_added} base_wallets={len(wallets) - migration_added} source_wallets={len(wallets)}",
+            flush=True,
+        )
     holders_only_mode = cfg.wallet_source == "holders_file"
     print(
         f"[INFO] wallet_source={cfg.wallet_source} base_wallets={len(wallets)} "
@@ -1569,9 +1714,11 @@ def fetch_all_wallets(
         fallback_source = fallback_wallets if isinstance(fallback_wallets, dict) else {}
         if fallback_source:
             wallets = _clone_wallet_records(fallback_source)
+            fallback_migration_added = _expand_wallets_for_migration(wallets, wallet_migration_map or {})
             print(
                 "[WARN] collectible.list failed; using previous latest wallet snapshot "
-                f"wallets={len(wallets)} pages_before_failure={total_pages} error={collection_fallback_reason}",
+                f"wallets={len(wallets)} migration_added={fallback_migration_added} "
+                f"pages_before_failure={total_pages} error={collection_fallback_reason}",
                 flush=True,
             )
         elif wallets:
@@ -1841,6 +1988,117 @@ def _wallet_has_activity_history(rec: WalletRecord | None) -> bool:
     )
 
 
+def _merge_wallet_records_by_migration(
+    records: list[WalletRecord],
+    old_to_new: dict[str, str],
+    *,
+    prev_day_keys_map: dict[str, set[str]],
+    monthly_pack_counts_map: dict[str, int],
+    monthly_pack_scan_ok: bool,
+    finished_at: datetime,
+) -> tuple[list[WalletRecord], dict[str, Any], dict[str, str]]:
+    canonical_records: dict[str, WalletRecord] = {}
+    canonical_day_keys: dict[str, set[str]] = defaultdict(set)
+    canonical_participation_fallback: dict[str, int] = defaultdict(int)
+    source_counts: dict[str, int] = defaultdict(int)
+    source_to_canonical: dict[str, str] = {}
+
+    for rec in records:
+        source_addr = _normalize_wallet_address(rec.address)
+        if not source_addr:
+            continue
+        canonical_addr = _canonical_wallet_address(source_addr, old_to_new) or source_addr
+        source_to_canonical[source_addr] = canonical_addr
+        source_counts[canonical_addr] += 1
+
+        target = canonical_records.get(canonical_addr)
+        if target is None:
+            target = _empty_wallet_record(canonical_addr)
+            canonical_records[canonical_addr] = target
+
+        if source_addr == canonical_addr and rec.username:
+            target.username = rec.username
+        elif not target.username and rec.username:
+            target.username = rec.username
+
+        target.holdings_value_usdt += rec.holdings_value_usdt
+        target.collectible_count += int(rec.collectible_count or 0)
+        target.pack_spent_usdt += rec.pack_spent_usdt
+        target.trade_volume_usdt += rec.trade_volume_usdt
+        target.trade_spent_usdt += rec.trade_spent_usdt
+        target.trade_earned_usdt += rec.trade_earned_usdt
+        target.buyback_earned_usdt += rec.buyback_earned_usdt
+        target.card_withdraw_total_usdt += rec.card_withdraw_total_usdt
+        target.total_spent_usdt += rec.total_spent_usdt
+        target.total_earned_usdt += rec.total_earned_usdt
+        target.cash_net_usdt += rec.cash_net_usdt
+        target.sbt_owned_total += int(rec.sbt_owned_total or 0)
+        target.sbt_owned_badge_count += int(rec.sbt_owned_badge_count or 0)
+        if not monthly_pack_scan_ok:
+            target.monthly_gacha_open_count += int(rec.monthly_gacha_open_count or 0)
+
+        day_keys = prev_day_keys_map.get(source_addr) or set()
+        if day_keys:
+            canonical_day_keys[canonical_addr].update(day_keys)
+        canonical_participation_fallback[canonical_addr] = max(
+            int(canonical_participation_fallback.get(canonical_addr) or 0),
+            int(rec.participation_days_count or 0),
+        )
+
+    if monthly_pack_scan_ok:
+        for canonical_addr, target in canonical_records.items():
+            target.monthly_gacha_open_count = int(monthly_pack_counts_map.get(canonical_addr, 0))
+
+    for canonical_addr, target in canonical_records.items():
+        day_keys = canonical_day_keys.get(canonical_addr) or set()
+        if day_keys:
+            target.participation_days_count = _participation_days_since_join(day_keys, finished_at)
+        else:
+            target.participation_days_count = int(canonical_participation_fallback.get(canonical_addr) or 0)
+        target.total_pnl_usdt = target.cash_net_usdt + target.holdings_value_usdt
+
+    merged_records = sorted(canonical_records.values(), key=lambda x: x.address)
+    migrated_source_wallets = sum(1 for source, canonical in source_to_canonical.items() if source != canonical)
+    stats = {
+        "wallet_migration_pairs": len(old_to_new),
+        "source_wallet_count": len(records),
+        "canonical_wallet_count": len(merged_records),
+        "migrated_source_wallets": migrated_source_wallets,
+        "canonical_wallets_from_multiple_sources": sum(1 for count in source_counts.values() if int(count) > 1),
+    }
+    return merged_records, stats, source_to_canonical
+
+
+def build_source_wallet_state(
+    records: list[WalletRecord],
+    *,
+    source_to_canonical: dict[str, str],
+    cfg: RankingConfig,
+    finished_at: datetime,
+    migration_stats: dict[str, Any],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for rec in sorted(records, key=lambda x: x.address):
+        row = _wallet_record_to_dict(rec)
+        row["canonical_address"] = source_to_canonical.get(rec.address, rec.address)
+        rows.append(row)
+    return {
+        "version": 1,
+        "updated_at": finished_at.isoformat(),
+        "trigger": cfg.trigger,
+        "metrics_source": cfg.metrics_source,
+        "wallet_migration_map_path": str(cfg.wallet_migration_map_path or wallet_migration_map_path()),
+        "wallet_migration_pairs": int(_to_decimal(migration_stats.get("wallet_migration_pairs")) or 0),
+        "source_wallet_count": int(_to_decimal(migration_stats.get("source_wallet_count")) or len(records)),
+        "canonical_wallet_count": int(_to_decimal(migration_stats.get("canonical_wallet_count")) or 0),
+        "migrated_source_wallets": int(_to_decimal(migration_stats.get("migrated_source_wallets")) or 0),
+        "canonical_wallets_from_multiple_sources": int(
+            _to_decimal(migration_stats.get("canonical_wallets_from_multiple_sources")) or 0
+        ),
+        "wallets": rows,
+    }
+
+
 def _parse_iso_dt(text: str | None) -> datetime | None:
     t = str(text or "").strip()
     if not t:
@@ -1928,36 +2186,6 @@ def build_payload(
         reverse=True,
     )
 
-    def to_wallet_dict(rec: WalletRecord) -> dict[str, Any]:
-        return {
-            "address": rec.address,
-            "username": rec.username,
-            "collectible_count": rec.collectible_count,
-            "pack_spent_usdt": _decimal_to_str(rec.pack_spent_usdt),
-            "trade_volume_usdt": _decimal_to_str(rec.trade_volume_usdt),
-            "trade_spent_usdt": _decimal_to_str(rec.trade_spent_usdt),
-            "trade_earned_usdt": _decimal_to_str(rec.trade_earned_usdt),
-            "buyback_earned_usdt": _decimal_to_str(rec.buyback_earned_usdt),
-            "card_withdraw_total_usdt": _decimal_to_str(rec.card_withdraw_total_usdt),
-            "total_spent_usdt": _decimal_to_str(rec.total_spent_usdt),
-            "total_earned_usdt": _decimal_to_str(rec.total_earned_usdt),
-            "cash_net_usdt": _decimal_to_str(rec.cash_net_usdt),
-            "holdings_value_usdt": _decimal_to_str(rec.holdings_value_usdt),
-            "total_pnl_usdt": _decimal_to_str(rec.total_pnl_usdt),
-            "participation_days_count": rec.participation_days_count,
-            "sbt_owned_total": rec.sbt_owned_total,
-            "sbt_owned_badge_count": rec.sbt_owned_badge_count,
-            "monthly_gacha_open_count": rec.monthly_gacha_open_count,
-            "volume_rank": rec.volume_rank,
-            "total_spent_rank": rec.total_spent_rank,
-            "holdings_rank": rec.holdings_rank,
-            "pnl_rank": rec.pnl_rank,
-            "participation_days_rank": rec.participation_days_rank,
-            "sbt_rank": rec.sbt_rank,
-            "monthly_gacha_open_rank": rec.monthly_gacha_open_rank,
-            "monthly_gacha_level": rec.monthly_gacha_level,
-        }
-
     return {
         "meta": {
             "timezone": "Asia/Taipei",
@@ -1997,15 +2225,15 @@ def build_payload(
             "sbt_failed_wallets": int(_to_decimal((sbt_scan_stats or {}).get("failed_wallets")) or 0),
         },
         "top": {
-            "volume": [to_wallet_dict(x) for x in by_volume[:100]],
-            "total_spent": [to_wallet_dict(x) for x in by_total_spent[:100]],
-            "holdings": [to_wallet_dict(x) for x in by_holdings[:100]],
-            "pnl": [to_wallet_dict(x) for x in by_pnl[:100]],
-            "participation_days": [to_wallet_dict(x) for x in by_participation[:100]],
-            "sbt": [to_wallet_dict(x) for x in by_sbt[:100]],
-            "monthly_gacha": [to_wallet_dict(x) for x in by_monthly_gacha[:300]],
+            "volume": [_wallet_record_to_dict(x) for x in by_volume[:100]],
+            "total_spent": [_wallet_record_to_dict(x) for x in by_total_spent[:100]],
+            "holdings": [_wallet_record_to_dict(x) for x in by_holdings[:100]],
+            "pnl": [_wallet_record_to_dict(x) for x in by_pnl[:100]],
+            "participation_days": [_wallet_record_to_dict(x) for x in by_participation[:100]],
+            "sbt": [_wallet_record_to_dict(x) for x in by_sbt[:100]],
+            "monthly_gacha": [_wallet_record_to_dict(x) for x in by_monthly_gacha[:300]],
         },
-        "wallets": [to_wallet_dict(x) for x in sorted(records, key=lambda x: x.address)],
+        "wallets": [_wallet_record_to_dict(x) for x in sorted(records, key=lambda x: x.address)],
     }
 
 
@@ -2015,11 +2243,23 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     monthly_window_start_iso = monthly_pack_window_start.isoformat()
     monthly_pack_window_start_ts = int(monthly_pack_window_start.astimezone(timezone.utc).timestamp())
     monthly_pack_window_end_ts = int(monthly_pack_window_end.astimezone(timezone.utc).timestamp())
+    migration_map_path_text = str(cfg.wallet_migration_map_path or wallet_migration_map_path())
+    old_to_new = load_wallet_migration_map(migration_map_path_text)
+    if old_to_new:
+        print(
+            f"[INFO] wallet migration map loaded pairs={len(old_to_new)} path={migration_map_path_text}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[WARN] wallet migration map unavailable; ranking will not merge old/new wallets path={migration_map_path_text}",
+            flush=True,
+        )
     prev_latest_payload = _json_load(cfg.latest_path)
     prev_meta = prev_latest_payload.get("meta") if isinstance(prev_latest_payload.get("meta"), dict) else {}
     prev_monthly_window_start = str(prev_meta.get("monthly_gacha_window_start") or "").strip()
     monthly_window_changed = bool(prev_monthly_window_start and prev_monthly_window_start != monthly_window_start_iso)
-    prev_wallets = load_previous_wallets(cfg)
+    prev_wallets, prev_source_state_loaded = load_previous_source_wallets(cfg)
     prev_state = _json_load(cfg.state_path)
     prev_sbt_state = _json_load(cfg.sbt_state_path)
     prev_checkpoints = load_activity_checkpoints(cfg)
@@ -2028,6 +2268,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         cfg,
         max_wallets=cfg.max_wallets,
         fallback_wallets=prev_wallets,
+        wallet_migration_map=old_to_new,
     )
     current_addrs = set(current_wallets.keys())
     prev_addrs = set(prev_wallets.keys())
@@ -2035,6 +2276,9 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     changed_by_collection = {a for a in current_addrs if _wallet_changed(prev_wallets.get(a), current_wallets[a])}
 
     full_rebuild, full_reason = _should_full_rebuild(cfg, started_at, prev_state)
+    if old_to_new and not prev_source_state_loaded and not full_rebuild:
+        full_rebuild = True
+        full_reason = "migration-source-state-bootstrap"
     if not full_rebuild and prev_checkpoints:
         for row in prev_checkpoints.values():
             keys = row.get("activity_day_keys")
@@ -2083,6 +2327,10 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             print(f"[WARN] monthly pack latest unavailable: {pack_latest_reason}", flush=True)
         else:
             monthly_pack_scan_ok = True
+            if old_to_new:
+                monthly_pack_counts_map = _canonicalize_int_counts(monthly_pack_counts_map, old_to_new)
+                if monthly_pack_scan_stats is not None:
+                    monthly_pack_scan_stats["wallet_migration_pairs"] = len(old_to_new)
             print(
                 "[INFO] monthly pack counts loaded from pack_rank_latest "
                 f"wallets={len(monthly_pack_counts_map)} path={cfg.pack_rank_latest_path}",
@@ -2109,6 +2357,10 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                     if not key.startswith("0x") or len(key) != 42:
                         continue
                     monthly_pack_counts_map[key] = max(0, int(_to_decimal(raw)))
+            if old_to_new:
+                monthly_pack_counts_map = _canonicalize_int_counts(monthly_pack_counts_map, old_to_new)
+                if monthly_pack_scan_stats is not None:
+                    monthly_pack_scan_stats["wallet_migration_pairs"] = len(old_to_new)
             monthly_pack_scan_ok = True
         except Exception as e:
             print(f"[WARN] wallet-time monthly pack scan failed: {e}", flush=True)
@@ -2649,9 +2901,24 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
 
     checkpoint_time = finished_at.isoformat()
     checkpoint_dump = build_checkpoint_dump(current_addrs, checkpoint_next, checkpoint_time)
+    canonical_records, migration_stats, source_to_canonical = _merge_wallet_records_by_migration(
+        records,
+        old_to_new,
+        prev_day_keys_map=prev_day_keys_map,
+        monthly_pack_counts_map=monthly_pack_counts_map,
+        monthly_pack_scan_ok=monthly_pack_scan_ok,
+        finished_at=finished_at,
+    )
+    source_state_payload = build_source_wallet_state(
+        records,
+        source_to_canonical=source_to_canonical,
+        cfg=cfg,
+        finished_at=finished_at,
+        migration_stats=migration_stats,
+    )
 
     payload = build_payload(
-        records,
+        canonical_records,
         started_at,
         finished_at,
         collectible_pages=collectible_pages,
@@ -2676,10 +2943,27 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         payload["meta"]["full_rebuild_active_only"] = bool(cfg.full_rebuild_active_only)
         payload["meta"]["collection_snapshot_fallback"] = bool(collection_fallback_reason)
         payload["meta"]["collection_snapshot_fallback_reason"] = collection_fallback_reason
+        payload["meta"]["wallet_migration_map_path"] = migration_map_path_text
+        payload["meta"]["wallet_migration_pairs"] = int(
+            _to_decimal(migration_stats.get("wallet_migration_pairs")) or 0
+        )
+        payload["meta"]["source_wallet_count"] = int(_to_decimal(migration_stats.get("source_wallet_count")) or 0)
+        payload["meta"]["canonical_wallet_count"] = int(
+            _to_decimal(migration_stats.get("canonical_wallet_count")) or len(canonical_records)
+        )
+        payload["meta"]["migrated_source_wallets"] = int(
+            _to_decimal(migration_stats.get("migrated_source_wallets")) or 0
+        )
+        payload["meta"]["canonical_wallets_from_multiple_sources"] = int(
+            _to_decimal(migration_stats.get("canonical_wallets_from_multiple_sources")) or 0
+        )
+        payload["meta"]["source_wallet_state_path"] = str(cfg.source_wallet_state_path)
+        payload["meta"]["source_wallet_state_loaded"] = bool(prev_source_state_loaded)
 
     _atomic_write_json(cfg.latest_path, payload)
     _atomic_write_json(cfg.history_path(finished_at), payload)
     _atomic_write_json(cfg.checkpoint_path, checkpoint_dump)
+    _atomic_write_json(cfg.source_wallet_state_path, source_state_payload)
 
     prev_last_full = str(prev_state.get("last_full_rebuild_at") or "")
     next_last_full = finished_at.isoformat() if full_rebuild else (prev_last_full or "")
@@ -2687,7 +2971,19 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "updated_at": finished_at.isoformat(),
         "trigger": cfg.trigger,
         "metrics_source": cfg.metrics_source,
-        "wallet_count": len(records),
+        "wallet_count": len(canonical_records),
+        "source_wallet_count": int(_to_decimal(migration_stats.get("source_wallet_count")) or len(records)),
+        "canonical_wallet_count": int(
+            _to_decimal(migration_stats.get("canonical_wallet_count")) or len(canonical_records)
+        ),
+        "wallet_migration_map_path": migration_map_path_text,
+        "wallet_migration_pairs": int(_to_decimal(migration_stats.get("wallet_migration_pairs")) or 0),
+        "migrated_source_wallets": int(_to_decimal(migration_stats.get("migrated_source_wallets")) or 0),
+        "canonical_wallets_from_multiple_sources": int(
+            _to_decimal(migration_stats.get("canonical_wallets_from_multiple_sources")) or 0
+        ),
+        "source_wallet_state_path": str(cfg.source_wallet_state_path),
+        "source_wallet_state_loaded": bool(prev_source_state_loaded),
         "collectible_pages": collectible_pages,
         "collection_snapshot_fallback": bool(collection_fallback_reason),
         "collection_snapshot_fallback_reason": collection_fallback_reason,
@@ -2731,7 +3027,16 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "started_at": started_at,
         "finished_at": finished_at,
         "metrics_source": cfg.metrics_source,
-        "wallet_count": len(records),
+        "wallet_count": len(canonical_records),
+        "source_wallet_count": int(_to_decimal(migration_stats.get("source_wallet_count")) or len(records)),
+        "canonical_wallet_count": int(
+            _to_decimal(migration_stats.get("canonical_wallet_count")) or len(canonical_records)
+        ),
+        "wallet_migration_pairs": int(_to_decimal(migration_stats.get("wallet_migration_pairs")) or 0),
+        "migrated_source_wallets": int(_to_decimal(migration_stats.get("migrated_source_wallets")) or 0),
+        "canonical_wallets_from_multiple_sources": int(
+            _to_decimal(migration_stats.get("canonical_wallets_from_multiple_sources")) or 0
+        ),
         "collectible_pages": collectible_pages,
         "collection_snapshot_fallback": bool(collection_fallback_reason),
         "collection_snapshot_fallback_reason": collection_fallback_reason,
