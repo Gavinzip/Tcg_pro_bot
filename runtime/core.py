@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 from runtime.wallet_migration import wallet_migration_api_payload
+from runtime.wallet_usernames import username_for_wallet
 # ============================================================
 # ⚠️ JINA AI RATE LIMITER 說明（重要！請勿刪除此說明）
 # ============================================================
@@ -622,6 +623,9 @@ def _username_from_rankings_wallet(wallet_address: str) -> str | None:
     wallet_norm = _normalize_wallet_address(wallet_address or "") or str(wallet_address or "").strip().lower()
     if not wallet_norm:
         return None
+    mapped_username = username_for_wallet(wallet_norm)
+    if mapped_username:
+        return mapped_username
     row = _load_rankings_wallet_map().get(wallet_norm) or {}
     username = str(row.get("username") or "").strip()
     return username or None

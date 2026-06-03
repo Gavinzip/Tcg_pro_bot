@@ -22,6 +22,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from runtime.wallet_migration import apply_wallet_migration_counts, load_wallet_migration_map, wallet_migration_map_path
+from runtime.wallet_usernames import (
+    load_wallet_username_map,
+    wallet_username_map_path as default_wallet_username_map_path,
+)
 
 try:
     from zoneinfo import ZoneInfo
@@ -214,6 +218,7 @@ class PackRankConfig:
     onchain_marketplace_contract: str
     onchain_page_size: int
     wallet_migration_map_path: str
+    wallet_username_map_path: str
 
     @property
     def latest_path(self) -> Path:
@@ -268,6 +273,7 @@ def load_config(args: argparse.Namespace) -> PackRankConfig:
     ).strip().lower()
     onchain_page_size = max(100, min(10000, _to_int(os.getenv("ONCHAIN_PAGE_SIZE", "10000"), 10000)))
     wallet_migration_map_path = str(os.getenv("WALLET_MIGRATION_MAP_PATH", "")).strip()
+    wallet_username_map_path = str(os.getenv("WALLET_USERNAME_MAP_PATH", "")).strip() or default_wallet_username_map_path()
 
     return PackRankConfig(
         trigger=str(args.trigger or "manual"),
@@ -282,6 +288,7 @@ def load_config(args: argparse.Namespace) -> PackRankConfig:
         onchain_marketplace_contract=onchain_marketplace_contract,
         onchain_page_size=onchain_page_size,
         wallet_migration_map_path=wallet_migration_map_path,
+        wallet_username_map_path=wallet_username_map_path,
     )
 
 
@@ -372,7 +379,18 @@ def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, An
     pack_contracts = _pack_rank_contracts(prev_state)
     if not pack_contracts:
         raise RuntimeError("PACK_RANK_CONTRACTS is empty")
-    username_map = _username_map_from_pack_rank_latest(cfg.latest_path)
+    previous_username_map = _username_map_from_pack_rank_latest(cfg.latest_path)
+    wallet_username_map = load_wallet_username_map(cfg.wallet_username_map_path)
+    if wallet_username_map:
+        print(
+            f"[INFO] wallet username map loaded wallets={len(wallet_username_map)} path={cfg.wallet_username_map_path}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[WARN] wallet username map unavailable; pack_rank usernames will use previous latest only path={cfg.wallet_username_map_path}",
+            flush=True,
+        )
     scan = scan_pack_open_counts_incremental(
         onchain_cfg,
         pack_contracts=pack_contracts,
@@ -395,13 +413,14 @@ def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, An
         opens = max(0, _to_int(raw_count, 0))
         if opens <= 0:
             continue
-        username = username_map.get(addr)
+        username = wallet_username_map.get(addr) or previous_username_map.get(addr)
         if not username and migration_map:
             # If canonical(new) has no username yet, borrow old wallet name from latest map.
             for old_addr, new_addr in migration_map.items():
                 if str(new_addr or "").strip().lower() != addr:
                     continue
-                old_name = username_map.get(str(old_addr or "").strip().lower())
+                old_key = str(old_addr or "").strip().lower()
+                old_name = wallet_username_map.get(old_key) or previous_username_map.get(old_key)
                 if old_name:
                     username = old_name
                     break
@@ -448,6 +467,8 @@ def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, An
         "cutover_start": (_pack_rank_cutover_start(cfg.tzinfo).isoformat() if _pack_rank_cutover_start(cfg.tzinfo) else ""),
         "wallet_migration_map_path": str(cfg.wallet_migration_map_path or wallet_migration_map_path()),
         "wallet_migration_pairs": len(migration_map),
+        "wallet_username_map_path": str(cfg.wallet_username_map_path),
+        "wallet_username_map_wallets": len(wallet_username_map),
         "wallet_count": len(rows),
         "total_monthly_opens": int(sum(int(r.get("monthly_gacha_open_count") or 0) for r in rows)),
     }
@@ -483,6 +504,8 @@ def run_sync(cfg: PackRankConfig, *, full_rebuild: bool = False) -> dict[str, An
         "state_path": str(cfg.state_path),
         "pre_cutover_snapshot_path": str(cfg.pre_cutover_snapshot_path),
         "full_rebuild": bool(full_rebuild),
+        "wallet_username_map_path": str(cfg.wallet_username_map_path),
+        "wallet_username_map_wallets": len(wallet_username_map),
     }
 
 
@@ -529,6 +552,8 @@ def main() -> int:
             "state_path": result["state_path"],
             "pre_cutover_snapshot_path": result["pre_cutover_snapshot_path"],
             "full_rebuild": result["full_rebuild"],
+            "wallet_username_map_path": result["wallet_username_map_path"],
+            "wallet_username_map_wallets": result["wallet_username_map_wallets"],
         },
     )
     return 0

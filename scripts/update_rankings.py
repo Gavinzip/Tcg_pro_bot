@@ -39,6 +39,10 @@ from onchain_metrics import (
     scan_wallet_open_counts_by_time_incremental,
 )
 from runtime.wallet_migration import load_wallet_migration_map, wallet_migration_map_path
+from runtime.wallet_usernames import (
+    load_wallet_username_map,
+    wallet_username_map_path as default_wallet_username_map_path,
+)
 
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
 RENAISS_COLLECTIBLE_BY_TOKEN_URL = "https://www.renaiss.xyz/api/trpc/collectible.getCollectibleByTokenId"
@@ -739,6 +743,7 @@ class RankingConfig:
     wallet_source: str
     holders_file: Path | None
     wallet_migration_map_path: Path | None
+    wallet_username_map_path: Path | None
 
     @property
     def latest_path(self) -> Path:
@@ -844,6 +849,12 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
         if migration_map_raw
         else Path(wallet_migration_map_path()).expanduser().resolve()
     )
+    username_map_raw = str(os.getenv("WALLET_USERNAME_MAP_PATH", "")).strip()
+    username_map_path = (
+        Path(username_map_raw).expanduser().resolve()
+        if username_map_raw
+        else Path(default_wallet_username_map_path()).expanduser().resolve()
+    )
 
     wallet_source = str(os.getenv("RANK_SYNC_WALLET_SOURCE", "holders_file")).strip().lower() or "holders_file"
     if wallet_source not in ("holders_file", "collectible", "auto"):
@@ -937,6 +948,7 @@ def load_config(args: argparse.Namespace) -> RankingConfig:
         wallet_source=wallet_source,
         holders_file=selected_holders_file,
         wallet_migration_map_path=migration_map_path,
+        wallet_username_map_path=username_map_path,
     )
 
 
@@ -1527,6 +1539,25 @@ def _canonicalize_int_counts(counts: dict[str, int], old_to_new: dict[str, str])
         canonical = _canonical_wallet_address(addr, old_to_new) or addr
         out[canonical] = int(out.get(canonical, 0)) + max(0, int(_to_decimal(raw_count) or 0))
     return out
+
+
+def _apply_wallet_username_map(records: Any, username_map: dict[str, str]) -> int:
+    if not username_map:
+        return 0
+    applied = 0
+    for rec in records or []:
+        if not isinstance(rec, WalletRecord):
+            continue
+        addr = _normalize_wallet_address(rec.address)
+        if not addr:
+            continue
+        username = str(username_map.get(addr) or "").strip()
+        if not username:
+            continue
+        if rec.username != username:
+            rec.username = username
+            applied += 1
+    return applied
 
 
 def fetch_latest_activity_id_for_wallet(address: str) -> tuple[str | None, bool]:
@@ -2255,6 +2286,18 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             f"[WARN] wallet migration map unavailable; ranking will not merge old/new wallets path={migration_map_path_text}",
             flush=True,
         )
+    username_map_path_text = str(cfg.wallet_username_map_path or default_wallet_username_map_path())
+    wallet_username_map = load_wallet_username_map(username_map_path_text)
+    if wallet_username_map:
+        print(
+            f"[INFO] wallet username map loaded wallets={len(wallet_username_map)} path={username_map_path_text}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[WARN] wallet username map unavailable; ranking usernames will use collectible/latest only path={username_map_path_text}",
+            flush=True,
+        )
     prev_latest_payload = _json_load(cfg.latest_path)
     prev_meta = prev_latest_payload.get("meta") if isinstance(prev_latest_payload.get("meta"), dict) else {}
     prev_monthly_window_start = str(prev_meta.get("monthly_gacha_window_start") or "").strip()
@@ -2270,6 +2313,12 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         fallback_wallets=prev_wallets,
         wallet_migration_map=old_to_new,
     )
+    username_map_applied = _apply_wallet_username_map(current_wallets.values(), wallet_username_map)
+    if wallet_username_map:
+        print(
+            f"[INFO] wallet username map applied source_wallets={username_map_applied}",
+            flush=True,
+        )
     current_addrs = set(current_wallets.keys())
     prev_addrs = set(prev_wallets.keys())
     removed_wallets = len(prev_addrs - current_addrs)
@@ -2909,6 +2958,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         monthly_pack_scan_ok=monthly_pack_scan_ok,
         finished_at=finished_at,
     )
+    canonical_username_map_applied = _apply_wallet_username_map(canonical_records.values(), wallet_username_map)
     source_state_payload = build_source_wallet_state(
         records,
         source_to_canonical=source_to_canonical,
@@ -2959,6 +3009,10 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         )
         payload["meta"]["source_wallet_state_path"] = str(cfg.source_wallet_state_path)
         payload["meta"]["source_wallet_state_loaded"] = bool(prev_source_state_loaded)
+        payload["meta"]["wallet_username_map_path"] = username_map_path_text
+        payload["meta"]["wallet_username_map_wallets"] = len(wallet_username_map)
+        payload["meta"]["wallet_username_map_applied_source_wallets"] = username_map_applied
+        payload["meta"]["wallet_username_map_applied_canonical_wallets"] = canonical_username_map_applied
 
     _atomic_write_json(cfg.latest_path, payload)
     _atomic_write_json(cfg.history_path(finished_at), payload)
@@ -2984,6 +3038,10 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         ),
         "source_wallet_state_path": str(cfg.source_wallet_state_path),
         "source_wallet_state_loaded": bool(prev_source_state_loaded),
+        "wallet_username_map_path": username_map_path_text,
+        "wallet_username_map_wallets": len(wallet_username_map),
+        "wallet_username_map_applied_source_wallets": username_map_applied,
+        "wallet_username_map_applied_canonical_wallets": canonical_username_map_applied,
         "collectible_pages": collectible_pages,
         "collection_snapshot_fallback": bool(collection_fallback_reason),
         "collection_snapshot_fallback_reason": collection_fallback_reason,
@@ -3068,6 +3126,10 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         "monthly_pack_scan_api_calls": int(_to_decimal((monthly_pack_scan_stats or {}).get("api_calls")) or 0),
         "monthly_pack_scan_rows_scanned": int(_to_decimal((monthly_pack_scan_stats or {}).get("rows_scanned")) or 0),
         "monthly_pack_scan_reset": bool((monthly_pack_scan_stats or {}).get("reset_applied")),
+        "wallet_username_map_path": username_map_path_text,
+        "wallet_username_map_wallets": len(wallet_username_map),
+        "wallet_username_map_applied_source_wallets": username_map_applied,
+        "wallet_username_map_applied_canonical_wallets": canonical_username_map_applied,
     }
 
 
@@ -3226,6 +3288,10 @@ def main() -> int:
             "monthly_pack_scan_api_calls": result["monthly_pack_scan_api_calls"],
             "monthly_pack_scan_rows_scanned": result["monthly_pack_scan_rows_scanned"],
             "monthly_pack_scan_reset": result["monthly_pack_scan_reset"],
+            "wallet_username_map_path": result["wallet_username_map_path"],
+            "wallet_username_map_wallets": result["wallet_username_map_wallets"],
+            "wallet_username_map_applied_source_wallets": result["wallet_username_map_applied_source_wallets"],
+            "wallet_username_map_applied_canonical_wallets": result["wallet_username_map_applied_canonical_wallets"],
             "backup_status": backup_status,
             "commit": commit_hash,
             "latest_path": str(cfg.latest_path),
