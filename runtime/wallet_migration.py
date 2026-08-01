@@ -174,6 +174,59 @@ def load_wallet_migration_map(path: str | None = None) -> dict[str, str]:
     return out
 
 
+def canonical_wallet_address(address: str, old_to_new: dict[str, str]) -> str:
+    current = _normalize_wallet_address(address)
+    if not current:
+        return ""
+    seen: set[str] = set()
+    while current in old_to_new and current not in seen:
+        seen.add(current)
+        next_address = _normalize_wallet_address(old_to_new.get(current))
+        if not next_address:
+            break
+        current = next_address
+    return current
+
+
+def wallet_migration_cycle_sources(old_to_new: dict[str, str]) -> tuple[str, ...]:
+    cycle_sources: set[str] = set()
+    for source_address in old_to_new:
+        current = _normalize_wallet_address(source_address)
+        path: list[str] = []
+        positions: dict[str, int] = {}
+        while current and current in old_to_new:
+            if current in positions:
+                cycle_sources.update(path[positions[current] :])
+                break
+            positions[current] = len(path)
+            path.append(current)
+            current = _normalize_wallet_address(old_to_new.get(current))
+    return tuple(sorted(cycle_sources))
+
+
+def build_wallet_migration_source_groups(
+    canonical_addresses: list[str],
+    old_to_new: dict[str, str],
+) -> dict[str, tuple[str, ...]]:
+    groups: dict[str, set[str]] = {}
+    for raw_address in canonical_addresses:
+        canonical = canonical_wallet_address(raw_address, old_to_new)
+        if canonical:
+            groups.setdefault(canonical, set()).add(canonical)
+
+    candidates = set(groups)
+    candidates.update(_normalize_wallet_address(x) for x in old_to_new)
+    candidates.update(_normalize_wallet_address(x) for x in old_to_new.values())
+    candidates.discard("")
+
+    for source_address in candidates:
+        canonical = canonical_wallet_address(source_address, old_to_new)
+        if canonical in groups:
+            groups[canonical].add(source_address)
+
+    return {address: tuple(sorted(sources)) for address, sources in groups.items()}
+
+
 def apply_wallet_migration_counts(wallet_counts: dict[str, int], old_to_new: dict[str, str]) -> dict[str, int]:
     out: dict[str, int] = {}
     for raw_addr, raw_count in (wallet_counts or {}).items():

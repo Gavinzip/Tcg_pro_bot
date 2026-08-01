@@ -38,7 +38,11 @@ from onchain_metrics import (
     scan_erc1155_contract_balances,
     scan_wallet_open_counts_by_time_incremental,
 )
-from runtime.wallet_migration import load_wallet_migration_map, wallet_migration_map_path
+from runtime.wallet_migration import (
+    canonical_wallet_address as _canonical_wallet_address,
+    load_wallet_migration_map,
+    wallet_migration_map_path,
+)
 from runtime.wallet_usernames import (
     load_wallet_username_map,
     wallet_username_map_path as default_wallet_username_map_path,
@@ -1491,20 +1495,6 @@ def _empty_wallet_record(address: str) -> WalletRecord:
         holdings_value_usdt=Decimal("0"),
         collectible_count=0,
     )
-
-
-def _canonical_wallet_address(address: str, old_to_new: dict[str, str]) -> str:
-    current = _normalize_wallet_address(address)
-    if not current:
-        return ""
-    seen: set[str] = set()
-    while current in old_to_new and current not in seen:
-        seen.add(current)
-        next_addr = _normalize_wallet_address(old_to_new.get(current))
-        if not next_addr:
-            break
-        current = next_addr
-    return current
 
 
 def _expand_wallets_for_migration(

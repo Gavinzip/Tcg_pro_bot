@@ -14,6 +14,11 @@ from typing import Any
 from dotenv import load_dotenv
 
 import update_rankings as ur
+from runtime.wallet_migration import (
+    build_wallet_migration_source_groups,
+    canonical_wallet_address,
+    wallet_migration_cycle_sources,
+)
 
 
 def _default_data_dir() -> Path:
@@ -49,6 +54,7 @@ def _compute_withdraw_total_for_wallet(address: str, page_limit: int, max_pages:
     if not wallet_norm:
         return Decimal("0")
 
+    withdraw_targets = ur._withdraw_target_set()
     cursor: str | None = None
     seen_cursors: set[str] = set()
     seen_withdraw_events: set[str] = set()
@@ -63,11 +69,13 @@ def _compute_withdraw_total_for_wallet(address: str, page_limit: int, max_pages:
         if prev is None or ts_value >= prev[0]:
             token_latest_values[tid] = (ts_value, value)
 
-    for _ in range(max_pages):
+    for page_index in range(max_pages):
         page = ur._trpc_user_activities(wallet_norm, cursor=cursor, limit=page_limit)
-        rows = page.get("activities") or []
+        if not isinstance(page, dict):
+            raise RuntimeError(f"activity API returned invalid page for {wallet_norm}")
+        rows = page.get("activities")
         if not isinstance(rows, list):
-            rows = []
+            raise RuntimeError(f"activity API returned invalid activities for {wallet_norm}")
 
         for row in rows:
             if not isinstance(row, dict):
@@ -86,12 +94,14 @@ def _compute_withdraw_total_for_wallet(address: str, page_limit: int, max_pages:
 
             elif row_type == "TransferActivity":
                 target = str(row.get("to") or "").strip().lower()
-                if target != ur.PROFILE_CARD_WITHDRAW_ADDRESS:
+                if target not in withdraw_targets:
                     continue
                 token_id = str(row.get("tokenId") or row_item.get("tokenId") or "").strip()
                 tx_hash = str(row.get("txHash") or "").strip().lower()
-                if not tx_hash and not token_id:
-                    continue
+                if not token_id:
+                    raise RuntimeError(
+                        f"withdraw transfer is missing tokenId for {wallet_norm}; tx={tx_hash or '-'}"
+                    )
                 event_key = f"{tx_hash}:{token_id}"
                 if event_key in seen_withdraw_events:
                     continue
@@ -104,7 +114,12 @@ def _compute_withdraw_total_for_wallet(address: str, page_limit: int, max_pages:
             break
         next_cursor = str(next_cursor)
         if next_cursor in seen_cursors:
-            break
+            raise RuntimeError(f"activity API repeated cursor for {wallet_norm}: {next_cursor}")
+        if page_index + 1 >= max_pages:
+            raise RuntimeError(
+                f"activity history exceeded max_pages={max_pages} for {wallet_norm}; "
+                "increase --activity-max-pages"
+            )
         seen_cursors.add(next_cursor)
         cursor = next_cursor
 
@@ -119,10 +134,50 @@ def _compute_withdraw_total_for_wallet(address: str, page_limit: int, max_pages:
 
     for token_id in unresolved_tokens:
         fallback_value = ur._to_decimal(ur._fetch_card_withdraw_value_by_token_id(token_id))
-        if fallback_value > 0:
-            card_withdraw_total += fallback_value
+        if fallback_value <= 0:
+            raise RuntimeError(f"withdraw token {token_id} has no resolvable value for {wallet_norm}")
+        card_withdraw_total += fallback_value
 
     return card_withdraw_total
+
+
+def _compute_withdraw_total_for_sources(
+    source_addresses: tuple[str, ...],
+    page_limit: int,
+    max_pages: int,
+) -> Decimal:
+    return sum(
+        (
+            _compute_withdraw_total_for_wallet(address, page_limit, max_pages)
+            for address in source_addresses
+        ),
+        Decimal("0"),
+    )
+
+
+def _canonicalize_rows(
+    rows: list[dict[str, Any]],
+    old_to_new: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    row_map: dict[str, dict[str, Any]] = {}
+    for source_row in rows:
+        source_address = ur._normalize_wallet_address(str(source_row.get("address") or ""))
+        if not source_address:
+            continue
+        canonical = canonical_wallet_address(source_address, old_to_new) or source_address
+        if canonical != source_address:
+            raise ValueError(
+                f"non-canonical ranking row {source_address} resolves to {canonical}; "
+                "run a full ranking rebuild first"
+            )
+        if canonical in row_map:
+            raise ValueError(
+                f"duplicate ranking rows resolve to canonical wallet {canonical}; run a full ranking rebuild first"
+            )
+        row = dict(source_row)
+        row["address"] = canonical
+        row_map[canonical] = row
+    return row_map
 
 
 def _build_payload_from_rows(
@@ -131,6 +186,8 @@ def _build_payload_from_rows(
     started_at: datetime,
     finished_at: datetime,
     changed_wallets: int,
+    monthly_pack_window_start: datetime,
+    monthly_pack_window_end: datetime,
 ) -> dict[str, Any]:
     records = []
     for row in rows:
@@ -152,6 +209,7 @@ def _build_payload_from_rows(
         started_at,
         finished_at,
         collectible_pages=collectible_pages,
+        collection_fallback_reason=str(prev_meta.get("collection_snapshot_fallback_reason") or ""),
         full_rebuild=False,
         full_rebuild_reason="withdraw-backfill",
         refreshed_wallets=len(records),
@@ -159,8 +217,38 @@ def _build_payload_from_rows(
         removed_wallets=0,
         wallet_source=wallet_source,
         holders_file=holders_file,
+        monthly_pack_window_start=monthly_pack_window_start,
+        monthly_pack_window_end=monthly_pack_window_end,
+        monthly_pack_scan_stats={
+            "scan_mode": prev_meta.get("monthly_gacha_scan_mode"),
+            "api_calls": prev_meta.get("monthly_gacha_scan_api_calls"),
+            "rows_scanned": prev_meta.get("monthly_gacha_scan_rows_scanned"),
+            "reset_applied": prev_meta.get("monthly_gacha_scan_reset"),
+        },
+        sbt_scan_stats={
+            "source": prev_meta.get("sbt_source"),
+            "scan_mode": prev_meta.get("sbt_scan_mode"),
+            "api_calls": prev_meta.get("sbt_scan_api_calls"),
+            "rows_scanned": prev_meta.get("sbt_scan_rows_scanned"),
+            "reset_applied": prev_meta.get("sbt_scan_reset"),
+            "refresh_wallets": prev_meta.get("sbt_refresh_wallets"),
+            "fallback_wallets": prev_meta.get("sbt_fallback_wallets"),
+            "failed_wallets": prev_meta.get("sbt_failed_wallets"),
+        },
     )
     out_meta = out.get("meta") if isinstance(out.get("meta"), dict) else {}
+    for key in (
+        "wallet_migration_map_path",
+        "wallet_migration_pairs",
+        "source_wallet_count",
+        "canonical_wallet_count",
+        "migrated_source_wallets",
+        "canonical_wallets_from_multiple_sources",
+        "source_wallet_state_path",
+        "source_wallet_state_loaded",
+    ):
+        if key in prev_meta:
+            out_meta[key] = prev_meta[key]
     out_meta["trigger"] = "withdraw_backfill"
     out_meta["version"] = ur._parse_int(out_meta.get("version")) or 4
     out_meta["withdraw_backfill_changed_wallets"] = changed_wallets
@@ -194,17 +282,69 @@ def main() -> int:
     page_limit = max(1, int(args.activity_page_limit))
     max_pages = max(1, int(args.activity_max_pages))
 
+    prev_meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    monthly_pack_window_start = ur._parse_iso_dt(prev_meta.get("monthly_gacha_window_start"))
+    monthly_pack_window_end = ur._parse_iso_dt(prev_meta.get("monthly_gacha_window_end"))
+    if monthly_pack_window_start is None or monthly_pack_window_end is None:
+        print(
+            "[ERROR] ranking snapshot is missing monthly window metadata; run a full ranking rebuild first",
+            flush=True,
+        )
+        return 2
+
+    migration_map_path = str(
+        prev_meta.get("wallet_migration_map_path") or ur.wallet_migration_map_path()
+    ).strip()
+    old_to_new = ur.load_wallet_migration_map(migration_map_path)
+    if "wallet_migration_pairs" not in prev_meta:
+        print(
+            "[ERROR] ranking snapshot is missing migration metadata; run a full ranking rebuild first",
+            flush=True,
+        )
+        return 2
+    expected_migration_pairs = ur._parse_int(prev_meta.get("wallet_migration_pairs")) or 0
+    if expected_migration_pairs != len(old_to_new):
+        print(
+            (
+                "[ERROR] wallet migration map does not match ranking snapshot; "
+                f"expected_pairs={expected_migration_pairs} loaded_pairs={len(old_to_new)} "
+                f"path={migration_map_path}"
+            ),
+            flush=True,
+        )
+        return 2
+    cycle_sources = wallet_migration_cycle_sources(old_to_new)
+    if cycle_sources:
+        print(
+            (
+                "[ERROR] wallet migration map contains a cycle; "
+                f"sources={','.join(cycle_sources)} path={migration_map_path}"
+            ),
+            flush=True,
+        )
+        return 2
+    prev_meta["wallet_migration_map_path"] = migration_map_path
+    prev_meta["wallet_migration_pairs"] = len(old_to_new)
+
+    try:
+        row_map = _canonicalize_rows(rows, old_to_new)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", flush=True)
+        return 2
+    rows = list(row_map.values())
+
+    source_groups = build_wallet_migration_source_groups(list(row_map), old_to_new)
+    source_wallet_count = len({source for sources in source_groups.values() for source in sources})
+    merged_wallet_count = sum(1 for sources in source_groups.values() if len(sources) > 1)
+
     print(
-        f"[INFO] withdraw backfill start wallets={total} workers={workers} page_limit={page_limit} max_pages={max_pages}",
+        (
+            f"[INFO] withdraw backfill start wallets={total} source_wallets={source_wallet_count} "
+            f"merged_wallets={merged_wallet_count} workers={workers} "
+            f"page_limit={page_limit} max_pages={max_pages}"
+        ),
         flush=True,
     )
-
-    row_map = {}
-    for row in rows:
-        addr = str(row.get("address") or "").strip().lower()
-        if not addr:
-            continue
-        row_map[addr] = row
 
     changed_wallets = 0
     pending_addrs = list(row_map.keys())
@@ -223,7 +363,12 @@ def main() -> int:
 
         with ThreadPoolExecutor(max_workers=min(workers, max(1, round_total))) as pool:
             future_map = {
-                pool.submit(_compute_withdraw_total_for_wallet, addr, page_limit, max_pages): addr
+                pool.submit(
+                    _compute_withdraw_total_for_sources,
+                    source_groups.get(addr, (addr,)),
+                    page_limit,
+                    max_pages,
+                ): addr
                 for addr in pending_addrs
             }
             for future in as_completed(future_map):
@@ -268,7 +413,37 @@ def main() -> int:
     failed_wallets = len(pending_addrs)
 
     finished_at = datetime.now(tz=started_at.tzinfo)
-    new_payload = _build_payload_from_rows(rows, payload, started_at, finished_at, changed_wallets)
+    if failed_wallets:
+        status_payload = {
+            "updated_at": finished_at.isoformat(),
+            "success": False,
+            "trigger": "withdraw_backfill",
+            "message": (
+                f"withdraw backfill aborted failed_wallets={failed_wallets} wallets={total}; "
+                "latest snapshot was not modified"
+            ),
+            "extra": {
+                "wallet_count": total,
+                "source_wallet_count": source_wallet_count,
+                "merged_wallet_count": merged_wallet_count,
+                "changed_wallets": 0,
+                "failed_wallets": failed_wallets,
+                "duration_sec": round((finished_at - started_at).total_seconds(), 2),
+            },
+        }
+        ur._atomic_write_json(data_dir / "state" / "ranking_status.json", status_payload)
+        print(f"[ERROR] {status_payload['message']}", flush=True)
+        return 1
+
+    new_payload = _build_payload_from_rows(
+        rows,
+        payload,
+        started_at,
+        finished_at,
+        changed_wallets,
+        monthly_pack_window_start,
+        monthly_pack_window_end,
+    )
     ur._atomic_write_json(latest_path, new_payload)
 
     if args.write_history:
@@ -284,6 +459,8 @@ def main() -> int:
         ),
         "extra": {
             "wallet_count": total,
+            "source_wallet_count": source_wallet_count,
+            "merged_wallet_count": merged_wallet_count,
             "changed_wallets": changed_wallets,
             "failed_wallets": failed_wallets,
             "duration_sec": round((finished_at - started_at).total_seconds(), 2),
