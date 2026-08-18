@@ -829,10 +829,10 @@ PROFILE_CHAIN_TOKEN_PRICE_SOURCE = str(os.getenv("PROFILE_CHAIN_TOKEN_PRICE_SOUR
 if PROFILE_CHAIN_TOKEN_PRICE_SOURCE not in ("cli", "api"):
     PROFILE_CHAIN_TOKEN_PRICE_SOURCE = "api"
 PROFILE_COLLECTIBLE_TOKEN_SOURCE = (
-    str(os.getenv("PROFILE_COLLECTIBLE_TOKEN_SOURCE", "trpc")).strip().lower() or "trpc"
+    str(os.getenv("PROFILE_COLLECTIBLE_TOKEN_SOURCE", "card_api")).strip().lower() or "card_api"
 )
 if PROFILE_COLLECTIBLE_TOKEN_SOURCE not in ("card_api", "trpc"):
-    PROFILE_COLLECTIBLE_TOKEN_SOURCE = "trpc"
+    PROFILE_COLLECTIBLE_TOKEN_SOURCE = "card_api"
 try:
     PROFILE_CARD_API_MIN_REQUEST_INTERVAL_SEC = max(
         0.0,
