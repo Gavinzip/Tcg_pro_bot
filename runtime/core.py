@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
+from runtime.renaiss_card_api import DEFAULT_RENAISS_CARD_API_BASE_URL, fetch_card_api_collectible
 from runtime.wallet_migration import wallet_migration_api_payload
 from runtime.wallet_usernames import username_for_wallet
 # ============================================================
@@ -657,6 +658,10 @@ PROFILE_SBT_WREATH_IMAGE_DIR = os.path.abspath(
 RENAISS_MAIN_URL = "https://www.renaiss.xyz"
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
 RENAISS_COLLECTIBLE_BY_TOKEN_URL = "https://www.renaiss.xyz/api/trpc/collectible.getCollectibleByTokenId"
+RENAISS_CARD_API_BASE_URL = (
+    str(os.getenv("RENAISS_CARD_API_BASE_URL", DEFAULT_RENAISS_CARD_API_BASE_URL)).strip().rstrip("/")
+    or DEFAULT_RENAISS_CARD_API_BASE_URL
+)
 RENAISS_SBT_BADGES_URL = "https://www.renaiss.xyz/api/trpc/sbt.getUserBadges"
 RENAISS_ACTIVITY_LIST_URL = "https://www.renaiss.xyz/api/trpc/activity.getSubgraphUserActivities"
 RENAISS_TOKEN_ACTIVITY_URL = "https://www.renaiss.xyz/api/trpc/activity.getSubgraphTokenActivities"
@@ -823,6 +828,18 @@ if PROFILE_DATA_MODE not in ("legacy", "chain_official"):
 PROFILE_CHAIN_TOKEN_PRICE_SOURCE = str(os.getenv("PROFILE_CHAIN_TOKEN_PRICE_SOURCE", "api")).strip().lower() or "api"
 if PROFILE_CHAIN_TOKEN_PRICE_SOURCE not in ("cli", "api"):
     PROFILE_CHAIN_TOKEN_PRICE_SOURCE = "api"
+PROFILE_COLLECTIBLE_TOKEN_SOURCE = (
+    str(os.getenv("PROFILE_COLLECTIBLE_TOKEN_SOURCE", "trpc")).strip().lower() or "trpc"
+)
+if PROFILE_COLLECTIBLE_TOKEN_SOURCE not in ("card_api", "trpc"):
+    PROFILE_COLLECTIBLE_TOKEN_SOURCE = "trpc"
+try:
+    PROFILE_CARD_API_MIN_REQUEST_INTERVAL_SEC = max(
+        0.0,
+        float(str(os.getenv("PROFILE_CARD_API_MIN_REQUEST_INTERVAL_SEC", "0.25")).strip()),
+    )
+except Exception:
+    PROFILE_CARD_API_MIN_REQUEST_INTERVAL_SEC = 0.25
 PROFILE_CHAIN_USE_TOKEN_VALUE_HINTS = _env_true("PROFILE_CHAIN_USE_TOKEN_VALUE_HINTS", False)
 PROFILE_CHAIN_INCLUDE_TRANSFER_SOURCE_WALLETS = _env_true("PROFILE_CHAIN_INCLUDE_TRANSFER_SOURCE_WALLETS", True)
 PROFILE_CHAIN_SOURCE_WALLET_MAX_SOURCES = max(
@@ -3392,20 +3409,39 @@ def _trpc_collectible_by_token(token_id: str) -> dict:
     raise RuntimeError(f"collectible.getCollectibleByTokenId 請求失敗（已重試 {PROFILE_API_MAX_RETRIES} 次）：{last_err}")
 
 
+def _card_api_collectible_by_token(token_id: str) -> dict:
+    return fetch_card_api_collectible(
+        token_id,
+        http_get=_http_get,
+        base_url=RENAISS_CARD_API_BASE_URL,
+        timeout=25,
+        max_retries=PROFILE_API_MAX_RETRIES,
+        retry_backoff_sec=PROFILE_API_RETRY_BACKOFF_SEC,
+        min_request_interval_sec=PROFILE_CARD_API_MIN_REQUEST_INTERVAL_SEC,
+    )
+
+
+def _collectible_by_token(token_id: str) -> dict:
+    if PROFILE_COLLECTIBLE_TOKEN_SOURCE == "trpc":
+        return _trpc_collectible_by_token(token_id)
+    return _card_api_collectible_by_token(token_id)
+
+
 def _collectible_by_token_cached(token_id: str) -> dict:
     tid = str(token_id or "").strip()
     if not tid:
         return {}
+    cache_key = f"{PROFILE_COLLECTIBLE_TOKEN_SOURCE}:{tid}"
     if not PROFILE_ENABLE_RUNTIME_CACHE:
-        data = _trpc_collectible_by_token(tid)
+        data = _collectible_by_token(tid)
         return data if isinstance(data, dict) else {}
-    cached = _CARD_COLLECTIBLE_CACHE.get(tid)
+    cached = _CARD_COLLECTIBLE_CACHE.get(cache_key)
     if isinstance(cached, dict):
         return cached
-    data = _trpc_collectible_by_token(tid)
+    data = _collectible_by_token(tid)
     if not isinstance(data, dict):
         data = {}
-    _CARD_COLLECTIBLE_CACHE[tid] = data
+    _CARD_COLLECTIBLE_CACHE[cache_key] = data
     return data
 
 
@@ -3523,7 +3559,11 @@ def _fetch_card_fmv_by_token_id(token_id: str, allow_trade_fallback: bool = True
     tid = str(token_id or "").strip()
     if not tid:
         return Decimal("0")
-    source_tag = "cli" if _profile_chain_prefers_cli_token_price() else "api"
+    source_tag = (
+        f"cli+{PROFILE_COLLECTIBLE_TOKEN_SOURCE}"
+        if _profile_chain_prefers_cli_token_price()
+        else PROFILE_COLLECTIBLE_TOKEN_SOURCE
+    )
     cache_key_base = f"{source_tag}:{tid}"
     cache_key = cache_key_base if allow_trade_fallback else f"{cache_key_base}|no_trade"
     if PROFILE_ENABLE_RUNTIME_CACHE and cache_key in _CARD_FMV_CACHE:
@@ -3571,8 +3611,9 @@ def _fetch_card_image_by_token_id(token_id: str) -> str:
     tid = str(token_id or "").strip()
     if not tid:
         return ""
-    if PROFILE_ENABLE_RUNTIME_CACHE and tid in _CARD_IMAGE_CACHE:
-        return _CARD_IMAGE_CACHE[tid]
+    cache_key = f"{PROFILE_COLLECTIBLE_TOKEN_SOURCE}:{tid}"
+    if PROFILE_ENABLE_RUNTIME_CACHE and cache_key in _CARD_IMAGE_CACHE:
+        return _CARD_IMAGE_CACHE[cache_key]
 
     image_url = ""
     try:
@@ -3587,7 +3628,7 @@ def _fetch_card_image_by_token_id(token_id: str) -> str:
         image_url = ""
 
     if PROFILE_ENABLE_RUNTIME_CACHE:
-        _CARD_IMAGE_CACHE[tid] = image_url
+        _CARD_IMAGE_CACHE[cache_key] = image_url
     return image_url
 
 
@@ -8543,7 +8584,9 @@ def _fetch_wallet_collection_chain(wallet_address: str) -> list[dict]:
         return []
 
     out_rows: list[dict] = []
+    fetch_errors: list[tuple[str, Exception]] = []
     workers = min(PROFILE_COLLECTION_FETCH_WORKERS, len(token_ids))
+    strict_card_api = PROFILE_COLLECTIBLE_TOKEN_SOURCE == "card_api"
 
     def _build_row(token_id: str) -> dict | None:
         tid = str(token_id or "").strip()
@@ -8551,10 +8594,14 @@ def _fetch_wallet_collection_chain(wallet_address: str) -> list[dict]:
             return None
         try:
             collectible = _collectible_by_token_cached(tid)
-        except Exception:
+        except Exception as exc:
+            if strict_card_api:
+                raise RuntimeError(f"card_api token {tid} failed: {exc}") from exc
             collectible = {}
         if not isinstance(collectible, dict):
             collectible = {}
+        if strict_card_api and not collectible:
+            raise RuntimeError(f"card_api token {tid} returned no collectible")
 
         front_image = str(
             collectible.get("frontImageUrl")
@@ -8580,15 +8627,27 @@ def _fetch_wallet_collection_chain(wallet_address: str) -> list[dict]:
             for future in as_completed(futures):
                 try:
                     row = future.result()
-                except Exception:
+                except Exception as exc:
+                    fetch_errors.append((futures[future], exc))
                     row = None
                 if isinstance(row, dict):
                     out_rows.append(row)
     else:
         for tid in token_ids:
-            row = _build_row(tid)
+            try:
+                row = _build_row(tid)
+            except Exception as exc:
+                fetch_errors.append((tid, exc))
+                row = None
             if isinstance(row, dict):
                 out_rows.append(row)
+
+    if strict_card_api and fetch_errors:
+        first_token, first_error = fetch_errors[0]
+        raise RuntimeError(
+            f"Renaiss card_api 查詢失敗 {len(fetch_errors)}/{len(token_ids)} 張；"
+            f"首筆 token {first_token}: {first_error}"
+        )
 
     # Keep output deterministic with highest FMV first.
     out_rows.sort(key=lambda x: (_parse_int(x.get("fmvPriceInUSD")) or 0, str(x.get("tokenId") or "")), reverse=True)
@@ -8625,10 +8684,7 @@ def _build_wallet_profile_picker_data(wallet_address: str) -> dict:
     )
     if PROFILE_DATA_MODE == "chain_official":
         user_id, username = None, _username_from_rankings_wallet(wallet_norm)
-        try:
-            collection = _fetch_wallet_collection_chain(wallet_norm)
-        except Exception:
-            collection = []
+        collection = _fetch_wallet_collection_chain(wallet_norm)
     else:
         try:
             user_id, username = _resolve_user_from_wallet(wallet_address)
@@ -8788,10 +8844,7 @@ def _build_wallet_profile_context(
     short_wallet = f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm
     ranking_row = _load_rankings_wallet_map().get(wallet_norm, {}) if wallet_norm else {}
     if PROFILE_DATA_MODE == "chain_official":
-        try:
-            collection = _fetch_wallet_collection_chain(wallet_norm)
-        except Exception:
-            collection = []
+        collection = _fetch_wallet_collection_chain(wallet_norm)
     else:
         if user_id:
             try:
