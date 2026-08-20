@@ -52,6 +52,29 @@
             --card-fine-shift-y: 0px;
             --header-panel-opacity: 1;
             --gold-gradient: linear-gradient(135deg, #fff6cc 0%, #ffd700 25%, #d4af37 50%, #b8962e 75%, #fff2a6 100%);
+            --metal-gold-gradient: linear-gradient(
+                154deg,
+                #1a1002 0%,
+                #4a2b05 10%,
+                #9d6812 18%,
+                #d7a44a 24%,
+                #fff3c8 28%,
+                #fffdf2 30%,
+                #c6861f 35%,
+                #684007 43%,
+                #241503 50%,
+                #ab7618 58%,
+                #fff0bf 61%,
+                #cf942a 66%,
+                #744707 75%,
+                #2a1703 84%,
+                #986611 92%,
+                #241503 100%
+            );
+            --metal-gold-shadow-strong: 0 1px 0 rgba(255, 242, 198, 0.78), 0 2px 0 rgba(135, 86, 14, 0.78), 0 5px 8px rgba(24, 14, 3, 0.62), 0 0 10px rgba(255, 214, 128, 0.18);
+            --metal-gold-shadow-soft: 0 1px 0 rgba(255, 242, 198, 0.68), 0 2px 0 rgba(135, 86, 14, 0.72), 0 4px 7px rgba(24, 14, 3, 0.56), 0 0 8px rgba(255, 214, 128, 0.14);
+            --metal-gold-stroke-strong: 0.60px rgba(63, 37, 4, 0.72);
+            --metal-gold-stroke-soft: 0.54px rgba(63, 37, 4, 0.68);
             --gold-glow-soft: 0 0 8px rgba(255, 215, 0, 0.45), 0 0 16px rgba(255, 215, 0, 0.24);
             --gold-glow-strong: 0 0 10px rgba(255, 215, 0, 0.56), 0 0 20px rgba(255, 215, 0, 0.30);
         }
@@ -555,15 +578,17 @@
             font-weight: 900;
             line-height: 1;
             letter-spacing: -0.03em;
-            background: linear-gradient(140deg, #5f420a 0%, #b58b28 43%, #7c5a16 100%);
+            background: var(--metal-gold-gradient);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
-            text-shadow: 0 2px 10px rgba(212, 175, 55, 0.32);
+            text-shadow: var(--metal-gold-shadow-strong);
+            -webkit-text-stroke: var(--metal-gold-stroke-strong);
+            filter: saturate(1.26) contrast(1.1) brightness(1.01);
         }
 
         .foil-unit {
-            background: linear-gradient(140deg, #5f420a 0%, #b58b28 43%, #7c5a16 100%);
+            background: var(--metal-gold-gradient);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -572,10 +597,13 @@
             letter-spacing: 0.15em;
             margin-left: 8px;
             transform: translateY(-0.42em);
+            text-shadow: var(--metal-gold-shadow-soft);
+            -webkit-text-stroke: var(--metal-gold-stroke-soft);
+            filter: saturate(1.24) contrast(1.09) brightness(1.0);
         }
 
         .foil-currency {
-            background: linear-gradient(140deg, #5f420a 0%, #b58b28 43%, #7c5a16 100%);
+            background: var(--metal-gold-gradient);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -583,6 +611,9 @@
             font-weight: 900;
             transform: translateY(-0.22em);
             margin-right: 4px;
+            text-shadow: var(--metal-gold-shadow-soft);
+            -webkit-text-stroke: var(--metal-gold-stroke-soft);
+            filter: saturate(1.24) contrast(1.09) brightness(1.0);
         }
 
         .stat-value-row {
@@ -792,7 +823,7 @@
         .bg-vivid-gold .foil-number,
         .bg-vivid-gold .foil-unit,
         .bg-vivid-gold .foil-currency {
-            background: var(--gold-gradient);
+            background: var(--metal-gold-gradient);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -805,7 +836,7 @@
         .bg-key-2 .foil-number,
         .bg-key-2 .foil-unit,
         .bg-key-2 .foil-currency {
-            background: linear-gradient(140deg, #8c6518 0%, #e6c252 46%, #c49a34 100%);
+            background: var(--metal-gold-gradient);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;

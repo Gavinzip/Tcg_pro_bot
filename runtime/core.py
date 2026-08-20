@@ -2714,17 +2714,22 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "wallet_label": "Wallet",
             "collection_label": "收藏數量",
             "selectable_sbt_label": "可選 SBT",
-            "setup_tip": "請選模板、SBT、卡片後按「生成海報」。若不選 SBT/卡片，會用預設（依 FMV 由高到低）。",
+            "setup_tip": "請先選擇要生成的海報，再設定模板、SBT、卡片。預設只生成盈虧 Profile。",
+            "poster_placeholder": "2) 複選海報（預設：盈虧 Profile）",
+            "poster_selected_label": "海報",
+            "poster_history_label": "盈虧 Profile",
+            "poster_collection_label": "收藏卡海報",
+            "poster_extremes_label": "天堂與地獄",
             "template_placeholder": "1) 選擇模板（Top 1 / Top 2 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10）",
             "background_placeholder": "2) 選擇背景（經典 / 超級甲賀忍蛙 / 妙蛙花 / 小智與皮卡丘）",
-            "sbt_placeholder": "2) 複選 SBT（可略過）",
-            "card_placeholder": "3) 複選卡片（可略過）",
+            "sbt_placeholder": "3) 複選 SBT（可略過）",
+            "card_placeholder": "4) 複選卡片（可略過）",
             "default_button": "使用預設直接生成",
             "generate_button": "生成海報",
             "only_owner_msg": "只有發起指令的人可以操作此面板。",
             "timeout_msg": "⏰ 設定面板已逾時，請重新輸入 `/profile`。",
             "generating_msg": "⏳ 生成中，請稍候...",
-            "summary_done": "收藏海報已完成",
+            "summary_done": "Profile 海報已完成",
             "shown_label": "展示張數",
             "shown_fmv_label": "展示總值",
             "no_sbt_option": "無可選 SBT",
@@ -2748,17 +2753,22 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "wallet_label": "Wallet",
             "collection_label": "收藏数量",
             "selectable_sbt_label": "可选 SBT",
-            "setup_tip": "请选择模板、SBT、卡片后点击“生成海报”。若不选 SBT/卡片，将使用默认（按 FMV 从高到低）。",
+            "setup_tip": "请先选择要生成的海报，再设置模板、SBT、卡片。默认只生成盈亏 Profile。",
+            "poster_placeholder": "2) 多选海报（默认：盈亏 Profile）",
+            "poster_selected_label": "海报",
+            "poster_history_label": "盈亏 Profile",
+            "poster_collection_label": "收藏卡海报",
+            "poster_extremes_label": "天堂与地狱",
             "template_placeholder": "1) 选择模板（Top 1 / Top 2 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10）",
             "background_placeholder": "2) 选择背景（经典 / 超级甲贺忍蛙 / 妙蛙花 / 小智与皮卡丘）",
-            "sbt_placeholder": "2) 多选 SBT（可跳过）",
-            "card_placeholder": "3) 多选卡片（可跳过）",
+            "sbt_placeholder": "3) 多选 SBT（可跳过）",
+            "card_placeholder": "4) 多选卡片（可跳过）",
             "default_button": "使用默认直接生成",
             "generate_button": "生成海报",
             "only_owner_msg": "只有发起指令的人可以操作此面板。",
             "timeout_msg": "⏰ 设置面板已超时，请重新输入 `/profile`。",
             "generating_msg": "⏳ 生成中，请稍候...",
-            "summary_done": "收藏海报已完成",
+            "summary_done": "Profile 海报已完成",
             "shown_label": "展示张数",
             "shown_fmv_label": "展示总值",
             "no_sbt_option": "无可选 SBT",
@@ -2782,17 +2792,22 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
             "wallet_label": "Wallet",
             "collection_label": "컬렉션 수",
             "selectable_sbt_label": "선택 가능 SBT",
-            "setup_tip": "템플릿, SBT, 카드를 선택한 뒤 \"포스터 생성\"을 누르세요. SBT/카드를 선택하지 않으면 기본값(FMV 내림차순)을 사용합니다.",
+            "setup_tip": "생성할 포스터를 먼저 선택한 뒤 템플릿, SBT, 카드를 설정하세요. 기본값은 손익 Profile만 생성합니다.",
+            "poster_placeholder": "2) 포스터 다중 선택 (기본: 손익 Profile)",
+            "poster_selected_label": "포스터",
+            "poster_history_label": "손익 Profile",
+            "poster_collection_label": "컬렉션 카드 포스터",
+            "poster_extremes_label": "천국과 지옥",
             "template_placeholder": "1) 템플릿 선택 (Top 1 / Top 2 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10)",
             "background_placeholder": "2) 배경 선택 (Classic / 개굴닌자(유대변화) / 이상해꽃 / 지우와 피카츄)",
-            "sbt_placeholder": "2) SBT 다중 선택 (선택 사항)",
-            "card_placeholder": "3) 카드 다중 선택 (선택 사항)",
+            "sbt_placeholder": "3) SBT 다중 선택 (선택 사항)",
+            "card_placeholder": "4) 카드 다중 선택 (선택 사항)",
             "default_button": "기본값으로 생성",
             "generate_button": "포스터 생성",
             "only_owner_msg": "명령을 실행한 사용자만 이 패널을 조작할 수 있습니다.",
             "timeout_msg": "⏰ 설정 시간이 만료되었습니다. `/profile`을 다시 실행하세요.",
             "generating_msg": "⏳ 생성 중입니다...",
-            "summary_done": "컬렉션 포스터 생성 완료",
+            "summary_done": "Profile 포스터 생성 완료",
             "shown_label": "표시 카드 수",
             "shown_fmv_label": "표시 FMV",
             "no_sbt_option": "선택 가능한 SBT 없음",
@@ -2815,17 +2830,22 @@ def _profile_wizard_texts(lang: str) -> dict[str, str]:
         "wallet_label": "Wallet",
         "collection_label": "Collection",
         "selectable_sbt_label": "Selectable SBT",
-        "setup_tip": "Choose template, SBT, and cards, then click Generate Poster. If SBT/cards are not selected, defaults are used (FMV high to low).",
+        "setup_tip": "Choose the posters to generate, then configure template, SBT, and cards. By default, only the PnL Profile is generated.",
+        "poster_placeholder": "2) Select posters (default: PnL Profile)",
+        "poster_selected_label": "Posters",
+        "poster_history_label": "PnL Profile",
+        "poster_collection_label": "Collection Cards",
+        "poster_extremes_label": "Heaven and Hell",
         "template_placeholder": "1) Select template (Top 1 / Top 2 / Top 3 / Top 4 / Top 5 / Top 7 / Top 10)",
         "background_placeholder": "2) Select background (Classic / Ash-Greninja / Venusaur / Ash & Pikachu)",
-        "sbt_placeholder": "2) Select SBT (optional)",
-        "card_placeholder": "3) Select cards (optional)",
+        "sbt_placeholder": "3) Select SBT (optional)",
+        "card_placeholder": "4) Select cards (optional)",
         "default_button": "Generate with Defaults",
         "generate_button": "Generate Poster",
         "only_owner_msg": "Only the command user can operate this panel.",
         "timeout_msg": "⏰ Setup panel timed out. Run `/profile` again.",
         "generating_msg": "⏳ Generating poster...",
-        "summary_done": "Collection poster generated",
+        "summary_done": "Profile poster generated",
         "shown_label": "Shown",
         "shown_fmv_label": "Shown FMV",
         "no_sbt_option": "No selectable SBT",
@@ -2887,6 +2907,28 @@ def _compact_sbt_label(name: str, max_len: int = 24) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 1].rstrip() + "…"
+
+
+_PROFILE_POSTER_TYPE_ORDER = ("history", "collection", "extremes")
+
+
+def _normalize_profile_poster_types(values: object) -> set[str]:
+    # None preserves the legacy programmatic behavior; the Discord UI passes
+    # an explicit selection and defaults to the history/PnL poster only.
+    if values is None:
+        return set(_PROFILE_POSTER_TYPE_ORDER)
+    if isinstance(values, str):
+        raw_values = [values]
+    elif isinstance(values, (list, tuple, set)):
+        raw_values = list(values)
+    else:
+        raw_values = []
+    selected = {
+        str(value or "").strip().lower()
+        for value in raw_values
+        if str(value or "").strip().lower() in _PROFILE_POSTER_TYPE_ORDER
+    }
+    return selected or {"history"}
 
 
 def _select_profile_items(parsed_sorted: list[dict], card_count: int, selected_tokens: list[str] | None) -> list[dict]:
@@ -5806,6 +5848,7 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
     wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
     if not wallet_norm:
         raise RuntimeError("invalid wallet address")
+    warnings: list[dict[str, str]] = []
 
     cfg = _build_profile_onchain_cfg(force=True)
     if cfg is None:
@@ -6057,6 +6100,13 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
                             activity_tx_map_dirty = _record_pack_activity_tx_hint(activity_tx_map, merged_hint) or activity_tx_map_dirty
                 except Exception as e:
                     print(f"⚠️ pack activity hint match failed for {wallet_norm}: {e}", file=sys.stderr)
+                    warnings.append(
+                        {
+                            "code": "activity_hints_unavailable",
+                            "source": "activity.getSubgraphUserActivities",
+                            "message": "Official activity hints were unavailable; pack labels use chain and local mappings.",
+                        }
+                    )
             if activity_tx_map_dirty:
                 _save_pack_activity_tx_map(activity_tx_map)
 
@@ -6518,6 +6568,7 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         "pack_spent_map": pack_spent_map,
         "token_value_hints": token_value_hints,
         "token_acquire_cost_hints": token_acquire_cost_hints,
+        "warnings": warnings,
     }
 
 
@@ -6846,6 +6897,23 @@ def _merge_profile_history_data(histories: list[dict], *, wallet_norm: str, sour
             if norm_key:
                 pack_spent_map_raw[norm_key] += _profile_decimal_from_display(value)
 
+    warnings: list[dict[str, str]] = []
+    seen_warnings: set[tuple[str, str, str]] = set()
+    for history in valid:
+        for warning in history.get("warnings") or []:
+            if not isinstance(warning, dict):
+                continue
+            normalized = {
+                "code": str(warning.get("code") or "profile_warning"),
+                "source": str(warning.get("source") or ""),
+                "message": str(warning.get("message") or ""),
+            }
+            key = (normalized["code"], normalized["source"], normalized["message"])
+            if key in seen_warnings:
+                continue
+            seen_warnings.add(key)
+            warnings.append(normalized)
+
     return {
         "labels": labels,
         "history_range": history_range,
@@ -6873,6 +6941,7 @@ def _merge_profile_history_data(histories: list[dict], *, wallet_norm: str, sour
         "pack_spent_map": {k: _format_usdt_decimal(v) for k, v in pack_spent_map_raw.items()},
         "token_value_hints": {},
         "token_acquire_cost_hints": _merge_profile_token_acquire_hints(valid),
+        "warnings": warnings,
     }
 
 
@@ -6915,6 +6984,7 @@ def _build_wallet_extremes_template_context(
     profile_name: str,
     short_wallet: str,
     profile_lang: str = "en",
+    prepare_images: bool = True,
 ) -> dict:
     labels = _profile_extreme_labels(_profile_lang_from_locale(profile_lang))
     ui_labels = _profile_ui_labels(_profile_lang_from_locale(profile_lang))
@@ -7074,7 +7144,9 @@ def _build_wallet_extremes_template_context(
             chain_meta_image = _fetch_card_image_from_chain_metadata(token_contract, token_id)
             if chain_meta_image:
                 image = chain_meta_image
-        return _prepare_collectible_image_for_poster(image)
+        if prepare_images:
+            return _prepare_collectible_image_for_poster(image)
+        return image
 
     if has_data:
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -7083,16 +7155,22 @@ def _build_wallet_extremes_template_context(
             highest_prepared_image = f_hi.result()
             lowest_prepared_image = f_lo.result()
     else:
-        highest_prepared_image = _prepare_collectible_image_for_poster(str(highest.get("image") or ""))
-        lowest_prepared_image = _prepare_collectible_image_for_poster(str(lowest.get("image") or ""))
+        if prepare_images:
+            highest_prepared_image = _prepare_collectible_image_for_poster(str(highest.get("image") or ""))
+            lowest_prepared_image = _prepare_collectible_image_for_poster(str(lowest.get("image") or ""))
+        else:
+            highest_prepared_image = str(highest.get("image") or "")
+            lowest_prepared_image = str(lowest.get("image") or "")
 
     items = [
         {
+            "token_id": str(highest.get("token_id") or ""),
             "name": f"{labels.get('high_label', 'Highest Value')} / {str(highest.get('name') or 'Unknown Collectible')}",
             "image": highest_prepared_image,
             "value": _format_usdt_decimal(highest.get("value")),
         },
         {
+            "token_id": str(lowest.get("token_id") or ""),
             "name": f"{labels.get('low_label', 'Lowest Value')} / {str(lowest.get('name') or 'Unknown Collectible')}",
             "image": lowest_prepared_image,
             "value": _format_usdt_decimal(lowest.get("value")),
@@ -8609,6 +8687,7 @@ def _fetch_wallet_collection_chain(wallet_address: str) -> list[dict]:
             or collectible.get("collectibleImageUrl")
             or ""
         ).strip()
+        standalone_image = str(collectible.get("frontWithoutStandImageUrl") or "").strip()
         return {
             "tokenId": tid,
             "name": str(collectible.get("name") or collectible.get("collectibleName") or f"Token #{tid[-6:]}").strip(),
@@ -8616,6 +8695,7 @@ def _fetch_wallet_collection_chain(wallet_address: str) -> list[dict]:
             "fmvPriceInUSD": collectible.get("fmvPriceInUSD") or 0,
             "askPriceInUSDT": collectible.get("askPriceInUSDT"),
             "frontImageUrl": front_image,
+            "frontWithoutStandImageUrl": standalone_image,
             "imageUrl": str(collectible.get("imageUrl") or front_image).strip(),
             "collectibleImageUrl": str(collectible.get("collectibleImageUrl") or front_image).strip(),
             "ownerAddress": _normalize_wallet_address(wallet_address or "") or str(wallet_address or "").strip().lower(),
@@ -8793,9 +8873,13 @@ def _build_wallet_profile_context(
     selected_cards: list[str] | None = None,
     profile_lang: str = "en",
     background_style: str = "classic",
+    poster_types: list[str] | None = None,
 ) -> dict:
     profile_lang = _profile_lang_from_locale(profile_lang)
     ui_labels = _profile_ui_labels(profile_lang)
+    selected_poster_types = _normalize_profile_poster_types(poster_types)
+    include_collection_poster = "collection" in selected_poster_types
+    include_extremes_poster = "extremes" in selected_poster_types
     background_key = _normalize_profile_background_key(background_style)
     background_image = _profile_background_data_uri(background_key)
     wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
@@ -8930,7 +9014,7 @@ def _build_wallet_profile_context(
     owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
 
     selected_lookup = {str(x).strip().lower() for x in (selected_sbt_names or []) if str(x).strip()}
-    if selected_lookup:
+    if include_collection_poster and selected_lookup:
         chosen = []
         for b in owned_badges:
             name_key = str(b.get("name") or "").strip().lower()
@@ -8941,9 +9025,11 @@ def _build_wallet_profile_context(
                 or (id_key and f"id:{id_key}" in selected_lookup)
             ):
                 chosen.append(b)
-    else:
+    elif include_collection_poster:
         chosen = list(owned_badges)
-    if not chosen:
+    else:
+        chosen = []
+    if include_collection_poster and not chosen:
         chosen = list(owned_badges)
     chosen = chosen[:7]
     display_badges = []
@@ -8961,17 +9047,20 @@ def _build_wallet_profile_context(
             }
         )
     poster_items = []
-    for item in poster_items_raw:
-        fmv = _parse_int(item.get("fmvPriceInUSD"))
-        image = _prepare_collectible_image_for_poster(item.get("frontImageUrl") or "")
-        poster_items.append(
-            {
-                "name": str(item.get("name") or "Unknown Collectible"),
-                "image": image,
-                # Use raw FMV value from source (formatted number only, no currency box/prefix).
-                "value": _format_fmv_display(fmv),
-            }
-        )
+    if include_collection_poster:
+        for item in poster_items_raw:
+            fmv = _parse_int(item.get("fmvPriceInUSD"))
+            standalone_image = str(item.get("frontWithoutStandImageUrl") or "").strip()
+            image = standalone_image or str(item.get("frontImageUrl") or "").strip()
+            poster_items.append(
+                {
+                    "name": str(item.get("name") or "Unknown Collectible"),
+                    "image": image,
+                    "image_mode": "standalone" if standalone_image else "source",
+                    # Use raw FMV value from source (formatted number only, no currency box/prefix).
+                    "value": _format_fmv_display(fmv),
+                }
+            )
 
     history_thread.join()
     if live_onchain_thread is not None:
@@ -9163,13 +9252,15 @@ def _build_wallet_profile_context(
         "contract_rows": history_contract_rows,
         "activity_rows": history_activity_rows,
     }
-    extremes_template_context = _build_wallet_extremes_template_context(
-        history_data=history_data,
-        parsed_sorted=parsed_sorted,
-        profile_name=profile_name,
-        short_wallet=(history_data.get("wallet_short") or short_wallet),
-        profile_lang=profile_lang,
-    )
+    extremes_template_context = {}
+    if include_extremes_poster:
+        extremes_template_context = _build_wallet_extremes_template_context(
+            history_data=history_data,
+            parsed_sorted=parsed_sorted,
+            profile_name=profile_name,
+            short_wallet=(history_data.get("wallet_short") or short_wallet),
+            profile_lang=profile_lang,
+        )
     holdings_template_context = {}
     if PROFILE_ENABLE_HOLDINGS_POSTER:
         holdings_template_context = _build_wallet_holdings_growth_template_context(
@@ -9184,10 +9275,14 @@ def _build_wallet_profile_context(
     sbt_owned_badge_live = len(owned_badges)
     sbt_total_display = sbt_live_total
     sbt_badge_count_display = sbt_owned_badge_live
-    sbt_badges_sorted = sorted(
-        owned_badges,
-        key=lambda x: (_parse_int(x.get("balance")) or 0),
-        reverse=True,
+    sbt_badges_sorted = (
+        sorted(
+            owned_badges,
+            key=lambda x: (_parse_int(x.get("balance")) or 0),
+            reverse=True,
+        )
+        if PROFILE_ENABLE_SBT_RANK_POSTER
+        else []
     )
     sbt_badges_for_rank: list[dict[str, object]] = []
     for b in sbt_badges_sorted:
@@ -9201,7 +9296,7 @@ def _build_wallet_profile_context(
                 "image": _prepare_sbt_badge_image_for_poster(str(b.get("image_url") or "").strip()),
             }
         )
-    if not sbt_badges_for_rank:
+    if PROFILE_ENABLE_SBT_RANK_POSTER and not sbt_badges_for_rank:
         for b in display_badges:
             sbt_badges_for_rank.append(
                 {
@@ -9246,7 +9341,8 @@ def _build_wallet_profile_context(
         "username": profile_name,
         "user_id": user_id,
         "wallet_address": wallet_address,
-        "profile_poster_enabled": bool(has_collection and len(poster_items_raw) > 0),
+        "poster_types": [x for x in _PROFILE_POSTER_TYPE_ORDER if x in selected_poster_types],
+        "profile_poster_enabled": bool(include_collection_poster and has_collection and len(poster_items_raw) > 0),
         "count": total_count,
         "total_fmv": total_fmv,
         "shown_count": len(poster_items_raw),
@@ -9451,19 +9547,24 @@ async def _render_wallet_profile_cardpack_pull_poster(
     return out_path
 
 
-def _render_wallet_template_html(template_path: str, template_context: dict | None = None, replacements: dict | None = None) -> str:
+def _render_wallet_template_html(
+    template_path: str,
+    template_context: dict | None = None,
+    replacements: dict | None = None,
+    *,
+    embed_logo: bool = True,
+) -> str:
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"找不到 profile template: {template_path}")
 
     with open(template_path, "r", encoding="utf-8") as f:
         html_doc = f.read()
 
-    if os.path.exists(PROFILE_LOGO_PATH):
-        with open(PROFILE_LOGO_PATH, "rb") as logo_f:
-            logo_bytes = logo_f.read()
-        logo_bytes = image_generator._strip_white_border_background_png(logo_bytes)
-        logo_b64 = base64.b64encode(logo_bytes).decode("utf-8")
-        logo_src = f"data:image/png;base64,{logo_b64}"
+    if embed_logo:
+        logo_src = wallet_profile_logo_data_url()
+    else:
+        logo_src = ""
+    if logo_src:
         html_doc = html_doc.replace('src="logo.png"', f'src="{logo_src}"').replace("src='logo.png'", f"src='{logo_src}'")
 
     template_context = template_context or {}
@@ -9480,11 +9581,59 @@ def _render_wallet_template_html(template_path: str, template_context: dict | No
     return html_doc
 
 
+def wallet_profile_poster_contract(language: str, item_count: int = 10) -> dict[str, object]:
+    """Expose the canonical Profile poster labels without leaking renderer internals."""
+    profile_lang = _profile_lang_from_locale(language)
+    return {
+        "language": profile_lang,
+        "ui": dict(_profile_ui_labels(profile_lang)),
+        "history": dict(_profile_history_labels(profile_lang)),
+        "top_value_label": _profile_top_value_label(item_count, profile_lang),
+    }
+
+
+def wallet_profile_logo_data_url() -> str:
+    """Return the exact logo asset used by the canonical Profile poster renderer."""
+    if not os.path.exists(PROFILE_LOGO_PATH):
+        return ""
+    with open(PROFILE_LOGO_PATH, "rb") as logo_f:
+        logo_bytes = logo_f.read()
+    logo_bytes = image_generator._strip_white_border_background_png(logo_bytes)
+    logo_b64 = base64.b64encode(logo_bytes).decode("utf-8")
+    return f"data:image/png;base64,{logo_b64}"
+
+
+def render_wallet_profile_template_document(
+    poster_kind: str,
+    template_context: dict,
+    *,
+    embed_logo: bool = True,
+) -> str:
+    """Render one canonical TCG Pro Profile HTML document for web or PNG output."""
+    template_paths = {
+        "collection": PROFILE_TEMPLATE_PATH,
+        "history": PROFILE_HISTORY_TEMPLATE_PATH,
+        "extremes": PROFILE_EXTREMES_TEMPLATE_PATH,
+        "sbt": PROFILE_SBT_RANK_TEMPLATE_PATH,
+    }
+    kind = str(poster_kind or "").strip().lower()
+    template_path = template_paths.get(kind)
+    if not template_path:
+        raise ValueError(f"Unsupported Profile poster kind: {poster_kind!r}")
+    return _render_wallet_template_html(
+        template_path,
+        template_context=dict(template_context or {}),
+        embed_logo=embed_logo,
+    )
+
+
 async def _render_wallet_profile_posters_bundle(
     template_payload: dict,
     out_dir: str,
     safe_name: str = "wallet_profile",
     render_profile: bool = True,
+    render_history: bool = True,
+    render_extremes: bool = True,
     render_holdings: bool = False,
 ) -> dict:
     if isinstance(template_payload, dict):
@@ -9513,8 +9662,8 @@ async def _render_wallet_profile_posters_bundle(
     os.makedirs(out_dir, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_]+", "_", safe_name).strip("_") or "wallet_profile"
     profile_out = os.path.join(out_dir, f"{safe}_profile.png") if render_profile else None
-    history_out = os.path.join(out_dir, f"{safe}_profile_history.png")
-    extremes_out = os.path.join(out_dir, f"{safe}_profile_extremes.png")
+    history_out = os.path.join(out_dir, f"{safe}_profile_history.png") if render_history else None
+    extremes_out = os.path.join(out_dir, f"{safe}_profile_extremes.png") if render_extremes else None
     sbt_rank_template_exists = PROFILE_ENABLE_SBT_RANK_POSTER and os.path.exists(PROFILE_SBT_RANK_TEMPLATE_PATH)
     sbt_rank_out = os.path.join(out_dir, f"{safe}_profile_sbt_rank.png") if sbt_rank_template_exists else None
     holdings_out = os.path.join(out_dir, f"{safe}_profile_holdings.png") if render_holdings else None
@@ -9531,26 +9680,28 @@ async def _render_wallet_profile_posters_bundle(
                 profile_out,
             )
         )
-    jobs.append(
-        (
-            _render_wallet_template_html(
-                PROFILE_HISTORY_TEMPLATE_PATH,
-                template_context=history_template_context,
-                replacements=history_replacements,
-            ),
-            history_out,
+    if render_history and history_out:
+        jobs.append(
+            (
+                _render_wallet_template_html(
+                    PROFILE_HISTORY_TEMPLATE_PATH,
+                    template_context=history_template_context,
+                    replacements=history_replacements,
+                ),
+                history_out,
+            )
         )
-    )
-    jobs.append(
-        (
-            _render_wallet_template_html(
-                PROFILE_EXTREMES_TEMPLATE_PATH,
-                template_context=extreme_template_context,
-                replacements=extreme_replacements,
-            ),
-            extremes_out,
+    if render_extremes and extremes_out:
+        jobs.append(
+            (
+                _render_wallet_template_html(
+                    PROFILE_EXTREMES_TEMPLATE_PATH,
+                    template_context=extreme_template_context,
+                    replacements=extreme_replacements,
+                ),
+                extremes_out,
+            )
         )
-    )
     if sbt_rank_template_exists and sbt_rank_out:
         jobs.append(
             (
@@ -11657,6 +11808,40 @@ class ProfileTemplateSelect(discord.ui.Select):
         await self.view.refresh(interaction)
 
 
+class ProfilePosterSelect(discord.ui.Select):
+    def __init__(self, selected_values: list[str], texts: dict[str, str]):
+        selected = _normalize_profile_poster_types(selected_values)
+        options = [
+            discord.SelectOption(
+                label=str(texts["poster_history_label"])[:100],
+                value="history",
+                default=("history" in selected),
+            ),
+            discord.SelectOption(
+                label=str(texts["poster_collection_label"])[:100],
+                value="collection",
+                default=("collection" in selected),
+            ),
+            discord.SelectOption(
+                label=str(texts["poster_extremes_label"])[:100],
+                value="extremes",
+                default=("extremes" in selected),
+            ),
+        ]
+        super().__init__(
+            placeholder=str(texts["poster_placeholder"])[:150],
+            min_values=1,
+            max_values=3,
+            options=options,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = _normalize_profile_poster_types(self.values)
+        self.view.selected_poster_values = [x for x in _PROFILE_POSTER_TYPE_ORDER if x in selected]
+        await self.view.refresh(interaction)
+
+
 class ProfileBackgroundSelect(discord.ui.Select):
     def __init__(
         self,
@@ -11745,6 +11930,7 @@ class ProfileConfigView(discord.ui.View):
 
         self.selected_lang = _profile_lang_from_locale(selected_lang)
         self.texts = _profile_wizard_texts(self.selected_lang)
+        self.selected_poster_values: list[str] = ["history"]
         self.selected_template = 10
         self.selected_background = "classic"
         self.selected_sbt_values: list[str] = []
@@ -11761,8 +11947,14 @@ class ProfileConfigView(discord.ui.View):
             str(x.get("value") or ""): str(x.get("full_label") or x.get("label") or "")
             for x in self.sbt_options
         }
+        self.poster_label_map = {
+            "history": self.texts["poster_history_label"],
+            "collection": self.texts["poster_collection_label"],
+            "extremes": self.texts["poster_extremes_label"],
+        }
 
         self.add_item(ProfileTemplateSelect(self.selected_template, placeholder=self.texts["template_placeholder"]))
+        self.add_item(ProfilePosterSelect(self.selected_poster_values, self.texts))
         # Background selection is intentionally disabled for now.
         # Keep profile posters locked to the classic background preset.
         self.add_item(
@@ -11820,6 +12012,7 @@ class ProfileConfigView(discord.ui.View):
         owned_sbt_count = int((self.picker_data or {}).get("owned_sbt_count") or 0)
         lang_text = f"{LANG_FLAGS.get(self.selected_lang, '🌐')} {LANG_LABELS.get(self.selected_lang, self.selected_lang)}"
         template_text = f"Top {self.selected_template}"
+        poster_text = self._selected_lines(self.selected_poster_values, self.poster_label_map)
         sbt_text = self._selected_lines(self.selected_sbt_values, self.sbt_label_map)
         card_text = self._selected_lines(self.selected_card_values, self.card_label_map)
         return (
@@ -11829,6 +12022,7 @@ class ProfileConfigView(discord.ui.View):
             f"{self.texts['selectable_sbt_label']}: **{owned_sbt_count}**\n\n"
             f"**{self.texts['current_selection_title']}**\n"
             f"{self.texts['lang_selected_label']}: **{lang_text}**\n"
+            f"{self.texts['poster_selected_label']}:\n{poster_text}\n"
             f"{self.texts['template_selected_label']}: **{template_text}**\n"
             f"{self.texts['sbt_selected_label']}:\n{sbt_text}\n"
             f"{self.texts['cards_selected_label']}:\n{card_text}\n\n"
@@ -11862,6 +12056,8 @@ class ProfileConfigView(discord.ui.View):
 
         selected_sbt = [] if use_default else list(self.selected_sbt_values)
         selected_cards = [] if use_default else list(self.selected_card_values)
+        selected_posters = ["history"] if use_default else list(self.selected_poster_values)
+        selected_poster_types = _normalize_profile_poster_types(selected_posters)
         selected_background = "classic"
         template_count = self.selected_template
         out_dir = tempfile.mkdtemp(prefix=f"tcg_wallet_cfg_{interaction.id}_")
@@ -11878,9 +12074,13 @@ class ProfileConfigView(discord.ui.View):
                 selected_cards,
                 self.selected_lang,
                 selected_background,
+                selected_posters,
             )
             safe_name = f"{self.username}_{self.wallet[-6:]}"
-            poster_enabled = bool(profile_ctx.get("profile_poster_enabled", True))
+            render_collection = "collection" in selected_poster_types
+            render_history = "history" in selected_poster_types
+            render_extremes = "extremes" in selected_poster_types
+            poster_enabled = render_collection and bool(profile_ctx.get("profile_poster_enabled", True))
             poster_path = None
             extremes_path = None
             history_path = None
@@ -11892,6 +12092,8 @@ class ProfileConfigView(discord.ui.View):
                     out_dir,
                     safe_name=safe_name,
                     render_profile=poster_enabled,
+                    render_history=render_history,
+                    render_extremes=render_extremes,
                     render_holdings=PROFILE_ENABLE_HOLDINGS_POSTER,
                 )
                 poster_path = rendered.get("profile")
@@ -11901,13 +12103,13 @@ class ProfileConfigView(discord.ui.View):
                 sbt_rank_path = rendered.get("sbt_rank")
             history_summary = profile_ctx.get("history_summary") or {}
             history_only_hint = ""
-            if not poster_enabled:
+            if render_collection and not poster_enabled:
                 history_only_hint = _t(
                     self.selected_lang,
-                    "（此地址目前無可展示卡片，僅生成歷史海報）\n",
-                    "(No collectible cards found for page 1, history poster only)\n",
-                    "(1페이지에 표시할 카드가 없어 히스토리 포스터만 생성)\n",
-                    "（该地址目前无可展示卡片，仅生成历史海报）\n",
+                    "（此地址目前無可展示收藏卡，未生成收藏卡海報）\n",
+                    "(No collectible cards found; collection poster was not generated)\n",
+                    "(표시할 컬렉션 카드가 없어 컬렉션 포스터를 생성하지 않음)\n",
+                    "（该地址目前无可展示收藏卡，未生成收藏卡海报）\n",
                 )
             source_wallets = [
                 str(x or "").strip().lower()
@@ -11915,7 +12117,7 @@ class ProfileConfigView(discord.ui.View):
                 if _normalize_wallet_address(str(x or ""))
             ]
             history_source_hint = ""
-            if source_wallets:
+            if source_wallets and (render_history or render_extremes):
                 source_text = ", ".join(f"`{_short_hex(x)}`" for x in source_wallets)
                 history_source_hint = _t(
                     self.selected_lang,
@@ -11924,25 +12126,45 @@ class ProfileConfigView(discord.ui.View):
                     f"History source: current wallet + transferred-from wallet {source_text}\n",
                     f"History 来源：当前钱包 + 转入来源钱包 {source_text}\n",
                 )
+            poster_names = ", ".join(
+                str(self.poster_label_map[x])
+                for x in _PROFILE_POSTER_TYPE_ORDER
+                if x in selected_poster_types
+            )
+            collection_summary = ""
+            if render_collection:
+                collection_summary = (
+                    f"{self.texts['shown_label']}: **{profile_ctx.get('shown_count', 0)}** | "
+                    f"{self.texts['shown_fmv_label']}: **{_format_fmv_usd(_parse_int(profile_ctx.get('shown_fmv')))}**\n"
+                )
+            history_result_summary = ""
+            if render_history or render_extremes:
+                history_result_summary = (
+                    f"{history_source_hint}"
+                    f"History · Opened Packs: **{_format_number(history_summary.get('opened_packs'))}** | "
+                    f"Net: **{_format_usdt_currency(history_summary.get('net_total'), signed=True)}**"
+                )
             summary = (
                 f"✅ **{self.username}** · {self.texts['summary_done']}\n"
                 f"{history_only_hint}"
                 f"{self.texts['wallet_label']}: `{self.wallet}`\n"
-                f"{self.texts['shown_label']}: **{profile_ctx.get('shown_count', 0)}** | "
-                f"{self.texts['shown_fmv_label']}: **{_format_fmv_usd(_parse_int(profile_ctx.get('shown_fmv')))}**\n"
-                f"{history_source_hint}"
-                f"History · Opened Packs: **{_format_number(history_summary.get('opened_packs'))}** | "
-                f"Net: **{_format_usdt_currency(history_summary.get('net_total'), signed=True)}**"
+                f"{self.texts['poster_selected_label']}: **{poster_names}**\n"
+                f"{collection_summary}"
+                f"{history_result_summary}"
             )
-            files = [discord.File(history_path)]
-            if holdings_path and os.path.exists(holdings_path):
-                files.append(discord.File(holdings_path))
+            files = []
+            if poster_path and os.path.exists(poster_path):
+                files.append(discord.File(poster_path))
+            if history_path and os.path.exists(history_path):
+                files.append(discord.File(history_path))
             if extremes_path and os.path.exists(extremes_path):
                 files.append(discord.File(extremes_path))
+            if holdings_path and os.path.exists(holdings_path):
+                files.append(discord.File(holdings_path))
             if sbt_rank_path and os.path.exists(sbt_rank_path):
                 files.append(discord.File(sbt_rank_path))
-            if poster_path and os.path.exists(poster_path):
-                files.insert(0, discord.File(poster_path))
+            if not files:
+                raise RuntimeError("選擇的海報沒有可輸出的內容，請調整海報類型後重試。")
             await interaction.followup.send(
                 summary,
                 files=files,

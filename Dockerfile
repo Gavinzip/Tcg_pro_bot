@@ -14,4 +14,4 @@ COPY . .
 
 EXPOSE 8080
 
-CMD ["python", "bot.py"]
+CMD ["python", "service_entrypoint.py"]

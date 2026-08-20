@@ -298,8 +298,27 @@
             transition: none;
         }
 
+        /* The v1 standalone render already has a transparent background. Scale its
+           square canvas in CSS instead of downloading and re-encoding it in Python. */
+        .card-art-standalone {
+            position: absolute;
+            top: 53.25%;
+            left: 50%;
+            width: auto;
+            max-width: none;
+            height: 123%;
+            object-fit: contain;
+            object-position: center;
+            transform: translate(-50%, -50%);
+            clip-path: inset(0 round 6%);
+        }
+
         .group:hover .card-art {
             transform: none;
+        }
+
+        .group:hover .card-art-standalone {
+            transform: translate(-50%, -50%);
         }
 
         .foil-label {
@@ -973,7 +992,7 @@
                 <div class="item-card compact rounded-3xl flex flex-col items-center group relative">
                     <!-- Item Image -->
                     <div class="card-frame relative w-full aspect-[2.58/3.58] mb-4">
-                        <img src="{{ item.image }}" alt="{{ item.name }}" class="card-art" />
+                        <img src="{{ item.image }}" alt="{{ item.name }}" class="card-art card-art-{{ item.image_mode or 'source' }}" />
                     </div>
 
                     <!-- Item Info -->
