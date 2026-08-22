@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 from runtime.renaiss_card_api import DEFAULT_RENAISS_CARD_API_BASE_URL, fetch_card_api_collectible
+from runtime.profile_job_lock import acquire_profile_job_lock_async, profile_job_lock
 from runtime.wallet_migration import wallet_migration_api_payload
 from runtime.wallet_usernames import username_for_wallet
 # ============================================================
@@ -8757,7 +8758,7 @@ def _build_wallet_features_html(top_items: list[dict]) -> str:
     return "".join(lines)
 
 
-def _build_wallet_profile_picker_data(wallet_address: str) -> dict:
+def _build_wallet_profile_picker_data_unlocked(wallet_address: str) -> dict:
     wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
     wallet_short = (
         f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else (wallet_norm or "Unknown User")
@@ -8863,6 +8864,11 @@ def _build_wallet_profile_picker_data(wallet_address: str) -> dict:
         "owned_sbt_count": len(owned_badges),
         "sbt_options": sbt_options,
     }
+
+
+def _build_wallet_profile_picker_data(wallet_address: str) -> dict:
+    with profile_job_lock():
+        return _build_wallet_profile_picker_data_unlocked(wallet_address)
 
 
 def _build_wallet_profile_context(
@@ -12062,8 +12068,10 @@ class ProfileConfigView(discord.ui.View):
         template_count = self.selected_template
         out_dir = tempfile.mkdtemp(prefix=f"tcg_wallet_cfg_{interaction.id}_")
         loop = asyncio.get_running_loop()
+        profile_job_lease = None
 
         try:
+            profile_job_lease = await acquire_profile_job_lock_async()
             profile_ctx = await loop.run_in_executor(
                 None,
                 _build_wallet_profile_context,
@@ -12174,6 +12182,8 @@ class ProfileConfigView(discord.ui.View):
             print(traceback.format_exc(), file=sys.stderr)
             await interaction.followup.send(f"❌ 生成失敗：{e}")
         finally:
+            if profile_job_lease is not None:
+                profile_job_lease.release()
             shutil.rmtree(out_dir, ignore_errors=True)
             self.stop()
 

@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 from dotenv import load_dotenv
 
 from runtime.profile_data import ProfileDataError, build_wallet_profile_data, normalize_wallet_address
+from runtime.profile_job_lock import ProfileJobLockTimeout, profile_job_lock
 
 
 load_dotenv()
@@ -166,13 +167,23 @@ class ProfileApiHandler(BaseHTTPRequestHandler):
                 return
             started = time.perf_counter()
             try:
-                payload = build_wallet_profile_data(
-                    wallet,
-                    language=language,
-                    include_extremes=include_extremes,
-                    include_posters=include_posters,
-                    poster_kind=poster,
+                with profile_job_lock():
+                    payload = build_wallet_profile_data(
+                        wallet,
+                        language=language,
+                        include_extremes=include_extremes,
+                        include_posters=include_posters,
+                        poster_kind=poster,
+                    )
+            except ProfileJobLockTimeout:
+                inflight["status"] = HTTPStatus.TOO_MANY_REQUESTS
+                inflight["error"] = "profile job queue wait timed out; retry shortly"
+                _publish_inflight(cache_key, inflight)
+                self._send_json(
+                    HTTPStatus.TOO_MANY_REQUESTS,
+                    {"ok": False, "error": "profile job queue wait timed out; retry shortly"},
                 )
+                return
             except ProfileDataError as exc:
                 cause_name = type(exc.__cause__).__name__ if exc.__cause__ is not None else type(exc).__name__
                 print(f"[profile-api] lookup failed wallet={wallet} cause={cause_name}")

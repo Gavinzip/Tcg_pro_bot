@@ -12,6 +12,6 @@ RUN playwright install chromium
 
 COPY . .
 
-EXPOSE 8080
+EXPOSE 8080 8091
 
 CMD ["python", "service_entrypoint.py"]
