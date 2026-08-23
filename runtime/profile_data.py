@@ -8,6 +8,8 @@ import os
 import time
 from typing import Any, Callable
 
+from runtime.profile_source_cache import load_profile_source
+
 
 SCHEMA_VERSION = "1.3"
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -233,7 +235,9 @@ def _extreme_row(
     image_url = str(row.get("image") or "").strip()
     if " / " in name:
         name = name.split(" / ", 1)[1].strip()
-    if token_id and collectible_lookup:
+    generic_name = name.lower() in {"renaiss", "unknown collectible", ""}
+    image_is_prepared = image_url.startswith("data:image/") or "nft_image_standalone" in image_url
+    if token_id and collectible_lookup and (generic_name or not image_is_prepared):
         try:
             collectible = collectible_lookup(token_id)
             resolved_name = str(
@@ -302,25 +306,51 @@ def build_wallet_profile_data(
     history_seconds = 0.0
     collection_seconds = 0.0
     sbt_seconds = 0.0
-    source_calls: dict[str, Callable[[], tuple[Any, float]]] = {}
+    source_calls: dict[str, Callable[[], tuple[Any, float, str]]] = {}
+    source_cache: dict[str, str] = {}
+
+    def cached_source(
+        source: str,
+        cache_language: str,
+        loader: Callable[[], Any],
+    ) -> tuple[Any, float, str]:
+        started = time.perf_counter()
+        value, cache_status = load_profile_source(
+            source,
+            wallet,
+            cache_language,
+            loader,
+        )
+        return value, round(time.perf_counter() - started, 3), cache_status
+
     if needs_history:
-        source_calls["history"] = lambda: _timed(
-            lambda: core._build_wallet_activity_history_for_profile(wallet, profile_lang=language)
+        source_calls["history"] = lambda: cached_source(
+            "history",
+            language,
+            lambda: core._build_wallet_activity_history_for_profile(wallet, profile_lang=language),
         )
     if needs_collection:
-        source_calls["collection"] = lambda: _timed(lambda: core._fetch_wallet_collection_chain(wallet))
+        source_calls["collection"] = lambda: cached_source(
+            "collection",
+            "",
+            lambda: core._fetch_wallet_collection_chain(wallet),
+        )
     if needs_sbt:
-        source_calls["sbt"] = lambda: _timed(lambda: _fetch_sbt_snapshot(core, wallet))
+        source_calls["sbt"] = lambda: cached_source(
+            "sbt",
+            "",
+            lambda: _fetch_sbt_snapshot(core, wallet),
+        )
 
     with ThreadPoolExecutor(max_workers=max(1, len(source_calls)), thread_name_prefix="profile-data") as pool:
         futures = {name: pool.submit(call) for name, call in source_calls.items()}
         try:
             if "history" in futures:
-                history, history_seconds = futures["history"].result()
+                history, history_seconds, source_cache["history"] = futures["history"].result()
             if "collection" in futures:
-                collection, collection_seconds = futures["collection"].result()
+                collection, collection_seconds, source_cache["collection"] = futures["collection"].result()
             if "sbt" in futures:
-                sbt_snapshot, sbt_seconds = futures["sbt"].result()
+                sbt_snapshot, sbt_seconds, source_cache["sbt"] = futures["sbt"].result()
                 sbt_badges, sbt_diagnostics = sbt_snapshot
         except Exception as exc:
             raise ProfileDataError("profile_lookup_failed") from exc
@@ -379,14 +409,20 @@ def build_wallet_profile_data(
                 "highest": _extreme_row(
                     items[0] if isinstance(items, list) and len(items) > 0 else None,
                     "highest",
-                    collectible_lookup=core._collectible_by_token_cached,
+                    collectible_lookup=lambda token_id: core._collectible_by_token_cached(
+                        token_id,
+                        max_retries=1,
+                    ),
                     warnings=warnings,
                     allow_empty=include_posters and requested_poster == "extremes",
                 ),
                 "lowest": _extreme_row(
                     items[1] if isinstance(items, list) and len(items) > 1 else None,
                     "lowest",
-                    collectible_lookup=core._collectible_by_token_cached,
+                    collectible_lookup=lambda token_id: core._collectible_by_token_cached(
+                        token_id,
+                        max_retries=1,
+                    ),
                     warnings=warnings,
                     allow_empty=include_posters and requested_poster == "extremes",
                 ),
@@ -469,6 +505,7 @@ def build_wallet_profile_data(
         "rankings": rankings,
         "extremes": extremes,
         "warnings": warnings,
+        "source_cache": source_cache,
         "timings": {
             "history_seconds": history_seconds,
             "collection_seconds": collection_seconds,

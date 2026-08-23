@@ -3206,7 +3206,13 @@ def _trpc_collectible_list(query_payload: dict) -> dict:
     raise RuntimeError(f"collectible.list 請求失敗（已重試 {PROFILE_API_MAX_RETRIES} 次）：{last_err}")
 
 
-def _trpc_user_activities(wallet_address: str, cursor: str | None = None, limit: int = PROFILE_ACTIVITY_PAGE_LIMIT) -> dict:
+def _trpc_user_activities(
+    wallet_address: str,
+    cursor: str | None = None,
+    limit: int = PROFILE_ACTIVITY_PAGE_LIMIT,
+    *,
+    max_retries: int | None = None,
+) -> dict:
     payload = {
         "address": str(wallet_address or "").strip().lower(),
         "filter": "all",
@@ -3224,8 +3230,9 @@ def _trpc_user_activities(wallet_address: str, cursor: str | None = None, limit:
         "input": json.dumps({"0": row}, separators=(",", ":"), ensure_ascii=False),
     }
 
+    retries = max(1, int(max_retries or PROFILE_API_MAX_RETRIES))
     last_err = None
-    for attempt in range(1, PROFILE_API_MAX_RETRIES + 1):
+    for attempt in range(1, retries + 1):
         try:
             resp = _http_get(RENAISS_ACTIVITY_LIST_URL, params=params, timeout=25)
             status = int(resp.status_code or 0)
@@ -3251,13 +3258,13 @@ def _trpc_user_activities(wallet_address: str, cursor: str | None = None, limit:
             if isinstance(e, requests.RequestException) and getattr(e, "response", None) is not None:
                 status = int(e.response.status_code or 0)
             retryable = status in (408, 409, 425, 429) or (status is not None and status >= 500) or status is None
-            if retryable and attempt < PROFILE_API_MAX_RETRIES:
+            if retryable and attempt < retries:
                 wait_sec = PROFILE_API_RETRY_BACKOFF_SEC * (2 ** (attempt - 1))
                 time.sleep(wait_sec)
                 continue
             break
 
-    raise RuntimeError(f"activity.getSubgraphUserActivities 請求失敗（已重試 {PROFILE_API_MAX_RETRIES} 次）：{last_err}")
+    raise RuntimeError(f"activity.getSubgraphUserActivities 請求失敗（已嘗試 {retries} 次）：{last_err}")
 
 
 def _card_price_to_usd(value) -> Decimal:
@@ -3401,7 +3408,7 @@ def _fetch_card_fmv_by_token_id_cli(token_id: str) -> Decimal:
     return _extract_card_price_from_renaiss_payload(payload)
 
 
-def _trpc_collectible_by_token(token_id: str) -> dict:
+def _trpc_collectible_by_token(token_id: str, *, max_retries: int | None = None) -> dict:
     token = str(token_id or "").strip()
     if not token:
         return {}
@@ -3414,8 +3421,9 @@ def _trpc_collectible_by_token(token_id: str) -> dict:
         ),
     }
 
+    retries = max(1, int(max_retries or PROFILE_API_MAX_RETRIES))
     last_err = None
-    for attempt in range(1, PROFILE_API_MAX_RETRIES + 1):
+    for attempt in range(1, retries + 1):
         try:
             resp = _http_get(RENAISS_COLLECTIBLE_BY_TOKEN_URL, params=params, timeout=25)
             status = int(resp.status_code or 0)
@@ -3443,45 +3451,45 @@ def _trpc_collectible_by_token(token_id: str) -> dict:
             if isinstance(e, requests.RequestException) and getattr(e, "response", None) is not None:
                 status = int(e.response.status_code or 0)
             retryable = status in (408, 409, 425, 429) or (status is not None and status >= 500) or status is None
-            if retryable and attempt < PROFILE_API_MAX_RETRIES:
+            if retryable and attempt < retries:
                 wait_sec = PROFILE_API_RETRY_BACKOFF_SEC * (2 ** (attempt - 1))
                 time.sleep(wait_sec)
                 continue
             break
 
-    raise RuntimeError(f"collectible.getCollectibleByTokenId 請求失敗（已重試 {PROFILE_API_MAX_RETRIES} 次）：{last_err}")
+    raise RuntimeError(f"collectible.getCollectibleByTokenId 請求失敗（已嘗試 {retries} 次）：{last_err}")
 
 
-def _card_api_collectible_by_token(token_id: str) -> dict:
+def _card_api_collectible_by_token(token_id: str, *, max_retries: int | None = None) -> dict:
     return fetch_card_api_collectible(
         token_id,
         http_get=_http_get,
         base_url=RENAISS_CARD_API_BASE_URL,
         timeout=25,
-        max_retries=PROFILE_API_MAX_RETRIES,
+        max_retries=max(1, int(max_retries or PROFILE_API_MAX_RETRIES)),
         retry_backoff_sec=PROFILE_API_RETRY_BACKOFF_SEC,
         min_request_interval_sec=PROFILE_CARD_API_MIN_REQUEST_INTERVAL_SEC,
     )
 
 
-def _collectible_by_token(token_id: str) -> dict:
+def _collectible_by_token(token_id: str, *, max_retries: int | None = None) -> dict:
     if PROFILE_COLLECTIBLE_TOKEN_SOURCE == "trpc":
-        return _trpc_collectible_by_token(token_id)
-    return _card_api_collectible_by_token(token_id)
+        return _trpc_collectible_by_token(token_id, max_retries=max_retries)
+    return _card_api_collectible_by_token(token_id, max_retries=max_retries)
 
 
-def _collectible_by_token_cached(token_id: str) -> dict:
+def _collectible_by_token_cached(token_id: str, *, max_retries: int | None = None) -> dict:
     tid = str(token_id or "").strip()
     if not tid:
         return {}
     cache_key = f"{PROFILE_COLLECTIBLE_TOKEN_SOURCE}:{tid}"
     if not PROFILE_ENABLE_RUNTIME_CACHE:
-        data = _collectible_by_token(tid)
+        data = _collectible_by_token(tid, max_retries=max_retries)
         return data if isinstance(data, dict) else {}
     cached = _CARD_COLLECTIBLE_CACHE.get(cache_key)
     if isinstance(cached, dict):
         return cached
-    data = _collectible_by_token(tid)
+    data = _collectible_by_token(tid, max_retries=max_retries)
     if not isinstance(data, dict):
         data = {}
     _CARD_COLLECTIBLE_CACHE[cache_key] = data
@@ -3598,7 +3606,12 @@ def _fetch_token_activities(token_id: str) -> list[dict]:
     return all_rows
 
 
-def _fetch_card_fmv_by_token_id(token_id: str, allow_trade_fallback: bool = True) -> Decimal:
+def _fetch_card_fmv_by_token_id(
+    token_id: str,
+    allow_trade_fallback: bool = True,
+    max_retries: int | None = None,
+    raise_on_lookup_error: bool = False,
+) -> Decimal:
     tid = str(token_id or "").strip()
     if not tid:
         return Decimal("0")
@@ -3621,9 +3634,10 @@ def _fetch_card_fmv_by_token_id(token_id: str, allow_trade_fallback: bool = True
     if _profile_chain_prefers_cli_token_price():
         value = _fetch_card_fmv_by_token_id_cli(tid)
 
+    collectible_lookup_failed = False
     try:
         if value <= 0:
-            collectible = _collectible_by_token_cached(tid)
+            collectible = _collectible_by_token_cached(tid, max_retries=max_retries)
             fmv_raw = _to_decimal(collectible.get("fmvPriceInUSD"))
             buyback_raw = _to_decimal(collectible.get("buybackBaseValueInUSD"))
             ask_raw = _to_decimal(collectible.get("askPriceInUSDT"))
@@ -3636,6 +3650,9 @@ def _fetch_card_fmv_by_token_id(token_id: str, allow_trade_fallback: bool = True
                     value = candidate
                     break
     except Exception:
+        collectible_lookup_failed = True
+        if raise_on_lookup_error:
+            raise
         if value <= 0:
             value = Decimal("0")
 
@@ -3644,13 +3661,15 @@ def _fetch_card_fmv_by_token_id(token_id: str, allow_trade_fallback: bool = True
     if allow_trade_fallback and value <= 0:
         value = _fetch_card_trade_fallback_by_token_id(tid)
 
-    if PROFILE_ENABLE_RUNTIME_CACHE:
+    cacheable = value > 0 or not collectible_lookup_failed
+    if PROFILE_ENABLE_RUNTIME_CACHE and cacheable:
         _CARD_FMV_CACHE[cache_key] = value
-    _save_fmv_to_disk_cache(cache_key, value)
+    if cacheable:
+        _save_fmv_to_disk_cache(cache_key, value)
     return value
 
 
-def _fetch_card_image_by_token_id(token_id: str) -> str:
+def _fetch_card_image_by_token_id(token_id: str, *, max_retries: int | None = None) -> str:
     tid = str(token_id or "").strip()
     if not tid:
         return ""
@@ -3660,9 +3679,10 @@ def _fetch_card_image_by_token_id(token_id: str) -> str:
 
     image_url = ""
     try:
-        collectible = _collectible_by_token_cached(tid)
+        collectible = _collectible_by_token_cached(tid, max_retries=max_retries)
         image_url = str(
-            collectible.get("frontImageUrl")
+            collectible.get("frontWithoutStandImageUrl")
+            or collectible.get("frontImageUrl")
             or collectible.get("imageUrl")
             or collectible.get("collectibleImageUrl")
             or ""
@@ -4497,7 +4517,12 @@ def _fetch_pack_contract_name_hints(wallet_address: str, target_contracts: set[s
     seen_cursors: set[str] = set()
     cursor: str | None = None
     for _ in range(PROFILE_PACK_NAME_HINT_MAX_PAGES):
-        page = _trpc_user_activities(wallet_address, cursor=cursor, limit=PROFILE_ACTIVITY_PAGE_LIMIT)
+        page = _trpc_user_activities(
+            wallet_address,
+            cursor=cursor,
+            limit=PROFILE_ACTIVITY_PAGE_LIMIT,
+            max_retries=1,
+        )
         activities = page.get("activities") if isinstance(page.get("activities"), list) else []
         for row in activities:
             if not isinstance(row, dict):
@@ -4544,7 +4569,12 @@ def _fetch_pull_activity_hints(wallet_address: str, *, max_pages: int | None = N
     seen_cursors: set[str] = set()
     cursor: str | None = None
     for _ in range(pages):
-        page = _trpc_user_activities(wallet_address, cursor=cursor, limit=PROFILE_ACTIVITY_PAGE_LIMIT)
+        page = _trpc_user_activities(
+            wallet_address,
+            cursor=cursor,
+            limit=PROFILE_ACTIVITY_PAGE_LIMIT,
+            max_retries=1,
+        )
         activities = page.get("activities") if isinstance(page.get("activities"), list) else []
         for row in activities:
             if not isinstance(row, dict):
@@ -7074,14 +7104,22 @@ def _build_wallet_extremes_template_context(
         if workers > 1:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {
-                    pool.submit(_fetch_card_fmv_by_token_id, str(x.get("token_id") or ""), False): x
+                    pool.submit(
+                        _fetch_card_fmv_by_token_id,
+                        str(x.get("token_id") or ""),
+                        False,
+                        1,
+                        True,
+                    ): x
                     for x in unresolved_release_tokens
                 }
+                lookup_errors: list[Exception] = []
                 for future in as_completed(futures):
                     base = futures[future]
                     try:
                         value = _to_decimal(future.result())
-                    except Exception:
+                    except Exception as exc:
+                        lookup_errors.append(exc)
                         value = Decimal("0")
                     if value <= 0:
                         continue
@@ -7098,10 +7136,21 @@ def _build_wallet_extremes_template_context(
                             "value": value,
                         }
                     )
+                if lookup_errors:
+                    raise RuntimeError(
+                        f"extremes collectible lookup incomplete ({len(lookup_errors)} failures)"
+                    ) from lookup_errors[0]
         else:
             for base in unresolved_release_tokens:
                 token_id = str(base.get("token_id") or "")
-                value = _to_decimal(_fetch_card_fmv_by_token_id(token_id, allow_trade_fallback=False))
+                value = _to_decimal(
+                    _fetch_card_fmv_by_token_id(
+                        token_id,
+                        allow_trade_fallback=False,
+                        max_retries=1,
+                        raise_on_lookup_error=True,
+                    )
+                )
                 if value <= 0:
                     continue
                 image = str(base.get("image") or "").strip()
@@ -7136,7 +7185,7 @@ def _build_wallet_extremes_template_context(
         token_contract = str(cand.get("token_contract") or "").strip().lower()
         image = str(cand.get("image") or "").strip()
         if (not image) or bool(cand.get("need_api_image")):
-            api_image = _fetch_card_image_by_token_id(token_id) if token_id else ""
+            api_image = _fetch_card_image_by_token_id(token_id, max_retries=1) if token_id else ""
             if api_image:
                 image = api_image
             elif not image:

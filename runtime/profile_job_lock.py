@@ -59,8 +59,13 @@ class ProfileJobLease:
         self.release()
 
 
-def acquire_profile_job_lock() -> ProfileJobLease:
-    wait_seconds = _wait_seconds()
+def acquire_profile_job_lock(wait_seconds: float | None = None) -> ProfileJobLease:
+    configured_wait_seconds = _wait_seconds()
+    wait_seconds = (
+        configured_wait_seconds
+        if wait_seconds is None
+        else min(configured_wait_seconds, max(0.0, float(wait_seconds)))
+    )
     deadline = time.monotonic() + wait_seconds
     if not _LOCAL_LOCK.acquire(timeout=wait_seconds):
         raise ProfileJobLockTimeout("profile job queue wait timed out")
@@ -85,9 +90,9 @@ def acquire_profile_job_lock() -> ProfileJobLease:
         raise
 
 
-async def acquire_profile_job_lock_async() -> ProfileJobLease:
+async def acquire_profile_job_lock_async(wait_seconds: float | None = None) -> ProfileJobLease:
     loop = asyncio.get_running_loop()
-    future = loop.run_in_executor(None, acquire_profile_job_lock)
+    future = loop.run_in_executor(None, acquire_profile_job_lock, wait_seconds)
     try:
         return await asyncio.shield(future)
     except asyncio.CancelledError:
@@ -97,8 +102,8 @@ async def acquire_profile_job_lock_async() -> ProfileJobLease:
 
 
 @contextmanager
-def profile_job_lock() -> Iterator[ProfileJobLease]:
-    lease = acquire_profile_job_lock()
+def profile_job_lock(wait_seconds: float | None = None) -> Iterator[ProfileJobLease]:
+    lease = acquire_profile_job_lock(wait_seconds)
     try:
         yield lease
     finally:
