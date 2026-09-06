@@ -35,6 +35,7 @@ from runtime.renaiss_card_api import DEFAULT_RENAISS_CARD_API_BASE_URL, fetch_ca
 from runtime.profile_job_lock import acquire_profile_job_lock_async, profile_job_lock
 from runtime.wallet_migration import wallet_migration_api_payload
 from runtime.wallet_usernames import username_for_wallet
+from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_PACK_NAMES
 # ============================================================
 # ⚠️ JINA AI RATE LIMITER 說明（重要！請勿刪除此說明）
 # ============================================================
@@ -874,7 +875,7 @@ if PROFILE_REALTIME_RECALC_ON_PROFILE and PROFILE_REALTIME_METRICS_SOURCE == "on
 if PROFILE_SBT_BADGE_SOURCE in ("onchain", "auto"):
     if _ONCHAIN_ANALYZE_SBT_WALLET_FN is None:
         print(
-            "⚠️ onchain SBT metrics unavailable; /profile SBT will fallback to official username path.",
+            "⚠️ onchain SBT metrics unavailable; /profile SBT lookups will report a source error.",
             file=sys.stderr,
         )
 PROFILE_CARD_WITHDRAW_ADDRESS = str(
@@ -1096,12 +1097,7 @@ def _profile_withdraw_target_set() -> set[str]:
     return out
 
 
-PROFILE_DEFAULT_PACK_CONTRACTS = (
-    "0xaab5f5fa75437a6e9e7004c12c9c56cda4b4885a",
-    "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
-    "0xb2891022648c5fad3721c42c05d8d283d4d53080",
-    "0xfda4a907d23d9f24271bc47483c5b983831e325e",
-)
+PROFILE_DEFAULT_PACK_CONTRACTS = DEFAULT_PACK_CONTRACTS
 
 
 def _profile_onchain_pack_contracts() -> tuple[str, ...]:
@@ -4015,7 +4011,7 @@ def _profile_named_activity_pack_key(contract_key: str | None, pack_name: str | 
 
 def _is_profile_virtual_pack_key(value: str | None) -> bool:
     key = str(value or "").strip().lower()
-    return key.startswith("payment:") or key.startswith("activity:") or key.startswith("legacy")
+    return key.startswith(("payment:", "activity:", "legacy", "vrf:"))
 
 
 def _is_profile_cacheable_pack_key(value: str | None) -> bool:
@@ -4034,7 +4030,7 @@ def _resolve_profile_official_pack_identity(
     price = _to_decimal((hint or {}).get("price"))
     if raw_key.startswith("payment:"):
         return raw_key, pack_name, contract
-    if raw_key.startswith("legacy:"):
+    if raw_key.startswith(("legacy:", "vrf:")):
         return raw_key, pack_name, contract
 
     cached_name = _lookup_pack_name(pack_name_map, raw_key) if raw_key.startswith("0x") else ""
@@ -5874,6 +5870,7 @@ def _infer_delayed_open_pack_matches(
 
 
 def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lang: str = "en") -> dict:
+    from scripts.onchain_metrics import fetch_vrf_v3_checkouts
     lang = _profile_lang_from_locale(profile_lang)
     labels = _profile_history_labels(lang)
     wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
@@ -5895,6 +5892,7 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         extra_params={"address": wallet_norm, "contractaddress": usdt_contract},
         sort="asc",
     )
+    vrf_checkouts = fetch_vrf_v3_checkouts(cfg, wallet_norm, usdt_rows)
     nft_rows_721 = _bsc_account_api_fetch_all(
         cfg,
         action="tokennfttx",
@@ -6004,7 +6002,8 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         elif to == wallet_norm and tx_hash in nft_out_txs:
             cls = "buyback"
         elif frm == wallet_norm and to in known_pack_contracts:
-            cls = "open_pack"
+            if to != VRF_V3_CONTRACT or tx_hash in vrf_checkouts:
+                cls = "open_pack"
         elif frm in known_pack_contracts and to == wallet_norm:
             cls = "buyback"
         if cls == "open_pack":
@@ -6017,16 +6016,29 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
             _upsert_tx(market_sell_txs, tx_hash, counterparty=frm, ts=ts, amount=amount)
 
     open_count_by_tx: dict[str, int] = {
-        tx_hash: _profile_open_count_from_nft_quantity(nft_in_quantity_by_tx.get(tx_hash))
+        tx_hash: (vrf_checkouts[tx_hash].count if tx_hash in vrf_checkouts
+                  else _profile_open_count_from_nft_quantity(nft_in_quantity_by_tx.get(tx_hash)))
         for tx_hash in open_pack_txs.keys()
     }
 
-    pull_hint_matches: dict[str, dict] = {}
+    pull_hint_matches: dict[str, dict] = {
+        tx_hash: {
+            "pack_key": f"vrf:{event.pack_id}",
+            "pack_name": (VRF_V3_PACK_NAMES.get(event.pack_id)
+                          or _lookup_pack_name(pack_name_map, f"vrf:{event.pack_id}")
+                          or f"VRF Pack {_short_hex(event.pack_id)}"),
+            "contract_address": VRF_V3_CONTRACT,
+            "price": event.amount / event.count,
+            "tx_hash": tx_hash,
+            "source": "vrf_checkout",
+        }
+        for tx_hash, event in vrf_checkouts.items()
+    }
     if open_pack_txs:
         payment_rows = [
             tx.get("payment_row")
             for tx in open_pack_txs.values()
-            if isinstance(tx.get("payment_row"), dict)
+            if isinstance(tx.get("payment_row"), dict) and tx.get("hash") not in vrf_checkouts
         ]
         if payment_rows:
             activity_tx_map = _load_pack_activity_tx_map()
@@ -6193,7 +6205,7 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
             unit_amount = derived_unit_amount
             effective["unit_amount"] = unit_amount
 
-        if open_count > 1 and counterparty:
+        if open_count > 1 and counterparty and key not in vrf_checkouts:
             cached_name = _lookup_pack_name(pack_name_map, counterparty)
             cached_unit = _lookup_pack_unit_price(pack_price_map, contract_key=counterparty)
             known_payment_name = _known_profile_payment_pack_name(counterparty, unit_amount)
@@ -6287,6 +6299,8 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
 
     unresolved_pack_name_contracts: set[str] = set()
     for contract in sorted(contract_open_count.keys()):
+        if contract.startswith("vrf:") and contract_pack_name.get(contract):
+            continue
         cached_name = _lookup_pack_name(pack_name_map, contract)
         if cached_name:
             contract_pack_name[contract] = cached_name
@@ -6431,11 +6445,12 @@ def _build_wallet_activity_history_chain_single(wallet_address: str, profile_lan
         if should_cache_pack and _pack_name_is_real(pack_name, contract):
             pack_name_map_dirty = _record_pack_name(pack_name_map, contract, pack_name) or pack_name_map_dirty
         is_virtual_pack = _is_profile_virtual_pack_key(contract)
-        contract_full = "-" if is_virtual_pack else contract
-        contract_short = "-" if is_virtual_pack else _short_hex(contract)
+        contract_full = VRF_V3_CONTRACT if contract.startswith("vrf:") else ("-" if is_virtual_pack else contract)
+        contract_short = _short_hex(contract_full) if contract_full != "-" else "-"
         contract_rows.append(
             {
                 "pack_name": pack_name,
+                "pack_key": contract,
                 "contract": contract_full,
                 "contract_short": contract_short,
                 "open_count": int(contract_open_count.get(contract, 0)),
@@ -6744,13 +6759,15 @@ def _merge_profile_contract_rows(histories: list[dict]) -> list[dict]:
                 continue
             contract = str(row.get("contract") or "").strip().lower()
             pack_name = str(row.get("pack_name") or "").strip()
-            key = contract if contract and contract != "-" else f"legacy-name:{pack_name.lower()}"
+            pack_key = str(row.get("pack_key") or "").strip().lower()
+            key = pack_key or (contract if contract and contract != "-" else f"legacy-name:{pack_name.lower()}")
             if not key:
                 continue
             out = merged.setdefault(
                 key,
                 {
                     "pack_name": pack_name or "Unknown Pack",
+                    "pack_key": pack_key,
                     "contract": contract if contract.startswith("0x") else "-",
                     "open_count": 0,
                     "direct_count": 0,
@@ -6774,6 +6791,7 @@ def _merge_profile_contract_rows(histories: list[dict]) -> list[dict]:
         rows.append(
             {
                 "pack_name": str(row.get("pack_name") or "Unknown Pack"),
+                "pack_key": str(row.get("pack_key") or ""),
                 "contract": contract if contract.startswith("0x") else "-",
                 "contract_short": _short_hex(contract) if contract.startswith("0x") else "-",
                 "open_count": open_count,
@@ -8150,7 +8168,7 @@ def _build_wallet_flex_pack_template_context(
 def _fetch_user_sbt_badges_official(username: str | None) -> list[dict]:
     uname = str(username or "").strip()
     if not uname:
-        return []
+        raise RuntimeError("sbt_official_username_unavailable")
     cache_key = f"official:{uname.lower()}"
     now_ts = time.time()
     cached = _PROFILE_SBT_BADGE_CACHE.get(cache_key)
@@ -8207,10 +8225,7 @@ def _fetch_user_sbt_badges_official(username: str | None) -> list[dict]:
                 time.sleep(wait_sec)
                 continue
             break
-    if cached:
-        print(f"⚠️ sbt.getUserBadges failed for {uname}, fallback stale cache: {last_err}", file=sys.stderr)
-        return [dict(x) for x in cached[1]]
-    return []
+    raise RuntimeError("sbt_official_lookup_failed") from last_err
 
 
 def _decode_abi_string(hex_ret: str) -> str:
@@ -8385,35 +8400,30 @@ def _fetch_sbt_metadata_map() -> dict[str, dict[str, str]]:
 def _fetch_wallet_sbt_badges_onchain(wallet_address: str | None) -> list[dict]:
     wallet_norm = _normalize_wallet_address(wallet_address or "")
     if not wallet_norm:
-        return []
+        raise RuntimeError("sbt_wallet_address_invalid")
     cache_key = f"onchain:{wallet_norm}"
     now_ts = time.time()
     cached = _PROFILE_SBT_BADGE_CACHE.get(cache_key)
     if cached and PROFILE_SBT_BADGE_CACHE_TTL_SEC > 0 and (now_ts - cached[0]) <= PROFILE_SBT_BADGE_CACHE_TTL_SEC:
         return [dict(x) for x in cached[1]]
     if _ONCHAIN_ANALYZE_SBT_WALLET_FN is None:
-        return []
+        raise RuntimeError("sbt_onchain_module_unavailable")
     cfg = _build_profile_onchain_cfg(force=True)
     if cfg is None:
-        return []
+        raise RuntimeError("sbt_source_unavailable")
     if not ONCHAIN_SBT_CONTRACT.startswith("0x") or len(ONCHAIN_SBT_CONTRACT) != 42:
-        return []
+        raise RuntimeError("sbt_contract_invalid")
 
     try:
         balances = _ONCHAIN_ANALYZE_SBT_WALLET_FN(cfg, wallet_norm, ONCHAIN_SBT_CONTRACT)
     except Exception as e:
-        if cached:
-            print(f"⚠️ onchain sbt failed for {wallet_norm}, fallback stale cache: {e}", file=sys.stderr)
-            return [dict(x) for x in cached[1]]
-        return []
+        raise RuntimeError("sbt_onchain_lookup_failed") from e
     if not isinstance(balances, dict):
-        return []
+        raise RuntimeError("sbt_onchain_invalid_response")
 
     metadata: dict[str, dict[str, str]]
     if PROFILE_DATA_MODE == "chain_official":
         metadata = _fetch_sbt_metadata_map_onchain(list(balances.keys()))
-        if not metadata:
-            metadata = _fetch_sbt_metadata_map()
     else:
         metadata = _fetch_sbt_metadata_map()
     out: list[dict] = []
@@ -8441,18 +8451,9 @@ def _fetch_wallet_sbt_badges_onchain(wallet_address: str | None) -> list[dict]:
 
 def _fetch_user_sbt_badges(username: str | None, wallet_address: str | None = None) -> list[dict]:
     source = PROFILE_SBT_BADGE_SOURCE
-    badges_onchain: list[dict] = []
     if source in ("onchain", "auto"):
-        badges_onchain = _fetch_wallet_sbt_badges_onchain(wallet_address)
-        if badges_onchain or source == "onchain":
-            return badges_onchain
-    if source in ("official", "auto"):
-        badges_official = _fetch_user_sbt_badges_official(username)
-        if badges_official or source == "official":
-            return badges_official
-        if badges_onchain:
-            return badges_onchain
-    return []
+        return _fetch_wallet_sbt_badges_onchain(wallet_address)
+    return _fetch_user_sbt_badges_official(username)
 
 
 def _resolve_user_from_wallet(wallet_address: str) -> tuple[str | None, str | None]:
@@ -9125,6 +9126,8 @@ def _build_wallet_profile_context(
     live_onchain_error = live_onchain_holder.get("error")
     live_onchain_metrics = live_onchain_holder.get("data") if isinstance(live_onchain_holder.get("data"), dict) else None
     if history_error is not None or not isinstance(history_data, dict):
+        if PROFILE_DATA_MODE == "chain_official":
+            raise RuntimeError("profile_chain_history_failed") from history_error
         if history_error is not None:
             print(f"⚠️ activity history build failed: {history_error}", file=sys.stderr)
         history_data = {

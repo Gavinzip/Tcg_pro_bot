@@ -47,6 +47,7 @@ from runtime.wallet_usernames import (
     load_wallet_username_map,
     wallet_username_map_path as default_wallet_username_map_path,
 )
+from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS
 
 RENAISS_COLLECTIBLE_LIST_URL = "https://www.renaiss.xyz/api/trpc/collectible.list"
 RENAISS_COLLECTIBLE_BY_TOKEN_URL = "https://www.renaiss.xyz/api/trpc/collectible.getCollectibleByTokenId"
@@ -104,12 +105,7 @@ def _normalize_wallet_address(address: str | None) -> str:
     return ""
 
 
-DEFAULT_ONCHAIN_PACK_CONTRACTS = (
-    "0xaab5f5fa75437a6e9e7004c12c9c56cda4b4885a",
-    "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
-    "0xb2891022648c5fad3721c42c05d8d283d4d53080",
-    "0xfda4a907d23d9f24271bc47483c5b983831e325e",
-)
+DEFAULT_ONCHAIN_PACK_CONTRACTS = DEFAULT_PACK_CONTRACTS
 
 
 def _ranking_onchain_pack_contracts() -> tuple[str, ...]:
@@ -2290,6 +2286,11 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
         )
     prev_latest_payload = _json_load(cfg.latest_path)
     prev_meta = prev_latest_payload.get("meta") if isinstance(prev_latest_payload.get("meta"), dict) else {}
+    pack_contracts = sorted(cfg.onchain_pack_contracts)
+    pack_accounting_changed = (cfg.metrics_source in ("onchain", "hybrid") and (
+        prev_meta.get("pack_accounting_version") != 3
+        or prev_meta.get("onchain_pack_contracts") != pack_contracts
+    ))
     prev_monthly_window_start = str(prev_meta.get("monthly_gacha_window_start") or "").strip()
     monthly_window_changed = bool(prev_monthly_window_start and prev_monthly_window_start != monthly_window_start_iso)
     prev_wallets, prev_source_state_loaded = load_previous_source_wallets(cfg)
@@ -2385,6 +2386,8 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                 window_end_ts=monthly_pack_window_end_ts,
                 prev_state=pack_rank_prev_state,
             )
+            if int((pack_scan.get("stats") or {}).get("failed_wallets") or 0):
+                raise RuntimeError("monthly_pack_wallet_scan_incomplete")
             pack_state = pack_scan.get("state") if isinstance(pack_scan.get("state"), dict) else {}
             if pack_state:
                 _atomic_write_json(cfg.monthly_pack_scan_state_path, pack_state)
@@ -2402,7 +2405,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                     monthly_pack_scan_stats["wallet_migration_pairs"] = len(old_to_new)
             monthly_pack_scan_ok = True
         except Exception as e:
-            print(f"[WARN] wallet-time monthly pack scan failed: {e}", flush=True)
+            raise RuntimeError("每月抽卡鏈上查詢未完成；停止發布排行榜。") from e
     elif cfg.monthly_pack_source == "onchain":
         monthly_pack_scan_stats = {
             "scan_mode": "onchain_unavailable",
@@ -2507,6 +2510,9 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             refresh_addrs = set(current_addrs)
     else:
         refresh_addrs = {a for a in current_addrs if (a not in prev_wallets) or (a in changed_by_activity)}
+    if pack_accounting_changed:
+        # An unchanged last transaction does not validate totals computed without VRF V3.
+        refresh_addrs = set(current_addrs)
     sbt_refresh_addrs = set(refresh_addrs)
     if not full_rebuild:
         # SBT depends on username; refresh when username is newly resolved/changed
@@ -2823,6 +2829,8 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                     _flush_progress_checkpoint()
 
         metric_failed_unresolved = len(unresolved_metrics)
+        if pack_accounting_changed and unresolved_metrics:
+            raise RuntimeError("VRF V3 歷史重算未完成；停止發布排行榜，不沿用舊抽卡總額。")
         for addr, rec in unresolved_metrics.items():
             _apply_metrics_fallback(rec, prev_wallets.get(addr))
         _flush_progress_checkpoint(force=True)
@@ -2897,12 +2905,7 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                     flush=True,
                 )
             except Exception as e:  # noqa: BLE001
-                print(f"[WARN] sbt onchain_contract failed, fallback to previous snapshot: {e}", flush=True)
-                sbt_scan_stats["scan_mode"] = "fallback_previous_snapshot"
-                sbt_scan_stats["fallback_wallets"] = sbt_phase_total
-                sbt_scan_stats["failed_wallets"] = sbt_phase_total
-                for rec in sbt_records:
-                    _apply_sbt_fallback(rec)
+                raise RuntimeError("SBT 鏈上查詢失敗；停止發布排行榜，保留既有檔案。") from e
         else:
             sbt_completed = 0
             _print_progress("sbt", 0, sbt_phase_total)
@@ -2978,6 +2981,8 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     if isinstance(payload.get("meta"), dict):
         payload["meta"]["trigger"] = cfg.trigger
         payload["meta"]["metrics_source"] = cfg.metrics_source
+        payload["meta"]["pack_accounting_version"] = 3
+        payload["meta"]["onchain_pack_contracts"] = pack_contracts
         payload["meta"]["monthly_gacha_source"] = cfg.monthly_pack_source
         payload["meta"]["sbt_source"] = cfg.sbt_source
         payload["meta"]["full_rebuild_active_only"] = bool(cfg.full_rebuild_active_only)

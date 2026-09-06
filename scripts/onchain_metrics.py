@@ -9,6 +9,9 @@ from typing import Any
 
 import requests
 
+from runtime.pack_contracts import VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC
+from runtime.vrf_checkouts import VrfCheckout, reconcile_vrf_checkouts
+
 
 ONCHAIN_DELAYED_MINT_WINDOW_SEC = max(0, int(os.getenv("ONCHAIN_DELAYED_MINT_WINDOW_SEC", "3600")))
 
@@ -1044,6 +1047,25 @@ def _log_block_number(row: dict[str, Any]) -> int:
     return _hex_to_int(row.get("blockNumber"))
 
 
+def fetch_vrf_v3_checkouts(
+    cfg: OnchainConfig, wallet: str, usdt_rows: list[dict[str, Any]],
+) -> dict[str, VrfCheckout]:
+    def fetch_logs(start: int, end: int) -> list[dict]:
+        logs: list[dict] = []
+        limit = max(1, min(1000, cfg.page_size))
+        for page in range(1, 10000 // limit + 1):
+            rows = _fetch_event_logs_page(
+                cfg, contract=VRF_V3_CONTRACT, topic0=VRF_V3_CHECKOUT_TOPIC,
+                from_block=start, to_block=end, page=page,
+            )
+            logs.extend(rows)
+            if len(rows) < limit:
+                return logs
+        raise RuntimeError("vrf_checkout_log_window_limit")
+
+    return reconcile_vrf_checkouts(wallet, usdt_rows, cfg.usdt_contract, fetch_logs)
+
+
 def _log_tx_hash(row: dict[str, Any]) -> str:
     return str(row.get("transactionHash") or row.get("hash") or "").strip().lower()
 
@@ -1610,9 +1632,14 @@ def _count_open_pack_txs(
 ) -> int:
     open_pack_hashes = _open_pack_tx_hashes(cfg, wallet, usdt_rows, nft_rows)
     nft_in_count_by_tx = _count_card_nft_in_by_tx(cfg, wallet, nft_rows)
+    vrf_checkouts = fetch_vrf_v3_checkouts(cfg, wallet, usdt_rows)
+    vrf_payments = {_row_hash(row) for row in usdt_rows
+                    if str(row.get("to") or "").lower() == VRF_V3_CONTRACT}
+    open_pack_hashes = (open_pack_hashes - vrf_payments) | set(vrf_checkouts)
     total = 0
     for tx_hash in open_pack_hashes:
-        total += max(1, int(nft_in_count_by_tx.get(tx_hash) or 0))
+        event = vrf_checkouts.get(tx_hash)
+        total += event.count if event else max(1, int(nft_in_count_by_tx.get(tx_hash) or 0))
     return total
 
 
@@ -1639,7 +1666,9 @@ def scan_wallet_open_counts_by_time_incremental(
     end_ts = int(max(start_ts, window_end_ts or 0))
     prev = prev_state if isinstance(prev_state, dict) else {}
     prev_window_start = int(_to_decimal(prev.get("window_start_ts")) or 0)
-    reset_applied = prev_window_start != start_ts
+    pack_contracts = sorted({str(address).lower() for address in cfg.pack_contracts})
+    reset_applied = (prev_window_start != start_ts or prev.get("version") != 3
+                     or prev.get("pack_contracts") != pack_contracts)
 
     prev_counts: dict[str, int] = {}
     prev_markers: dict[str, str] = {}
@@ -1723,12 +1752,13 @@ def scan_wallet_open_counts_by_time_incremental(
             rescanned_wallets += 1
         except Exception as e:  # noqa: BLE001
             wallet_counts[wallet] = int(prev_counts.get(wallet, 0))
-            next_markers[wallet] = str(prev_markers.get(wallet) or latest_marker or "")
+            next_markers[wallet] = str(prev_markers.get(wallet) or "")
             failed_wallets[wallet] = f"rescan: {type(e).__name__}: {e}"
 
     state = {
-        "version": 2,
+        "version": 3,
         "scan_mode": "wallet_time_incremental",
+        "pack_contracts": pack_contracts,
         "window_start_ts": int(start_ts),
         "window_end_ts": int(end_ts),
         "updated_at_ts": int(time.time()),
@@ -1805,6 +1835,7 @@ def analyze_wallet(
 
     transfers = fetch_all_usdt_transfers(cfg, wallet_norm)
     nft_rows = fetch_all_nft_transfers(cfg, wallet_norm)
+    vrf_checkouts = fetch_vrf_v3_checkouts(cfg, wallet_norm, transfers)
     nft_in_txs, nft_out_txs = _wallet_nft_tx_sets(nft_rows, wallet_norm)
     withdraw_targets = {
         str(x or "").strip().lower()
@@ -1862,6 +1893,10 @@ def analyze_wallet(
 
     for row in transfers:
         tx_hash = _row_hash(row)
+        if (str(row.get("from") or "").lower() == wallet_norm
+                and str(row.get("to") or "").lower() == VRF_V3_CONTRACT
+                and tx_hash not in vrf_checkouts):
+            continue
         cls = _classify_transfer(
             row,
             wallet_norm,
