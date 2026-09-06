@@ -1047,23 +1047,45 @@ def _log_block_number(row: dict[str, Any]) -> int:
     return _hex_to_int(row.get("blockNumber"))
 
 
+def _fetch_vrf_v3_checkout_logs(cfg: OnchainConfig, start: int, end: int) -> list[dict]:
+    logs: list[dict] = []
+    limit = max(1, min(1000, cfg.page_size))
+    for page in range(1, 10000 // limit + 1):
+        rows = _fetch_event_logs_page(
+            cfg, contract=VRF_V3_CONTRACT, topic0=VRF_V3_CHECKOUT_TOPIC,
+            from_block=start, to_block=end, page=page,
+        )
+        logs.extend(rows)
+        if len(rows) < limit:
+            return logs
+    raise RuntimeError("vrf_checkout_log_window_limit")
+
+
 def fetch_vrf_v3_checkouts(
     cfg: OnchainConfig, wallet: str, usdt_rows: list[dict[str, Any]],
 ) -> dict[str, VrfCheckout]:
-    def fetch_logs(start: int, end: int) -> list[dict]:
-        logs: list[dict] = []
-        limit = max(1, min(1000, cfg.page_size))
-        for page in range(1, 10000 // limit + 1):
-            rows = _fetch_event_logs_page(
-                cfg, contract=VRF_V3_CONTRACT, topic0=VRF_V3_CHECKOUT_TOPIC,
-                from_block=start, to_block=end, page=page,
-            )
-            logs.extend(rows)
-            if len(rows) < limit:
-                return logs
-        raise RuntimeError("vrf_checkout_log_window_limit")
+    return reconcile_vrf_checkouts(
+        wallet, usdt_rows, cfg.usdt_contract,
+        lambda start, end: _fetch_vrf_v3_checkout_logs(cfg, start, end),
+    )
 
-    return reconcile_vrf_checkouts(wallet, usdt_rows, cfg.usdt_contract, fetch_logs)
+
+def _vrf_checkouts_for_payment_page(cfg: OnchainConfig, rows: list[dict]) -> dict[str, VrfCheckout]:
+    """Share one event read across every wallet in a contract transfer page."""
+    by_wallet: dict[str, list[dict]] = {}
+    for row in rows:
+        if str(row.get("to") or "").lower() == VRF_V3_CONTRACT:
+            wallet = str(row.get("from") or "").lower()
+            by_wallet.setdefault(wallet, []).append(row)
+    payments = [row for wallet_rows in by_wallet.values() for row in wallet_rows]
+    if not payments:
+        return {}
+    blocks = [_row_block_number(row) for row in payments]
+    logs = _fetch_vrf_v3_checkout_logs(cfg, min(blocks), max(blocks))
+    found: dict[str, VrfCheckout] = {}
+    for wallet, wallet_rows in by_wallet.items():
+        found.update(reconcile_vrf_checkouts(wallet, wallet_rows, cfg.usdt_contract, lambda start, end: logs))
+    return found
 
 
 def _log_tx_hash(row: dict[str, Any]) -> str:
@@ -1289,7 +1311,8 @@ def scan_pack_open_counts_incremental(
     end_ts = int(max(start_ts, window_end_ts or 0))
     prev = prev_state if isinstance(prev_state, dict) else {}
     prev_window_start = int(_to_decimal(prev.get("window_start_ts")) or 0)
-    reset_applied = prev_window_start != start_ts
+    reset_applied = (prev_window_start != start_ts or prev.get("version") != 2
+                     or set(prev.get("contracts") or ()) != set(contract_list))
 
     wallet_counts: dict[str, int] = {}
     if not reset_applied:
@@ -1370,6 +1393,7 @@ def scan_pack_open_counts_incremental(
         page = 1
         calls_for_contract = 0
         stop_on_window_end = False
+        seen_vrf_txs: set[str] = set()
         while True:
             if page > max_pages_per_window:
                 # Etherscan V2 enforces `page * offset <= 10000`.
@@ -1391,6 +1415,12 @@ def scan_pack_open_counts_incremental(
             calls_for_contract += 1
             if not rows:
                 break
+
+            vrf_checkouts = _vrf_checkouts_for_payment_page(cfg, [
+                row for row in rows
+                if start_ts <= _row_timestamp(row) < end_ts
+                and (not has_cp or (_row_block_number(row), _row_tx_index(row), _row_hash(row)) > cp_key)
+            ]) if contract == VRF_V3_CONTRACT else {}
 
             for row in rows:
                 rows_scanned += 1
@@ -1426,6 +1456,14 @@ def scan_pack_open_counts_incremental(
                 if not from_addr.startswith("0x") or len(from_addr) != 42:
                     continue
                 if from_addr == contract:
+                    continue
+                if contract == VRF_V3_CONTRACT:
+                    checkout = vrf_checkouts.get(tx_hash)
+                    if checkout is not None and tx_hash not in seen_vrf_txs:
+                        seen_vrf_txs.add(tx_hash)
+                        wallet_counts[from_addr] = wallet_counts.get(from_addr, 0) + checkout.count
+                        if checkout.count > 1:
+                            multi_open_txs += 1
                     continue
                 open_count = 1
                 receipt_count_found = False
@@ -1471,7 +1509,7 @@ def scan_pack_open_counts_incremental(
         }
 
     state = {
-        "version": 1,
+        "version": 2,
         "window_start_ts": int(start_ts),
         "window_end_ts": int(end_ts),
         "updated_at_ts": int(time.time()),

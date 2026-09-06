@@ -15,12 +15,13 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from onchain_metrics import OnchainConfig, scan_pack_open_counts_incremental
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from onchain_metrics import OnchainConfig, scan_pack_open_counts_incremental
+from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS
 from runtime.wallet_migration import apply_wallet_migration_counts, load_wallet_migration_map, wallet_migration_map_path
 from runtime.wallet_usernames import (
     load_wallet_username_map,
@@ -35,12 +36,7 @@ except Exception:  # pragma: no cover
 
 DEFAULT_MONTHLY_PACK_LAUNCH_START = "2026-05-01T00:00:00+08:00"
 DEFAULT_PACK_RANK_CUTOVER_START = ""
-DEFAULT_PACK_RANK_CONTRACTS = (
-    "0xaab5f5fa75437a6e9e7004c12c9c56cda4b4885a",
-    "0x94e7732b0b2e7c51ffd0d56580067d9c2e2b7910",
-    "0xb2891022648c5fad3721c42c05d8d283d4d53080",
-    "0xfda4a907d23d9f24271bc47483c5b983831e325e",
-)
+DEFAULT_PACK_RANK_CONTRACTS = DEFAULT_PACK_CONTRACTS
 
 
 def _safe_tzinfo(name: str):
