@@ -2287,10 +2287,6 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     prev_latest_payload = _json_load(cfg.latest_path)
     prev_meta = prev_latest_payload.get("meta") if isinstance(prev_latest_payload.get("meta"), dict) else {}
     pack_contracts = sorted(cfg.onchain_pack_contracts)
-    pack_accounting_changed = (cfg.metrics_source in ("onchain", "hybrid") and (
-        prev_meta.get("pack_accounting_version") != 3
-        or prev_meta.get("onchain_pack_contracts") != pack_contracts
-    ))
     prev_monthly_window_start = str(prev_meta.get("monthly_gacha_window_start") or "").strip()
     monthly_window_changed = bool(prev_monthly_window_start and prev_monthly_window_start != monthly_window_start_iso)
     prev_wallets, prev_source_state_loaded = load_previous_source_wallets(cfg)
@@ -2510,9 +2506,6 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
             refresh_addrs = set(current_addrs)
     else:
         refresh_addrs = {a for a in current_addrs if (a not in prev_wallets) or (a in changed_by_activity)}
-    if pack_accounting_changed:
-        # An unchanged last transaction does not validate totals computed without VRF V3.
-        refresh_addrs = set(current_addrs)
     sbt_refresh_addrs = set(refresh_addrs)
     if not full_rebuild:
         # SBT depends on username; refresh when username is newly resolved/changed
@@ -2592,32 +2585,6 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     if refresh_addrs:
         refresh_records = [r for r in records if r.address in refresh_addrs]
         refresh_cnt = len(refresh_records)
-
-        def _apply_metrics_fallback(rec: WalletRecord, prev: WalletRecord | None) -> None:
-            if prev is not None:
-                rec.pack_spent_usdt = prev.pack_spent_usdt
-                rec.trade_volume_usdt = prev.trade_volume_usdt
-                rec.trade_spent_usdt = prev.trade_spent_usdt
-                rec.trade_earned_usdt = prev.trade_earned_usdt
-                rec.buyback_earned_usdt = prev.buyback_earned_usdt
-                rec.card_withdraw_total_usdt = prev.card_withdraw_total_usdt
-                rec.total_spent_usdt = prev.total_spent_usdt
-                rec.total_earned_usdt = prev.total_earned_usdt
-                rec.cash_net_usdt = prev.cash_net_usdt
-                rec.participation_days_count = prev.participation_days_count
-                rec.monthly_gacha_open_count = 0 if monthly_window_changed else prev.monthly_gacha_open_count
-            else:
-                rec.pack_spent_usdt = Decimal("0")
-                rec.trade_volume_usdt = Decimal("0")
-                rec.trade_spent_usdt = Decimal("0")
-                rec.trade_earned_usdt = Decimal("0")
-                rec.buyback_earned_usdt = Decimal("0")
-                rec.card_withdraw_total_usdt = Decimal("0")
-                rec.total_spent_usdt = Decimal("0")
-                rec.total_earned_usdt = Decimal("0")
-                rec.cash_net_usdt = Decimal("0")
-                rec.participation_days_count = 0
-                rec.monthly_gacha_open_count = 0
 
         def _apply_metrics_result(rec: WalletRecord, prev: WalletRecord | None, metrics: dict[str, Any], delta_mode: bool) -> None:
             latest_id = str(metrics.get("latest_activity_id") or "").strip()
@@ -2829,10 +2796,8 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
                     _flush_progress_checkpoint()
 
         metric_failed_unresolved = len(unresolved_metrics)
-        if pack_accounting_changed and unresolved_metrics:
-            raise RuntimeError("VRF V3 歷史重算未完成；停止發布排行榜，不沿用舊抽卡總額。")
-        for addr, rec in unresolved_metrics.items():
-            _apply_metrics_fallback(rec, prev_wallets.get(addr))
+        if unresolved_metrics:
+            raise RuntimeError("抽卡統計更新未完成；停止發布排行榜，不以舊值或 0 代替。")
         _flush_progress_checkpoint(force=True)
 
     else:
@@ -2981,7 +2946,6 @@ def run_sync(cfg: RankingConfig) -> dict[str, Any]:
     if isinstance(payload.get("meta"), dict):
         payload["meta"]["trigger"] = cfg.trigger
         payload["meta"]["metrics_source"] = cfg.metrics_source
-        payload["meta"]["pack_accounting_version"] = 3
         payload["meta"]["onchain_pack_contracts"] = pack_contracts
         payload["meta"]["monthly_gacha_source"] = cfg.monthly_pack_source
         payload["meta"]["sbt_source"] = cfg.sbt_source
