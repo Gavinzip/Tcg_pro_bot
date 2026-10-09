@@ -8730,7 +8730,9 @@ def _fetch_wallet_collection_chain(wallet_address: str) -> list[dict]:
         if not isinstance(collectible, dict):
             collectible = {}
         if strict_card_api and not collectible:
-            raise RuntimeError(f"card_api token {tid} returned no collectible")
+            # The chain NFT feed also contains non-card RENAISS tokens such as SBTs.
+            # A card API 404 is therefore a valid classification, not a profile failure.
+            return None
 
         front_image = str(
             collectible.get("frontImageUrl")
