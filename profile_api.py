@@ -6,6 +6,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import re
 import threading
 import time
 from typing import Any
@@ -13,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 
+from runtime.bbw_community_metrics import BbwCommunityMetrics
 from runtime.profile_data import normalize_wallet_address
 from runtime.profile_job_lock import ProfileJobLockTimeout, profile_job_lock
 from runtime.profile_lookup_worker import (
@@ -46,6 +48,7 @@ _CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
 _INFLIGHT_LOCK = threading.Lock()
 _INFLIGHT: dict[str, dict[str, Any]] = {}
 _PROFILE_WORKER = ProfileLookupWorker()
+_COMMUNITY_METRICS = BbwCommunityMetrics(os.environ)
 
 
 def _env_true(value: str | None, default: bool = False) -> bool:
@@ -82,6 +85,33 @@ class ProfileApiHandler(BaseHTTPRequestHandler):
         if not API_TOKEN:
             return True
         return str(self.headers.get("Authorization") or "").strip() == f"Bearer {API_TOKEN}"
+
+    def do_POST(self) -> None:  # noqa: N802
+        if urlparse(self.path).path != "/v1/bbw-community-metrics":
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+            return
+        if not _COMMUNITY_METRICS.authorized(self.headers.get("Authorization", "")):
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return
+        if self.headers.get_content_type() != "application/json":
+            self._send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "invalid_content_type"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 128:
+                raise ValueError("invalid body length")
+            self.connection.settimeout(5)
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict) or data.keys() != {"wallet"}:
+                raise ValueError("invalid body")
+            wallet = data["wallet"]
+            if not isinstance(wallet, str) or re.fullmatch(r"0x[a-fA-F0-9]{40}", wallet) is None:
+                raise ValueError("invalid wallet")
+        except (ValueError, OSError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request"})
+            return
+        status, payload = _COMMUNITY_METRICS.lookup(wallet.lower())
+        self._send_json(status, payload)
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)

@@ -29,6 +29,7 @@ class OnchainConfig:
     backoff_sec: float
     withdraw_addresses: tuple[str, ...] = ()
     card_contract: str = ""
+    request_timeout_sec: float = 30
 
 
 ERC721_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -91,7 +92,7 @@ def _fetch_tokentx_page(
     last_err: Exception | None = None
     for attempt in range(1, max(1, cfg.retries) + 1):
         try:
-            resp = requests.get(cfg.api_url, params=params, timeout=30)
+            resp = requests.get(cfg.api_url, params=params, timeout=cfg.request_timeout_sec)
             status_code = int(resp.status_code or 0)
             if status_code >= 500 or status_code == 429:
                 raise requests.HTTPError(f"HTTP {status_code}", response=resp)
@@ -148,7 +149,7 @@ def _fetch_token1155tx_page(
     last_err: Exception | None = None
     for attempt in range(1, max(1, cfg.retries) + 1):
         try:
-            resp = requests.get(cfg.api_url, params=params, timeout=30)
+            resp = requests.get(cfg.api_url, params=params, timeout=cfg.request_timeout_sec)
             status_code = int(resp.status_code or 0)
             if status_code >= 500 or status_code == 429:
                 raise requests.HTTPError(f"HTTP {status_code}", response=resp)
@@ -966,7 +967,7 @@ def _fetch_tx_receipt(cfg: OnchainConfig, tx_hash: str) -> dict[str, Any]:
     last_err: Exception | None = None
     for attempt in range(1, max(1, cfg.retries) + 1):
         try:
-            resp = requests.get(cfg.api_url, params=params, timeout=30)
+            resp = requests.get(cfg.api_url, params=params, timeout=cfg.request_timeout_sec)
             status_code = int(resp.status_code or 0)
             if status_code >= 500 or status_code == 429:
                 raise requests.HTTPError(f"HTTP {status_code}", response=resp)
@@ -995,6 +996,8 @@ def _fetch_event_logs_page(
     from_block: int,
     to_block: int,
     page: int,
+    indexed_wallet: str | None = None,
+    indexed_wallet_topic: int = 1,
 ) -> list[dict[str, Any]]:
     page_limit = int(max(1, min(1000, cfg.page_size)))
     params = {
@@ -1009,10 +1012,17 @@ def _fetch_event_logs_page(
         "offset": page_limit,
         "apikey": cfg.api_key,
     }
+    if indexed_wallet is not None:
+        if indexed_wallet_topic not in (1, 2, 3):
+            raise ValueError("invalid indexed wallet topic")
+        params.update({
+            f"topic{indexed_wallet_topic}": "0x" + indexed_wallet[2:].rjust(64, "0"),
+            f"topic0_{indexed_wallet_topic}_opr": "and",
+        })
     last_err: Exception | None = None
     for attempt in range(1, max(1, cfg.retries) + 1):
         try:
-            resp = requests.get(cfg.api_url, params=params, timeout=30)
+            resp = requests.get(cfg.api_url, params=params, timeout=cfg.request_timeout_sec)
             status_code = int(resp.status_code or 0)
             if status_code >= 500 or status_code == 429:
                 raise requests.HTTPError(f"HTTP {status_code}", response=resp)
