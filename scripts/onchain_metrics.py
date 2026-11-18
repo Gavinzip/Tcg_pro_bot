@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 import os
+import threading
 import time
 from typing import Any
 
@@ -14,6 +15,29 @@ from runtime.vrf_checkouts import VrfCheckout, reconcile_vrf_checkouts
 
 
 ONCHAIN_DELAYED_MINT_WINDOW_SEC = max(0, int(os.getenv("ONCHAIN_DELAYED_MINT_WINDOW_SEC", "3600")))
+
+
+class EtherscanRequestPacer:
+    """Space request starts across callers while allowing responses to overlap."""
+
+    def __init__(self, *, requests_per_second: int) -> None:
+        self._spacing = 1 / requests_per_second
+        self._next_request = 0.0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                wait = self._next_request - now
+                if wait <= 0:
+                    self._next_request = now + self._spacing
+                    return
+            time.sleep(wait)
+
+    def cool_down(self) -> None:
+        with self._lock:
+            self._next_request = max(self._next_request, time.monotonic() + 1)
 
 
 @dataclass(frozen=True)
@@ -30,6 +54,26 @@ class OnchainConfig:
     withdraw_addresses: tuple[str, ...] = ()
     card_contract: str = ""
     request_timeout_sec: float = 30
+    request_pacer: EtherscanRequestPacer | None = None
+
+
+def _fetch_etherscan_json(cfg: OnchainConfig, params: dict[str, Any]) -> Any:
+    pacer = cfg.request_pacer
+    if pacer is not None:
+        pacer.acquire()
+    response = requests.get(cfg.api_url, params=params, timeout=cfg.request_timeout_sec)
+    status = int(response.status_code or 0)
+    if status == 429 and pacer is not None:
+        pacer.cool_down()
+    if status >= 500 or status == 429:
+        raise requests.HTTPError(f"HTTP {status}", response=response)
+    response.raise_for_status()
+    data = response.json()
+    if pacer is not None and isinstance(data, dict) and data.get("status") == "0":
+        result = data.get("result")
+        if isinstance(result, str) and "rate limit" in result.lower():
+            pacer.cool_down()
+    return data
 
 
 ERC721_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -92,13 +136,7 @@ def _fetch_tokentx_page(
     last_err: Exception | None = None
     for attempt in range(1, max(1, cfg.retries) + 1):
         try:
-            resp = requests.get(cfg.api_url, params=params, timeout=cfg.request_timeout_sec)
-            status_code = int(resp.status_code or 0)
-            if status_code >= 500 or status_code == 429:
-                raise requests.HTTPError(f"HTTP {status_code}", response=resp)
-            resp.raise_for_status()
-
-            data = resp.json()
+            data = _fetch_etherscan_json(cfg, params)
             if not isinstance(data, dict):
                 raise RuntimeError("bscscan tokentx invalid response")
 
@@ -149,13 +187,7 @@ def _fetch_token1155tx_page(
     last_err: Exception | None = None
     for attempt in range(1, max(1, cfg.retries) + 1):
         try:
-            resp = requests.get(cfg.api_url, params=params, timeout=cfg.request_timeout_sec)
-            status_code = int(resp.status_code or 0)
-            if status_code >= 500 or status_code == 429:
-                raise requests.HTTPError(f"HTTP {status_code}", response=resp)
-            resp.raise_for_status()
-
-            data = resp.json()
+            data = _fetch_etherscan_json(cfg, params)
             if not isinstance(data, dict):
                 raise RuntimeError("bscscan token1155tx invalid response")
 
@@ -967,12 +999,7 @@ def _fetch_tx_receipt(cfg: OnchainConfig, tx_hash: str) -> dict[str, Any]:
     last_err: Exception | None = None
     for attempt in range(1, max(1, cfg.retries) + 1):
         try:
-            resp = requests.get(cfg.api_url, params=params, timeout=cfg.request_timeout_sec)
-            status_code = int(resp.status_code or 0)
-            if status_code >= 500 or status_code == 429:
-                raise requests.HTTPError(f"HTTP {status_code}", response=resp)
-            resp.raise_for_status()
-            data = resp.json()
+            data = _fetch_etherscan_json(cfg, params)
             if not isinstance(data, dict):
                 raise RuntimeError("bscscan receipt invalid response")
             result = data.get("result")
@@ -1022,12 +1049,7 @@ def _fetch_event_logs_page(
     last_err: Exception | None = None
     for attempt in range(1, max(1, cfg.retries) + 1):
         try:
-            resp = requests.get(cfg.api_url, params=params, timeout=cfg.request_timeout_sec)
-            status_code = int(resp.status_code or 0)
-            if status_code >= 500 or status_code == 429:
-                raise requests.HTTPError(f"HTTP {status_code}", response=resp)
-            resp.raise_for_status()
-            data = resp.json()
+            data = _fetch_etherscan_json(cfg, params)
             if not isinstance(data, dict):
                 raise RuntimeError("bscscan logs invalid response")
 

@@ -13,7 +13,8 @@ import time
 from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC
 from runtime.vrf_checkouts import decode_vrf_checkout
 from scripts.onchain_metrics import (
-    OnchainConfig, _fetch_event_logs_page, _fetch_token1155tx_page, _fetch_tokentx_page, _fetch_tx_receipt,
+    EtherscanRequestPacer, OnchainConfig, _fetch_event_logs_page, _fetch_token1155tx_page, _fetch_tokentx_page,
+    _fetch_tx_receipt,
 )
 
 USDT_CONTRACT = "0x55d398326f99059ff775485246999027b3197955"
@@ -25,6 +26,8 @@ LEGACY_CHECKOUT_TOPIC = "0xd505514c5f9bb134a66621a7fd46a679442a1a0e45f5ad5dff072
 PACK_CHECKOUT_TOPIC = "0xf1ec6bca7c2c281e7c68bbddbba207b6df358f0ef65c5650b1f796d3f1224fe9"
 USDT_UNIT = 10**18
 SBT_AND_SPEND_CACHE_TTL = 45
+# The production key allows five calls per second. Leave room for other callers sharing the key.
+BBW_ETHERSCAN_REQUESTS_PER_SECOND = 4
 MIGRATION_HELPER_CONTRACT = "0x2e737d552b3c601ada4fcd167bfbd8d4e1043b2c"
 MIGRATION_HELPER_TOPIC = "0xa8842895c03659cf75d4e5e2202ace2ef1981a77551fc02961bc661af0950830"
 MIGRATION_START_BLOCK = 99465073
@@ -181,6 +184,7 @@ class BbwCommunityMetrics:
             chain_id=56, api_key=source_key, usdt_contract=USDT_CONTRACT,
             pack_contracts=DEFAULT_PACK_CONTRACTS, marketplace_contract="",
             page_size=1000, retries=2, backoff_sec=0.2, request_timeout_sec=5,
+            request_pacer=EtherscanRequestPacer(requests_per_second=BBW_ETHERSCAN_REQUESTS_PER_SECOND),
         )
         cutoff = env.get("BBW_METRICS_CUTOFF", "").strip()
         if self.token and source_key and cutoff:
@@ -238,11 +242,12 @@ class BbwCommunityMetrics:
         return result
 
     def _compute(self, wallet, cutoff):
-        stage = "wallet_migration"
+        stage = "pack_payments"
         try:
             sbt_job = self._pool.submit(_sbt_count, self.chain, wallet, cutoff)
             source_job = self._pool.submit(_spend_source_wallets, self.chain, wallet, cutoff)
             current_payments = _pack_payments(self.chain, wallet, cutoff)
+            stage = "wallet_migration"
             wallets = source_job.result()
             stage = "pack_payments"
             payments_by_wallet = {wallet: current_payments}
