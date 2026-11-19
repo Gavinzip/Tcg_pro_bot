@@ -49,18 +49,30 @@ class BbwMetricsRateLimitTests(unittest.TestCase):
 
         action = params["action"]
         if action == "token1155tx":
+            self.assertEqual(params["offset"], 1000)
             rows = [{"from": "0x" + "0" * 40, "to": params["address"], "timeStamp": "1700000000",
                      "contractAddress": metrics.SBT_CONTRACT, "tokenID": "1", "tokenValue": "3"}]
         elif action == "tokentx":
+            self.assertEqual(params["offset"], 10000)
             rows = [{"from": params["address"], "to": self.contract, "timeStamp": "1700000000",
                      "contractAddress": metrics.USDT_CONTRACT, "tokenDecimal": "18", "value": str(self.amount),
                      "blockNumber": "100000000", "hash": self.tx_hash}]
         elif params["address"] == metrics.MIGRATION_HELPER_CONTRACT:
+            self.assertEqual(params["offset"], 1000)
             rows = []
         else:
             rows = [{"transactionHash": self.tx_hash, "logIndex": "0x1", "address": self.contract,
                      "topics": [params["topic0"], params["topic1"]], "data": f"0x{self.amount:064x}"}]
         return self.response({"status": "1", "message": "OK", "result": rows})
+
+    def test_full_usdt_window_is_not_reported_as_complete(self):
+        wallet = f"0x{1:040x}"
+        rows = [{"from": wallet, "to": f"0x{2:040x}", "timeStamp": "1700000000"}] * 10_000
+        with patch.object(metrics, "_fetch_tokentx_page", return_value=rows) as fetch_page:
+            with self.assertRaisesRegex(RuntimeError, "metrics_provider_page_limit"):
+                metrics._pack_payments(self.lookup.chain, wallet, 1_800_000_000)
+        fetch_page.assert_called_once_with(self.lookup.chain, wallet, page=1, sort="asc", offset=10_000)
+
 
     def test_simultaneous_wallets_stay_below_provider_limit_and_keep_totals(self):
         wallets = [f"0x{i:040x}" for i in range(1, 5)]

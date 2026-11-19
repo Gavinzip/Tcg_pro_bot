@@ -25,6 +25,7 @@ LEGACY_CUTOVER = int(datetime(2025, 12, 19, tzinfo=timezone.utc).timestamp())
 LEGACY_CHECKOUT_TOPIC = "0xd505514c5f9bb134a66621a7fd46a679442a1a0e45f5ad5dff0724e4b4588fed"
 PACK_CHECKOUT_TOPIC = "0xf1ec6bca7c2c281e7c68bbddbba207b6df358f0ef65c5650b1f796d3f1224fe9"
 USDT_UNIT = 10**18
+USDT_TRANSFER_PAGE_SIZE = 10_000
 SBT_AND_SPEND_CACHE_TTL = 45
 # The production key allows five calls per second. Leave room for other callers sharing the key.
 BBW_ETHERSCAN_REQUESTS_PER_SECOND = 4
@@ -101,7 +102,10 @@ def _spend_source_wallets(cfg, wallet, cutoff):
 
 def _pack_payments(cfg, wallet, cutoff):
     payments = defaultdict(dict)
-    rows = _iter_pages(lambda page: _fetch_tokentx_page(cfg, wallet, page=page, sort="asc"), cfg.page_size)
+    rows = _iter_pages(
+        lambda page: _fetch_tokentx_page(cfg, wallet, page=page, sort="asc", offset=USDT_TRANSFER_PAGE_SIZE),
+        USDT_TRANSFER_PAGE_SIZE,
+    )
     for row in rows:
         timestamp = int(row["timeStamp"])
         if timestamp > cutoff:

@@ -115,8 +115,9 @@ def _fetch_tokentx_page(
     sort: str,
     startblock: int | None = None,
     endblock: int | None = None,
+    offset: int | None = None,
 ) -> list[dict[str, Any]]:
-    page_limit = int(max(1, min(1000, cfg.page_size)))
+    page_limit = int(max(1, min(1000, cfg.page_size))) if offset is None else int(max(1, min(10000, offset)))
     params = {
         "chainid": int(cfg.chain_id),
         "module": "account",
