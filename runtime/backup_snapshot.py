@@ -13,7 +13,8 @@ import stat
 import time
 from urllib.parse import quote
 
-BULK_SUFFIXES = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.mp4', '.mov', '.webm', '.woff', '.woff2'}
+# The product intentionally stores downloaded market images as hash.img.
+BULK_SUFFIXES = {'.img', '.jpg', '.jpeg', '.png', '.webp', '.gif', '.mp4', '.mov', '.webm', '.woff', '.woff2'}
 EXCLUDED = ('.tcg-drive-backup', 'lost+found', 'renaiss_sync/backup_repo', 'renaiss_sync/rankings')
 
 

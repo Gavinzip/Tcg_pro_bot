@@ -4,8 +4,9 @@ import os
 from pathlib import Path
 import sqlite3
 import unittest
+from unittest.mock import patch
 
-from runtime.backup_snapshot import SnapshotError, capture, validate_bulk, verify_restored
+from runtime.backup_snapshot import SnapshotError, capture, validate_bulk, verify_restored, sha256
 from runtime.drive_backup import DriveBackup, DriveBackupError
 
 BASE = Path(os.environ['TCG_BACKUP_TEST_ROOT'])
@@ -19,7 +20,7 @@ class BackupTests(unittest.TestCase):
         root.mkdir(parents=True)
         (root / 'user_settings.json').write_text('{"wallet":"example"}')
         (root / 'market_cache').mkdir()
-        (root / 'market_cache' / 'card.png').write_bytes(b'\x89PNG\r\n' + bytes(range(256)) * 1024)
+        (root / 'market_cache' / 'card.img').write_bytes(b'\x89PNG\r\n' + bytes(range(256)) * 1024)
         old = root / 'renaiss_sync' / 'rankings'
         old.mkdir(parents=True)
         (old / 'old.json').write_text('{"obsolete":true}')
@@ -52,7 +53,7 @@ class BackupTests(unittest.TestCase):
         stage = root / '.tcg-drive-backup' / 'staging' / 'test'
         stage.mkdir(parents=True)
         manifest = capture(root, stage)
-        (root / 'market_cache' / 'card.png').write_bytes(b'changed')
+        (root / 'market_cache' / 'card.img').write_bytes(b'changed')
         with self.assertRaisesRegex(SnapshotError, 'media_changed'):
             validate_bulk(manifest)
 
@@ -78,6 +79,12 @@ class BackupTests(unittest.TestCase):
         self.assertTrue(verified['fullRestoreVerified'])
         self.assertEqual(verified['files'], 2)
         manifest = json.loads(backup.run(['dump', result['snapshotId'], result['manifestPath']]))
+        image = next(row for row in manifest['files'] if row['path'].endswith('card.img'))
+        self.assertEqual(image['kind'], 'bulk', 'Production .img media must not be staged as mutable files')
+        with patch('runtime.backup_snapshot.sha256', wraps=sha256) as digest:
+            self.assertEqual(backup.backup()['phase'], 'complete')
+        self.assertNotIn(root / 'market_cache' / 'card.img', [call.args[0] for call in digest.call_args_list],
+                         'Unchanged production media must reuse the validated hash cache')
         user_file = restored / Path(manifest['stageRoot']).relative_to('/') / 'data' / 'user_settings.json'
         user_file.write_text('tampered')
         with self.assertRaisesRegex(SnapshotError, 'restored_file_mismatch'):

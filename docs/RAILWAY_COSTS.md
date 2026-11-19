@@ -32,6 +32,8 @@ migration receiver metrics are not a production forecast.
 - Daily encrypted Drive backups deduplicate with restic. Mutable data is staged;
   bulk media is read in place. Cached SHA-256 values are reused only with
   unchanged size, nanosecond mtime and inode; post-upload validation remains.
+  The product's `.img` cache format is included; copying these images into
+  mutable scratch caused the initial volume warning and has been corrected.
 - One scheduler and a per-volume lock prevent overlapping backups. Do not add
   an independent Railway backup worker for the same daily task.
 - Serve the event API from the Bot's combined Profile API owning `/data`.

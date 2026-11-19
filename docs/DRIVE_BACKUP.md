@@ -16,6 +16,8 @@ after copying the source in the final Docker image. No Python dependency is adde
 - Unchanged media reuse a private SHA-256 cache only when size, nanosecond mtime
   and inode all match a previously successful capture; media signatures are
   checked again after upload. This avoids re-reading all cached images daily.
+  Production market images use `.img`; this format is explicitly classified as
+  bulk media so the daily staging area does not duplicate the image collection.
 - Mutable files are copied first and a changed source inventory aborts/retries
   capture. Media are read in place; changes during upload fail the job.
 - `.db`, `.sqlite` and `.sqlite3` SQLite databases are captured with SQLite's
