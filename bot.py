@@ -184,12 +184,12 @@ async def market(interaction: discord.Interaction):
 @tree.command(name="market_bootstrap", description="一次性全頻道掃描 market thread（含封存）")
 @app_commands.describe(
     force="保留參數（目前每次都會完整重掃，可忽略）",
-    push_backup="完成後是否立即觸發一次備份推送到資料 Git（預設 true）",
+    push_backup="舊 Git 備份選項（預設 false；Git 備份停用時不推送）",
 )
 async def market_bootstrap(
     interaction: discord.Interaction,
     force: bool = False,
-    push_backup: bool = True,
+    push_backup: bool = False,
 ):
     await handle_market_bootstrap(
         interaction,
@@ -1300,6 +1300,9 @@ async def on_message(message):
 if not _core.LEGACY_LEADERBOARDS_ENABLED:
     for _retired_command in ("ranking", "ranking_sync_status", "ranking_rebuild", "pack_rank", "pack_rank_rebuild"):
         tree.remove_command(_retired_command)
+
+if not _core._env_true("BACKUP_GIT_ENABLED", False):
+    tree.remove_command("market_push_backup")
 
 
 if __name__ == "__main__":
