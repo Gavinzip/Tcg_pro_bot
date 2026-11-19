@@ -1,4 +1,6 @@
 .git
+.secrets
+.scratch
 .git.disabled_*
 .env
 .env.*
