@@ -197,6 +197,7 @@ def build_wallet_profile_poster_documents(
         )
 
     history_context = {
+        "legacy_ranks_enabled": bool(rankings.get("enabled", False)),
         "collection_name": _text(f"{profile_name_raw} Collection"),
         "brand_name": brand_name,
         "brand_site": brand_site,

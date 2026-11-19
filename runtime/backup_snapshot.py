@@ -5,6 +5,7 @@ from contextlib import closing
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -78,6 +79,10 @@ def capture(root: Path, stage: Path, *, attempts: int = 3) -> dict:
     restic finishes. This is not a global transaction across independent stores.
     """
     root, stage = root.resolve(), stage.resolve()
+    cache_path = root / '.tcg-drive-backup' / 'bulk-hashes.json'
+    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+    if not isinstance(cache, dict):
+        raise SnapshotError('invalid_bulk_hash_cache')
     data = stage / 'data'
     for attempt in range(attempts):
         if data.exists():
@@ -113,8 +118,12 @@ def capture(root: Path, stage: Path, *, attempts: int = 3) -> dict:
                 os.chmod(target, mode)
             if kind != 'sqlite-online':
                 stable[source] = before
+            cached = cache.get(relative, {}) if kind == 'bulk' else {}
+            digest = cached.get('sha256') if cached.get('signature') == list(before) else None
+            if digest is not None and (not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest)):
+                raise SnapshotError('invalid_bulk_hash_cache')
             files.append({'path': relative, 'kind': kind, 'bytes': target.stat().st_size,
-                          'sha256': sha256(target), 'mode': mode})
+                          'sha256': digest if digest is not None else sha256(target), 'mode': mode})
         try:
             unchanged = all(signature(p) == value for p, value in stable.items())
             after_paths = [p for p in inventory(root) if p not in sidecars]

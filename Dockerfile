@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install chromium
 
 COPY . .
+RUN python scripts/install_backup_tools.py
 
 EXPOSE 8080 8091
 

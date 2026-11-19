@@ -1,0 +1,167 @@
+openapi: 3.1.0
+info:
+  title: Finite activity leaderboard
+  version: 1.0.0
+  description: Immutable snapshots of every participant's confirmed actually-paid successful draws.
+security:
+  - bearerAuth: []
+paths:
+  /v1/leaderboards/{event_id}:
+    get:
+      operationId: getEventLeaderboard
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+        - $ref: '#/components/parameters/SnapshotId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/All'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          $ref: '#/components/responses/Snapshot'
+        '202':
+          $ref: '#/components/responses/Incomplete'
+        '400':
+          $ref: '#/components/responses/Invalid'
+        '401':
+          description: Existing Profile API authentication required
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/Incomplete'
+  /v1/leaderboards/{event_id}/search:
+    get:
+      operationId: searchEventLeaderboard
+      description: Search frozen usernames and verified wallet aliases. Returned ranks are global. snapshot_id is required unless carried by cursor.
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+        - $ref: '#/components/parameters/SnapshotId'
+        - name: q
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 200}
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/All'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          $ref: '#/components/responses/Snapshot'
+        '400':
+          $ref: '#/components/responses/Invalid'
+        '401':
+          description: Existing Profile API authentication required
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    EventId:
+      name: event_id
+      in: path
+      required: true
+      schema: {type: string}
+    SnapshotId:
+      name: snapshot_id
+      in: query
+      schema: {type: string}
+    Limit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 1000, default: 100}
+    Cursor:
+      name: cursor
+      in: query
+      schema: {type: string}
+    All:
+      name: all
+      in: query
+      schema: {type: boolean, default: false}
+    Sort:
+      name: sort
+      in: query
+      schema: {type: string, enum: [rank, draw_count, wallet, username, paid_amount], default: rank}
+    Order:
+      name: order
+      in: query
+      schema: {type: string, enum: [asc, desc], default: asc}
+  responses:
+    Snapshot:
+      description: Complete snapshot; stale and last_error report current event health.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Snapshot'
+    Incomplete:
+      description: No successful snapshot yet. 202 means in progress; 503 means failure. No rows are fabricated.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [event_id, snapshot_id, status, stale, last_error, progress]
+            properties:
+              event_id: {type: string}
+              snapshot_id: {type: 'null'}
+              status: {const: initializing}
+              stale: {type: boolean}
+              last_error: {type: [string, 'null']}
+              progress: {type: [object, 'null'], additionalProperties: true}
+              stale_reason: {type: [string, 'null']}
+              update_interval_seconds: {type: integer, minimum: 60, default: 600}
+              stale_after_seconds: {type: integer, minimum: 1, default: 1200}
+              message: {type: string}
+    Invalid:
+      description: Invalid request, cursor, or snapshot mismatch
+    NotFound:
+      description: Unknown event or route
+  schemas:
+    Participant:
+      type: object
+      required: [rank, wallet, username, aliases, draw_count, paid_amount_raw, paid_amount]
+      properties:
+        rank: {type: integer, minimum: 1, description: Global competition rank by draw count.}
+        wallet: {type: string, pattern: '^0x[0-9a-f]{40}$'}
+        username: {type: [string, 'null']}
+        aliases: {type: array, items: {type: string}}
+        draw_count: {type: integer, minimum: 1}
+        paid_amount_raw: {type: string, pattern: '^[0-9]+$'}
+        paid_amount: {type: string, pattern: '^[0-9]+(\.[0-9]+)?$'}
+    Snapshot:
+      type: object
+      required: [event_id, revision, config_hash, start_at, end_at, snapshot_id, generated_at, data_through_at, through_block, total_participants, status, counting_rule, contracts, stale, last_error, rows, next_cursor, total_matches]
+      properties:
+        event_id: {type: string}
+        revision: {type: integer, minimum: 1}
+        config_hash: {type: string}
+        snapshot_id: {type: string}
+        start_at: {type: string, format: date-time}
+        end_at: {type: string, format: date-time}
+        generated_at: {type: string, format: date-time}
+        data_through_at: {type: string, format: date-time}
+        through_block: {type: integer}
+        total_participants: {type: integer, minimum: 0}
+        status: {type: string, enum: [live, settling, final]}
+        counting_rule: {const: confirmed_paid_checkout}
+        contracts: {type: array, items: {type: string}}
+        chain_id: {type: integer}
+        token_decimals: {type: integer}
+        ranking_rule: {const: competition_draw_count_desc_wallet_asc}
+        stale: {type: boolean}
+        last_error: {type: [string, 'null']}
+        progress: {type: [object, 'null'], additionalProperties: true}
+        stale_reason: {type: [string, 'null'], description: Current source health independent of the pinned snapshot age.}
+        update_interval_seconds: {type: integer, minimum: 60, default: 600}
+        stale_after_seconds: {type: integer, minimum: 1, default: 1200}
+        sort: {type: string}
+        order: {type: string}
+        total_matches: {type: integer}
+        next_cursor: {type: [string, 'null']}
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/Participant'

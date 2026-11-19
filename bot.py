@@ -1297,6 +1297,11 @@ async def on_message(message):
                 asyncio.create_task(handle_image(attachment, message, lang=lang))
 
 
+if not _core.LEGACY_LEADERBOARDS_ENABLED:
+    for _retired_command in ("ranking", "ranking_sync_status", "ranking_rebuild", "pack_rank", "pack_rank_rebuild"):
+        tree.remove_command(_retired_command)
+
+
 if __name__ == "__main__":
     if not TOKEN:
         print("❌ 錯誤：找不到 DISCORD_BOT_TOKEN。")

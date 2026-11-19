@@ -104,6 +104,16 @@ class DriveBackup:
             self.run(['init'])
             return self.status({'phase': 'initialized'})
 
+    def cache_bulk_hashes(self, manifest):
+        validate_bulk(manifest)
+        signatures = {row['path']: row['signature'] for row in manifest['bulkSignatures']}
+        cache = {row['path']: {'signature': signatures[row['path']], 'sha256': row['sha256']}
+                 for row in manifest['files'] if row['kind'] == 'bulk'}
+        temporary = self.work / 'bulk-hashes.tmp'
+        temporary.write_text(json.dumps(cache), encoding='utf-8')
+        os.chmod(temporary, 0o600)
+        temporary.replace(self.work / 'bulk-hashes.json')
+
     def backup(self):
         with self.locked():
             stage = self.work / 'staging' / uuid.uuid4().hex
@@ -127,6 +137,7 @@ class DriveBackup:
                 readback = json.loads(self.run(['dump', summary['snapshot_id'], str(stage / 'manifest.json')]))
                 if readback != manifest:
                     raise DriveBackupError('snapshot_manifest_readback_mismatch')
+                self.cache_bulk_hashes(manifest)
                 return self.status({'phase': 'complete', 'snapshotId': summary['snapshot_id'],
                                     'manifestPath': str(stage / 'manifest.json'),
                                     'files': len(manifest['files']),

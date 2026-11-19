@@ -49,6 +49,8 @@ _INFLIGHT_LOCK = threading.Lock()
 _INFLIGHT: dict[str, dict[str, Any]] = {}
 _PROFILE_WORKER = ProfileLookupWorker()
 _COMMUNITY_METRICS = BbwCommunityMetrics(os.environ)
+_EVENT_CONTROLLER = None
+_EVENT_CONTROLLER_LOCK = threading.Lock()
 
 
 def _env_true(value: str | None, default: bool = False) -> bool:
@@ -56,6 +58,16 @@ def _env_true(value: str | None, default: bool = False) -> bool:
     if not text:
         return default
     return text in {"1", "true", "yes", "on"}
+
+
+def _event_leaderboard_response(path, query):
+    global _EVENT_CONTROLLER
+    if _EVENT_CONTROLLER is None:
+        with _EVENT_CONTROLLER_LOCK:
+            if _EVENT_CONTROLLER is None:
+                from runtime.event_leaderboards.http import EventLeaderboardHTTP
+                _EVENT_CONTROLLER = EventLeaderboardHTTP()
+    return _EVENT_CONTROLLER.dispatch(path, query)
 
 
 def _publish_inflight(cache_key: str, inflight: dict[str, Any]) -> None:
@@ -126,6 +138,25 @@ class ProfileApiHandler(BaseHTTPRequestHandler):
                     "total_timeout_seconds": TOTAL_TIMEOUT_SECONDS,
                 },
             )
+            return
+        if path.startswith("/v1/leaderboards/"):
+            if not _env_true(os.getenv("EVENT_LEADERBOARD_API_ENABLED"), False):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                return
+            if not self._authorized():
+                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return
+            try:
+                result = _event_leaderboard_response(path, parse_qs(parsed.query, keep_blank_values=True))
+            except Exception as exc:
+                print(f"[leaderboard-api] failed type={type(exc).__name__}", flush=True)
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "leaderboard_unavailable"})
+                return
+            if result is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+            else:
+                status, payload = result
+                self._send_json(status, payload)
             return
         if path != "/v1/profile":
             self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})

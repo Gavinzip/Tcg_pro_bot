@@ -208,6 +208,7 @@ def _ranking_snapshot(core: Any, wallet: str) -> dict[str, Any]:
 
     return {
         "source": "tcg_pro_ranking_snapshot",
+        "enabled": True,
         "snapshot_updated_at": snapshot_updated_at,
         "holders_total": len(wallet_map) if isinstance(wallet_map, dict) else 0,
         "wallet_in_snapshot": bool(row),
@@ -296,7 +297,8 @@ def build_wallet_profile_data(
     needs_history = requested_poster in {None, "history", "extremes"}
     needs_collection = requested_poster in {None, "collection", "history", "extremes"}
     needs_sbt = requested_poster in {None, "collection", "history", "extremes"}
-    needs_rankings = requested_poster in {None, "history"}
+    legacy_ranks_enabled = bool(getattr(core, "LEGACY_LEADERBOARDS_ENABLED", False))
+    needs_rankings = legacy_ranks_enabled and requested_poster in {None, "history"}
     needs_extremes = requested_poster == "extremes" or (requested_poster is None and include_extremes)
 
     history: dict[str, Any] = {}
@@ -365,7 +367,8 @@ def build_wallet_profile_data(
     cash_net = _decimal(history.get("net_total"))
     warnings = [dict(row) for row in (history.get("warnings") or []) if isinstance(row, dict)]
     rankings = _ranking_snapshot(core, wallet) if needs_rankings else {
-        "source": "not_requested",
+        "source": "not_requested" if legacy_ranks_enabled else "disabled",
+        "enabled": legacy_ranks_enabled,
         "snapshot_updated_at": None,
         "holders_total": 0,
         "wallet_in_snapshot": False,
