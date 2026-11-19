@@ -4,6 +4,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
     fonts-noto-cjk \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -15,4 +16,5 @@ RUN python scripts/install_backup_tools.py
 
 EXPOSE 8080 8091
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "service_entrypoint.py"]

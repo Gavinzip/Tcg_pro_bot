@@ -5,6 +5,8 @@ Runtime data is backed up by restic 0.19.1 through rclone 1.74.2 to a dedicated
 automatic expiry, or pruning. `scripts/install_backup_tools.py` pins official
 Linux/amd64 archive checksums. Add `RUN python scripts/install_backup_tools.py`
 after copying the source in the final Docker image. No Python dependency is added.
+The container uses `tini` as PID 1 to reap orphaned rclone transport processes;
+daily jobs must not accumulate zombie processes in the application supervisor.
 
 ## Scope and consistency
 
