@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 from runtime.bbw_community_metrics import BbwCommunityMetrics
 from runtime.profile_data import normalize_wallet_address
+from runtime.profile_api_auth import authorized, load_leaderboard_client_tokens
 from runtime.profile_job_lock import ProfileJobLockTimeout, profile_job_lock
 from runtime.profile_lookup_worker import (
     ProfileLookupWorker,
@@ -29,6 +30,9 @@ load_dotenv()
 HOST = str(os.getenv("PROFILE_API_HOST", "0.0.0.0") or "0.0.0.0").strip()
 PORT = max(1, int(os.getenv("PROFILE_API_PORT", os.getenv("PORT", "8091")) or "8091"))
 API_TOKEN = str(os.getenv("PROFILE_API_TOKEN", "") or "").strip()
+LEADERBOARD_CLIENT_TOKENS = load_leaderboard_client_tokens(
+    os.getenv("EVENT_LEADERBOARD_CLIENT_TOKENS_JSON"), profile_token=API_TOKEN,
+)
 CACHE_TTL_SECONDS = max(0, int(os.getenv("PROFILE_API_CACHE_TTL_SECONDS", "300") or "300"))
 CACHE_MAX_ENTRIES = max(1, int(os.getenv("PROFILE_API_CACHE_MAX_ENTRIES", "256") or "256"))
 MAX_CONCURRENT_LOOKUPS = max(1, int(os.getenv("PROFILE_API_MAX_CONCURRENT_LOOKUPS", "2") or "2"))
@@ -93,10 +97,10 @@ class ProfileApiHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
 
-    def _authorized(self) -> bool:
-        if not API_TOKEN:
-            return True
-        return str(self.headers.get("Authorization") or "").strip() == f"Bearer {API_TOKEN}"
+    def _authorized(self, *, leaderboard: bool = False) -> bool:
+        return authorized(self.headers.get("Authorization"), profile_token=API_TOKEN,
+                          leaderboard_clients=LEADERBOARD_CLIENT_TOKENS,
+                          leaderboard=leaderboard)
 
     def do_POST(self) -> None:  # noqa: N802
         if urlparse(self.path).path != "/v1/bbw-community-metrics":
@@ -143,7 +147,7 @@ class ProfileApiHandler(BaseHTTPRequestHandler):
             if not _env_true(os.getenv("EVENT_LEADERBOARD_API_ENABLED"), False):
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                 return
-            if not self._authorized():
+            if not self._authorized(leaderboard=True):
                 self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                 return
             try:

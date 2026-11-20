@@ -4,6 +4,8 @@ The activity is one finite interval, not a repeating daily/monthly/yearly rankin
 
 The Profile API serves these routes through its existing authentication. Supply its configured bearer token when enabled. Responses must not use long-lived HTTP caches. Machine-readable contract: [OpenAPI](EVENT_LEADERBOARD_OPENAPI.yaml).
 
+The separate website-token implementation is documented in [API client tokens](API_CLIENT_TOKENS.md). It requires deploying the updated server and configuring `EVENT_LEADERBOARD_CLIENT_TOKENS_JSON`; the two website credentials are not provisioned merely by adding this code. They authorize only leaderboard GET routes, while the existing internal `PROFILE_API_TOKEN` retains its original access.
+
 ## Counting and ranking
 
 `counting_rule=confirmed_paid_checkout`: count each successfully settled, confirmed checkout's draw quantity only when the transaction's actual payment is verified. Free/gift draws and failed transactions do not count. The scanner reconciles successful checkout events with payment receipts. Publication independently checks in its SQLite transaction that every configured audited contract source has a checkpoint beyond the requested confirmed block and a nonempty reorg anchor. A published zero-participant snapshot is valid only after this complete scan.

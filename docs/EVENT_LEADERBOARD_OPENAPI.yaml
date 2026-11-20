@@ -3,6 +3,9 @@ info:
   title: Finite activity leaderboard
   version: 1.0.0
   description: Immutable snapshots of every participant's confirmed actually-paid successful draws.
+servers:
+  - url: https://tcg-api.up.railway.app
+    description: Production API; verified Railway-managed HTTPS hostname.
 security:
   - bearerAuth: []
 paths:
@@ -60,6 +63,7 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+      description: Internal PROFILE_API_TOKEN, or a website-specific leaderboard read token once the updated server and EVENT_LEADERBOARD_CLIENT_TOKENS_JSON have been deployed and configured. Keep tokens server-side.
   parameters:
     EventId:
       name: event_id

@@ -15,6 +15,7 @@ class ProfileActivityRoutes(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.old_token = profile_api.API_TOKEN
+        cls.old_clients = profile_api.LEADERBOARD_CLIENT_TOKENS
         cls.old_enabled = os.environ.get('EVENT_LEADERBOARD_API_ENABLED')
         cls.old_path = os.environ.get('EVENT_LEADERBOARD_DB_PATH')
         cls.root = Path('.scratch/profile-api-tests') / uuid.uuid4().hex
@@ -22,6 +23,7 @@ class ProfileActivityRoutes(unittest.TestCase):
         os.environ['EVENT_LEADERBOARD_API_ENABLED'] = '1'
         os.environ['EVENT_LEADERBOARD_DB_PATH'] = str(cls.root / 'events.sqlite3')
         profile_api.API_TOKEN = 'synthetic-test-server-token'
+        profile_api.LEADERBOARD_CLIENT_TOKENS = {}
         profile_api._EVENT_CONTROLLER = None
         cls.server = profile_api.ProfileApiServer(('127.0.0.1', 0), profile_api.ProfileApiHandler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -32,16 +34,19 @@ class ProfileActivityRoutes(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown(); cls.server.server_close(); cls.thread.join()
         profile_api.API_TOKEN = cls.old_token
+        profile_api.LEADERBOARD_CLIENT_TOKENS = cls.old_clients
         profile_api._EVENT_CONTROLLER = None
         for name, value in [('EVENT_LEADERBOARD_API_ENABLED', cls.old_enabled), ('EVENT_LEADERBOARD_DB_PATH', cls.old_path)]:
             if value is None: os.environ.pop(name, None)
             else: os.environ[name] = value
         # Root lists these exact test-owned paths before cleanup.
 
-    def request(self, path, authorized=False):
-        headers = {'Authorization': 'Bearer synthetic-test-server-token'} if authorized else {}
+    def request(self, path, authorized=False, *, token=None, method='GET'):
+        headers = {'Authorization': 'Bearer ' + token} if token else (
+            {'Authorization': 'Bearer synthetic-test-server-token'} if authorized else {})
         try:
-            response = urllib.request.urlopen(urllib.request.Request(self.origin + path, headers=headers), timeout=5)
+            response = urllib.request.urlopen(urllib.request.Request(
+                self.origin + path, headers=headers, method=method), timeout=5)
         except urllib.error.HTTPError as e:
             response = e
         with response:
@@ -65,6 +70,24 @@ class ProfileActivityRoutes(unittest.TestCase):
     def test_existing_profile_validation_and_health(self):
         self.assertEqual(self.request('/healthz')[0], 200)
         self.assertEqual(self.request('/v1/profile?wallet=invalid', True)[0], 400)
+
+    def test_independent_website_tokens_only_access_leaderboard_reads(self):
+        clients = {'renaiss-site': 'synthetic-renaiss-website-read-token',
+                   'partner-site': 'synthetic-partner-website-read-token'}
+        profile_api.LEADERBOARD_CLIENT_TOKENS = dict(clients)
+        try:
+            for token in clients.values():
+                self.assertEqual(self.request('/v1/leaderboards/2026-11-20', token=token)[0], 202)
+                self.assertEqual(self.request('/v1/leaderboards/2026-11-20/search?q=alice', token=token)[0], 400)
+                self.assertEqual(self.request('/v1/profile?wallet=invalid', token=token)[0], 401)
+                self.assertEqual(self.request('/v1/bbw-community-metrics', token=token, method='POST')[0], 401)
+            self.assertEqual(self.request('/v1/profile?wallet=invalid', True)[0], 400)
+            self.assertEqual(self.request('/v1/leaderboards/2026-11-20')[0], 401)
+            del profile_api.LEADERBOARD_CLIENT_TOKENS['partner-site']
+            self.assertEqual(self.request('/v1/leaderboards/2026-11-20', token=clients['partner-site'])[0], 401)
+            self.assertEqual(self.request('/v1/leaderboards/2026-11-20', token=clients['renaiss-site'])[0], 202)
+        finally:
+            profile_api.LEADERBOARD_CLIENT_TOKENS = {}
 
 
 if __name__ == '__main__':

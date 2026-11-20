@@ -44,7 +44,7 @@ Zeabur 已暫停，原服務設定／卷仍保留；新 Bot 在 Railway 運行�
 
 ## 活動 API
 
-基底：`https://tcg-profile-tcgpro-production.up.railway.app`
+基底：`https://tcg-api.up.railway.app`
 
 - `GET /v1/leaderboards/2026-11-20`
 - `GET /v1/leaderboards/2026-11-20/search?q=<wallet_or_name>&snapshot_id=<snapshot_id>`
