@@ -99,6 +99,11 @@ GET /v1/leaderboards/2026-11-20/search?q=<wallet_or_name>&snapshot_id=<snapshot_
 
 The production update interval defaults to 600 seconds (10 minutes), configured with `EVENT_LEADERBOARD_SYNC_INTERVAL_SECONDS` (minimum 60). The overdue threshold defaults to `max(2 * interval, interval + 120)`, or 1200 seconds at the default interval; `EVENT_LEADERBOARD_STALE_AFTER_SECONDS` can explicitly set a positive threshold. These values are returned in every response as `update_interval_seconds` and `stale_after_seconds`.
 
+The scheduler waits that interval after a synchronization finishes; scan time and
+chain confirmations add latency. Use `generated_at` and `data_through_at` for the
+actual publication and coverage times. Client reads use SQLite snapshots and do
+not trigger per-wallet chain scans.
+
 Failures preserve the last successful snapshot. A new config revision intentionally has no current snapshot until its own scan completes; explicit IDs can still read old revisions. Error state never converts an incomplete scan to an empty final result.
 
 ## Configuration and recovery

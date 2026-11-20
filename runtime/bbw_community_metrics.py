@@ -10,6 +10,7 @@ import re
 import threading
 import time
 
+from runtime.bounded_event_logs import block_at_or_before, complete_bounded_logs
 from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC
 from runtime.vrf_checkouts import decode_vrf_checkout
 from scripts.onchain_metrics import (
@@ -69,13 +70,14 @@ def _sbt_count(cfg, wallet, cutoff):
 def _spend_source_wallets(cfg, wallet, cutoff):
     """Use TCG Pro's verified migration helper to include the account's former Safe."""
     sources = {wallet}
-    rows = _iter_pages(
-        lambda page: _fetch_event_logs_page(
+    cutoff_block = block_at_or_before(cfg, cutoff)
+    rows = complete_bounded_logs(
+        lambda start, end, page: _fetch_event_logs_page(
             cfg, contract=MIGRATION_HELPER_CONTRACT, topic0=MIGRATION_HELPER_TOPIC,
-            from_block=MIGRATION_START_BLOCK, to_block=0, page=page,
+            from_block=start, to_block=end, page=page,
             indexed_wallet=wallet, indexed_wallet_topic=3,
         ),
-        cfg.page_size,
+        MIGRATION_START_BLOCK, cutoff_block, cfg.page_size,
     )
     for row in rows:
         if row.get("removed") is True:

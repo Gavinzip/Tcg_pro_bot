@@ -29,6 +29,11 @@ migration receiver metrics are not a production forecast.
 - New activity jobs only scan the configured finite interval. Confirmed source
   checkpoints are durable and incremental. A finalized activity does not scan
   the chain again on later scheduler ticks.
+- Production activity scanning is paced at 0.5 requests/second, reserving room
+  for interactive BBW requests on the existing five-request/second key. It does
+  not buy a new paid key or claim to eliminate every upstream timeout.
+- The obsolete subpack/legendary one-minute monitors are disabled in deployment
+  configuration after the old pack API was observed returning 404.
 - Daily encrypted Drive backups deduplicate with restic. Mutable data is staged;
   bulk media is read in place. Cached SHA-256 values are reused only with
   unchanged size, nanosecond mtime and inode; post-upload validation remains.
@@ -51,7 +56,9 @@ Use sustained production averages, including the daily incremental backup:
 
 `resources/month ≈ RAM_GB*10 + vCPU*20 + stored_GB*0.15 + egress_GB*0.05`
 
-The retained 14.6 GB data is approximately US$2.19/month for storage alone.
+The retained 14.6 GB file allocation is approximately US$2.19/month for storage
+alone. Railway's volume metric including filesystem overhead is about 15.7 GB,
+or roughly US$2.35/month; use platform measurements for billing forecasts.
 CPU/RAM limits are ceilings, not reservations: lowering an idle ceiling alone
 does not reduce the bill. Never choose a memory limit below measured Bot,
 renderer and backup concurrency peaks merely to make a calculator look cheaper.

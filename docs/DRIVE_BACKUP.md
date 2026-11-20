@@ -48,6 +48,10 @@ inside the Bot service owning the volume. Do not add a second scheduler. A
 filesystem `flock` excludes overlapping runs. Keep interactive query work on its
 own workers. `status` reports capturing/uploading/complete/failed and the last
 snapshot; a complete upload is not a full restore acceptance.
+After a restart, the scheduler waits only the remaining time since the last
+success. It rechecks the deadline after waiting, so a manual successful backup
+does not cause another full day to be skipped. Failed jobs retain the configured
+full-interval retry policy.
 
 Explicit initial setup: create and independently verify the new empty Drive
 folder, escrow its unique password, then run the `init` action once. Authentication
