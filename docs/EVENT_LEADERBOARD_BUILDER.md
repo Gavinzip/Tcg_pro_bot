@@ -6,7 +6,7 @@
 
 19:08 更新：後續兩輪正常補掃均遇到 `provider_transport_failure`，最新榜暫回 503；checkpoint 已提交部分保留，尚無新完整快照。DNS 回 NOERROR、網路紀錄未見 dropCause，不足以排除 TLS／HTTP／逾時。19:12 在容器內用同來源與原速率重查 b289 的下一段 logs 及 checkpoint 錨點，共兩個請求均成功，錨點雜湊相符；不能據此認定先前失敗已解決。
 
-本機後續診斷修正（尚未 push／部署）：原本混為一類的請求錯誤分為 `provider_http_<status>`、`provider_timeout`、`provider_dns_failure`、`provider_tls_verification_failure`、`provider_tls_failure`、`provider_invalid_json`、`provider_invalid_request`、`provider_connection_failure`。失敗時的 `progress.error_details` 僅允許 module/action、階段、耗時、HTTP 狀態及數字區塊範圍；不保存 URL、金鑰、請求／回應內容或原始例外文字。維持單次請求、原來源、速率與 checkpoint 流程；25 個分類／scanner 回歸測試通過。此修改只改善診斷，不宣稱已修復上游連線。
+後續診斷修正 6b7ca2d 已於 2026-11-20 19:34（台北）透過 Railway 網頁部署成功（deployment 92e548ac-b356-43f2-93f0-339414620295）：原本混為一類的請求錯誤分為 `provider_http_<status>`、`provider_timeout`、`provider_dns_failure`、`provider_tls_verification_failure`、`provider_tls_failure`、`provider_invalid_json`、`provider_invalid_request`、`provider_connection_failure`。失敗時的 `progress.error_details` 僅允許 module/action、階段、耗時、HTTP 狀態及數字區塊範圍；不保存 URL、金鑰、請求／回應內容或原始例外文字。維持單次請求、原來源、速率與 checkpoint 流程；25 個分類／scanner 回歸測試通過。此修改只改善診斷，不宣稱已修復上游連線。部署後 Bot 健康檢查 200、未授權榜單 401；舊快照不帶 builder 200／帶 builder 409、錯誤 builder 400。當時 revision2 三個來源追上同一 through_block、狀態 scanning，最新榜仍 503（上一輪錯誤保留），尚無完整快照。
 
 ## 用途與接口
 
