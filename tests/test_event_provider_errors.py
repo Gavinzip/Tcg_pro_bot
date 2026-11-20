@@ -15,12 +15,13 @@ class ProviderErrorTests(unittest.TestCase):
     def provider(self):
         return EtherscanProvider({"BSCSCAN_API_KEY": "private-test-key"})
 
-    def failure(self, error):
-        with patch("runtime.event_leaderboards.scanner.urllib.request.urlopen", side_effect=error) as call:
+    def failure(self, error, expected_attempts=1):
+        with patch("runtime.event_leaderboards.scanner.urllib.request.urlopen", side_effect=error) as call, \
+                patch("runtime.event_leaderboards.scanner.time.sleep"):
             with self.assertRaises(SourceIncomplete) as caught:
                 self.provider().request("logs", "getLogs", fromBlock=10, toBlock=20, page=1,
                                         private_value="private-test-key")
-        self.assertEqual(call.call_count, 1, "Diagnostics must not introduce retries")
+        self.assertEqual(call.call_count, expected_attempts)
         serialized = json.dumps({"code": str(caught.exception), "details": caught.exception.diagnostic})
         self.assertNotIn("private-test-key", serialized)
         self.assertNotIn("https://", serialized)
@@ -39,7 +40,7 @@ class ProviderErrorTests(unittest.TestCase):
 
     def test_direct_and_wrapped_timeouts_are_identifiable(self):
         for error in (TimeoutError("private-test-key"), urllib.error.URLError(TimeoutError("private-test-key"))):
-            self.assertEqual(str(self.failure(error)), "provider_timeout")
+            self.assertEqual(str(self.failure(error, expected_attempts=3)), "provider_timeout")
 
     def test_certificate_and_tls_failures_remain_distinct(self):
         for error, code in ((ssl.SSLCertVerificationError("private-test-key"), "provider_tls_verification_failure"),

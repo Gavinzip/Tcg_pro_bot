@@ -108,6 +108,23 @@ class EtherscanProvider:
         self._blocks = {}
 
     def request(self, module, action, **params):
+        # All listed operations are idempotent reads. Each attempt uses the same
+        # source, query, timeout and shared pacing gate below.
+        reads = {("logs", "getLogs"), ("proxy", "eth_blockNumber"),
+                 ("proxy", "eth_getBlockByNumber"), ("proxy", "eth_getTransactionReceipt"),
+                 ("block", "getblocknobytime")}
+        attempts = 3 if (module, action) in reads else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._request_once(module, action, **params)
+            except SourceIncomplete as error:
+                if error.diagnostic is not None:
+                    error.diagnostic = dict(error.diagnostic, attempt=attempt, max_attempts=attempts)
+                if str(error) != "provider_timeout" or attempt == attempts:
+                    raise
+                time.sleep(2 ** attempt)
+
+    def _request_once(self, module, action, **params):
         with self._lock:
             delay = self._next - time.monotonic()
             if delay > 0:
