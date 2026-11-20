@@ -11,20 +11,17 @@ import threading
 import time
 
 from runtime.bounded_event_logs import block_at_or_before, complete_bounded_logs
-from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC
-from runtime.vrf_checkouts import decode_vrf_checkout
+from runtime.bbw_checkout_events import (
+    EARLY_CHECKOUT_TOPIC, LEGACY_CHECKOUT_TOPIC, LEGACY_VENDING_MACHINE,
+    checkout_topic, reconcile_checkout_payments,
+)
+from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS
 from scripts.onchain_metrics import (
     EtherscanRequestPacer, OnchainConfig, _fetch_event_logs_page, _fetch_token1155tx_page, _fetch_tokentx_page,
-    _fetch_tx_receipt,
 )
 
 USDT_CONTRACT = "0x55d398326f99059ff775485246999027b3197955"
 SBT_CONTRACT = "0x7d1b7db704d722295fbaa284008f526634673dbf"
-LEGACY_VENDING_MACHINE = DEFAULT_PACK_CONTRACTS[0]
-LEGACY_OPERATOR = "0x12639a4147af7c777bb9a21fdaefa5ea91e2e3a3"
-LEGACY_CUTOVER = int(datetime(2025, 12, 19, tzinfo=timezone.utc).timestamp())
-LEGACY_CHECKOUT_TOPIC = "0xd505514c5f9bb134a66621a7fd46a679442a1a0e45f5ad5dff0724e4b4588fed"
-PACK_CHECKOUT_TOPIC = "0xf1ec6bca7c2c281e7c68bbddbba207b6df358f0ef65c5650b1f796d3f1224fe9"
 USDT_UNIT = 10**18
 USDT_TRANSFER_PAGE_SIZE = 10_000
 SBT_AND_SPEND_CACHE_TTL = 45
@@ -77,7 +74,8 @@ def _spend_source_wallets(cfg, wallet, cutoff):
             from_block=start, to_block=end, page=page,
             indexed_wallet=wallet, indexed_wallet_topic=3,
         ),
-        MIGRATION_START_BLOCK, cutoff_block, cfg.page_size,
+        MIGRATION_START_BLOCK, cutoff_block,
+        cfg.page_size,
     )
     for row in rows:
         if row.get("removed") is True:
@@ -126,52 +124,22 @@ def _pack_payments(cfg, wallet, cutoff):
 
 
 def _confirmed_pack_spend(cfg, wallet, contract, payments):
-    topic = {
-        VRF_V3_CONTRACT: VRF_V3_CHECKOUT_TOPIC,
-        LEGACY_VENDING_MACHINE: LEGACY_CHECKOUT_TOPIC,
-    }.get(contract, PACK_CHECKOUT_TOPIC)
-    blocks = [block for _, block, _ in payments.values()]
-    logs = _iter_pages(lambda page: _fetch_event_logs_page(
-        cfg, contract=contract, topic0=topic, from_block=min(blocks), to_block=max(blocks),
-        page=page, indexed_wallet=wallet,
-    ), cfg.page_size)
-    confirmed = defaultdict(int)
-    seen = set()
-    for log in logs:
-        tx_hash = log["transactionHash"].lower()
-        if tx_hash not in payments or log.get("removed") is True:
-            continue
-        log_key = (tx_hash, int(log["logIndex"], 16))
-        if log_key in seen:
-            continue
-        seen.add(log_key)
-        topics = [value.lower() for value in log["topics"]]
-        if (log["address"].lower() != contract or topics[0] != topic
-                or "0x" + topics[1][-40:] != wallet):
-            raise RuntimeError("unexpected_pack_checkout")
-        if contract == VRF_V3_CONTRACT:
-            checkout = decode_vrf_checkout(log, wallet, USDT_CONTRACT)
-            if checkout is not None:
-                confirmed[tx_hash] += checkout.amount_raw
-        else:
-            data = bytes.fromhex(log["data"].removeprefix("0x"))
-            if len(data) != 32:
-                raise RuntimeError("invalid_pack_checkout")
-            confirmed[tx_hash] += int.from_bytes(data, "big")
+    if not payments:
+        return 0
 
-    # The oldest AAB5 purchases did not emit CheckoutSuccess. The established
-    # ledger identifies direct 60-USDT vending-machine transactions before cutover.
-    if contract == LEGACY_VENDING_MACHINE and wallet != LEGACY_OPERATOR:
-        for tx_hash, (amount, _, timestamp) in payments.items():
-            if tx_hash in confirmed or timestamp >= LEGACY_CUTOVER or amount != 60 * USDT_UNIT:
-                continue
-            receipt = _fetch_tx_receipt(cfg, tx_hash)
-            if (receipt["to"].lower() == contract and receipt["from"].lower() == wallet
-                    and receipt["status"] == "0x1"):
-                confirmed[tx_hash] = amount
-    for tx_hash, amount in confirmed.items():
-        if amount != payments[tx_hash][0]:
-            raise RuntimeError("pack_checkout_payment_mismatch")
+    def confirmed_events(topic, candidates):
+        blocks = [block for _, block, _ in candidates.values()]
+        logs = complete_bounded_logs(lambda start, end, page: _fetch_event_logs_page(
+            cfg, contract=contract, topic0=topic, from_block=start, to_block=end,
+            page=page, indexed_wallet=wallet,
+        ), min(blocks), max(blocks), cfg.page_size)
+        return reconcile_checkout_payments(wallet, contract, candidates, logs, topic, USDT_CONTRACT)
+
+    confirmed = confirmed_events(checkout_topic(contract), payments)
+    if contract == LEGACY_VENDING_MACHINE:
+        remaining = {tx: payment for tx, payment in payments.items() if tx not in confirmed}
+        if remaining:
+            confirmed.update(confirmed_events(EARLY_CHECKOUT_TOPIC, remaining))
     return sum(confirmed.values())
 
 
@@ -238,7 +206,9 @@ class BbwCommunityMetrics:
         with self._guard:
             status, payload = result
             if status == HTTPStatus.OK:
-                self._cache[key] = (now + SBT_AND_SPEND_CACHE_TTL, payload)
+                # Slow provider queries can take longer than the entire TTL.
+                # Keep a successful result reusable for a full TTL after it is ready.
+                self._cache[key] = (time.time() + SBT_AND_SPEND_CACHE_TTL, payload)
                 self._cache.move_to_end(key)
                 if len(self._cache) > 512:
                     self._cache.popitem(last=False)
