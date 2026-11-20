@@ -6,6 +6,8 @@ The Profile API serves these routes through its existing authentication. Supply 
 
 The separate website-token implementation is documented in [API client tokens](API_CLIENT_TOKENS.md). It requires deploying the updated server and configuring `EVENT_LEADERBOARD_CLIENT_TOKENS_JSON`; the two website credentials are not provisioned merely by adding this code. They authorize only leaderboard GET routes, while the existing internal `PROFILE_API_TOKEN` retains its original access.
 
+The website credentials were verified live on 2026-11-20 with release b02f13f. The subsequent [builder-filter extension](EVENT_LEADERBOARD_BUILDER.md) is local and pending its own release. Filtering precedes aggregation; snapshot_id plus builder pins a scope and cursors bind it. Search ranks remain global within that builder. Old snapshots without builder evidence return 409.
+
 ## Counting and ranking
 
 `counting_rule=confirmed_paid_checkout`: count each successfully settled, confirmed checkout's draw quantity only when the transaction's actual payment is verified. Free/gift draws and failed transactions do not count. The scanner reconciles successful checkout events with payment receipts. Publication independently checks in its SQLite transaction that every configured audited contract source has a checkpoint beyond the requested confirmed block and a nonempty reorg anchor. A published zero-participant snapshot is valid only after this complete scan.
@@ -33,6 +35,7 @@ Parameters:
 | Parameter | Values | Default |
 | --- | --- | --- |
 | `snapshot_id` | Previously returned immutable snapshot | Latest successful snapshot of current config revision |
+| `builder` | Optional 0x + 64 hex platform code; continuation cursor can carry it | Entire activity |
 | `limit` | Integer 1–1000 | 100 |
 | `cursor` | Opaque `next_cursor`, retaining the same sort/order/search | None |
 | `all` | `true` or `false`; `true` cannot be combined with cursor | `false` |
@@ -63,6 +66,8 @@ Snapshot rows and counting metadata are immutable. `stale`, `stale_reason`, `las
 | `rows[].paid_amount_raw` | decimal string | 上述有效抽卡所對應付款的最小單位整數總和；不可轉浮點數。 |
 | `rows[].paid_amount` | decimal string | `paid_amount_raw / 10^token_decimals` 的精確十進位表示，僅供資訊展示。 |
 | `event_id` | string | 有限期間活動的識別碼。 |
+| `builder` | string/null | 本次平台來源；null 為全活動。 |
+| `builder_filter_supported` | boolean | 此快照是否具備完整 builder 證據；接入方啟用篩選前必須核對。 |
 | `revision`, `config_hash` | integer, string | 活動設定版本與雜湊；時間或合約變更會另開版本，不沿用不相容進度。 |
 | `start_at`, `end_at` | timestamp | 計分起訖，UTC ISO 8601；起始含、結束不含。 |
 | `snapshot_id` | string/null | 不可變快照識別碼；首次未完成為 null。分頁與搜尋應固定同一 ID。 |
@@ -97,6 +102,7 @@ GET /v1/leaderboards/2026-11-20/search?q=<wallet_or_name>&snapshot_id=<snapshot_
 | 202 | Initial scan incomplete; `snapshot_id:null`, `status:initializing`, progress and no fabricated `rows` |
 | 400 | Invalid parameters, malformed cursor, cursor/snapshot/query mismatch, or snapshot belonging to another event |
 | 404 | Unknown event or route |
+| 409 | Selected snapshot lacks complete builder evidence; refresh after the versioned rescan |
 | 503 | Initial scan failed before any successful snapshot; error/progress and no fabricated `rows` |
 
 The production update interval defaults to 600 seconds (10 minutes), configured with `EVENT_LEADERBOARD_SYNC_INTERVAL_SECONDS` (minimum 60). The overdue threshold defaults to `max(2 * interval, interval + 120)`, or 1200 seconds at the default interval; `EVENT_LEADERBOARD_STALE_AFTER_SECONDS` can explicitly set a positive threshold. These values are returned in every response as `update_interval_seconds` and `stale_after_seconds`.

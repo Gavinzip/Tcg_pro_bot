@@ -5,8 +5,8 @@ import base64
 import json
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .config import load_event_definitions
-from .store import EventLeaderboardStore
+from .config import builder_code, load_event_definitions
+from .store import BuilderFilterUnavailable, EventLeaderboardStore
 
 SORT_FIELDS = {"rank", "draw_count", "wallet", "username", "paid_amount"}
 
@@ -29,10 +29,14 @@ def _decode_cursor(raw):
         raise ValueError("invalid cursor")
     try:
         value = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4), altchars=b"-_", validate=True))
-        if (not isinstance(value, dict) or set(value) != {"snapshot_id", "sort", "order", "offset", "q"}
+        required = {"snapshot_id", "sort", "order", "offset", "q"}
+        if (not isinstance(value, dict) or set(value) not in (required, required | {"builder"})
                 or not isinstance(value["offset"], int) or isinstance(value["offset"], bool) or value["offset"] < 0
-                or not isinstance(value["snapshot_id"], str)):
+                or not isinstance(value["snapshot_id"], str) or not value["snapshot_id"]):
             raise ValueError()
+        value.setdefault("builder", None)
+        if value["builder"] is not None:
+            value["builder"] = builder_code(value["builder"])
         return value
     except (ValueError, TypeError, UnicodeError) as exc:
         raise ValueError("invalid cursor") from exc
@@ -61,6 +65,8 @@ class EventLeaderboardHTTP:
         try:
             self.store.get_event(event_id)
             snapshot_id = _one(query, "snapshot_id")
+            raw_builder = _one(query, "builder")
+            builder = builder_code(raw_builder) if raw_builder is not None else None
             sort = _one(query, "sort", "rank")
             order = _one(query, "order", "asc")
             if sort not in SORT_FIELDS or order not in {"asc", "desc"}:
@@ -81,16 +87,19 @@ class EventLeaderboardHTTP:
                 if all_rows:
                     raise ValueError("all=true cannot be combined with cursor")
                 cursor = _decode_cursor(raw_cursor)
+                if raw_builder is not None and builder != cursor["builder"]:
+                    raise ValueError("cursor does not match builder")
                 if (snapshot_id and snapshot_id != cursor["snapshot_id"]) or any(
                     cursor[key] != value for key, value in (("sort", sort), ("order", order), ("q", q.casefold()))):
                     raise ValueError("cursor does not match snapshot or query")
                 snapshot_id, offset = cursor["snapshot_id"], cursor["offset"]
+                builder = cursor["builder"]
             if search and not snapshot_id:
                 raise ValueError("search requires snapshot_id from the leaderboard response")
-            metadata, rows, health = self.store.read_snapshot(event_id, snapshot_id)
+            metadata, rows, health = self.store.read_snapshot(event_id, snapshot_id, builder=builder)
             if metadata is None:
                 return (503 if health["last_error"] else 202), {
-                    "event_id": event_id, "snapshot_id": None, "status": "initializing", **health,
+                    "event_id": event_id, "snapshot_id": None, "builder": builder, "status": "initializing", **health,
                     "message": "No complete confirmed scan has been published yet."}
             if search:
                 needle = q.casefold()
@@ -111,9 +120,12 @@ class EventLeaderboardHTTP:
             next_offset = offset + len(selected)
             next_cursor = None if all_rows or next_offset >= len(rows) else _cursor({
                 "snapshot_id": metadata["snapshot_id"], "sort": sort, "order": order,
-                "offset": next_offset, "q": q.casefold()})
+                "offset": next_offset, "q": q.casefold(), "builder": builder})
             return 200, {**metadata, **health, "sort": sort, "order": order, "rows": selected,
                          "total_matches": len(rows), "next_cursor": next_cursor}
+        except BuilderFilterUnavailable as exc:
+            return 409, {"error": "builder_filter_unavailable", "message": str(exc),
+                         "event_id": event_id, "snapshot_id": snapshot_id, "builder": builder}
         except KeyError:
             return 404, {"error": "unknown_event", "event_id": event_id}
         except (ValueError, TypeError) as exc:

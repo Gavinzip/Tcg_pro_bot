@@ -7,6 +7,7 @@ Card transfers, transaction prices and asynchronous fulfillment are never inputs
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 import json
 import os
 import re
@@ -237,7 +238,8 @@ def decode_checkout(log, schema):
         pack_id = topics[2] if schema == "legacy_pack" else None
         if schema == "legacy_pack":
             checkout_ids = [topics[3]]
-    return dict(wallet=wallet, pack_id=pack_id, draw_count=count, paid_amount_raw=amount,
+    return dict(wallet=wallet, pack_id=pack_id, builder=topics[3] if schema == "v3" else None,
+                draw_count=count, paid_amount_raw=amount,
                 checkout_ids=checkout_ids, pack_contract=address(log["address"]), tx_hash=identity(log)[0],
                 log_index=identity(log)[1], block_number=number(log.get("blockNumber")),
                 block_hash=hash32(log.get("blockHash")))
@@ -330,6 +332,8 @@ class EventLeaderboardScanner:
     def sync(self, event_id, *, now=None, usernames=None):
         now = int(time.time()) if now is None else int(now)
         definition = self.store.get_event(event_id)
+        if definition.checkout_schema_version < 2:
+            definition = self.store.register_event(replace(definition, checkout_schema_version=2))
         schemas = {**self.schemas, **definition.contract_schemas}
         progress = {"event_id": event_id, "revision": definition.revision, "state": "scanning", "sources": {}}
         try:
@@ -390,7 +394,7 @@ class EventLeaderboardScanner:
                         row = receipts[tx_hash].get((tx_hash, index))
                         candidate = decode_checkout(log, schema)
                         if (row is None or candidate["paid_amount_raw"] != row.get("checkout_event_amount_raw", row["paid_amount_raw"])
-                                or any(candidate[k] != row[k] for k in ("wallet", "draw_count", "pack_id", "block_hash", "block_number", "checkout_ids"))):
+                                or any(candidate[k] != row[k] for k in ("wallet", "draw_count", "pack_id", "builder", "block_hash", "block_number", "checkout_ids"))):
                             raise SourceIncomplete("indexed_log_receipt_mismatch")
                         if definition.start_ts <= row["timestamp"] < definition.end_ts and row["paid_amount_raw"] > 0:
                             checkouts.append(dict(row, chain_id=definition.chain_id))

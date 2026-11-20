@@ -1,6 +1,6 @@
 # 各網站獨立的排行榜 Bearer token
 
-此變更需要部署新版 API 並設定憑證後才會生效。只新增程式或產生隨機字串，不代表正式環境已接受新 token。
+2026-11-20 已部署 b02f13f。兩項網站憑證已存進 1Password 並回讀核對，服務端設定已驗證。兩組各自對正式排行榜／搜尋回 200、Profile／BBW 回 401；原內部查詢、匿名拒絕與 Bot 健康檢查正常。分享連結和密鑰不放進本文件。
 
 ## 憑證分工
 
@@ -44,7 +44,7 @@ token 應以密碼安全隨機方式產生，例如 32 bytes 的 URL-safe 隨機
 
 ## 我們網站的目前狀態（2026-11-20）
 
-已與「建置構想中的網站」chat 核對：checkout 為 `/Users/gavin/Documents/ChatGPT/b-w`、分支 `codex/bnb-renaiss-campaign`。目前只有 React／Vite 前端，尚無 server proxy、部署平台或 server-only env。
+已與「建置構想中的網站」chat 核對：checkout 為 `/Users/gavin/Documents/ChatGPT/b-w`、分支 `codex/bnb-renaiss-campaign`。已新增本機同源 Node proxy；部署平台仍待定，前端 repo 尚未 push／部署。網站 chat 已使用我們專用憑證獨立驗證正式排行榜／搜尋；facade 對未實作的票數回 ticket_scoring_not_ready，沒有把 draw_count 當票數。正常 5188 完整網站已以 op run 的 secret reference 啟動；12 月 event 尚未配置，沒有套用 11 月範例冒充活動。
 
 瀏覽器 adapter：`src/services/campaignApi.ts`；回應驗證：`src/services/campaignSchemas.ts`；整合說明：`docs/frontend-integration.md`。公開的 `VITE_CAMPAIGN_API_BASE` 僅供未來 facade 路徑使用。
 

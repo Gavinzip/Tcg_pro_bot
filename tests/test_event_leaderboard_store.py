@@ -27,7 +27,7 @@ class EventStoreTests(unittest.TestCase):
 
     def row(self, number=1, **extra):
         return {"wallet": address(number), "tx_hash": "0x" + f"{number:064x}", "log_index": 0,
-                "pack_contract": CONTRACT, "pack_id": "pack", "draw_count": 1,
+                "pack_contract": CONTRACT, "pack_id": "pack", "builder": "0x" + "b" * 64, "draw_count": 1,
                 "paid_amount_raw": "1000000000000000001", "block_number": 10,
                 "block_hash": "0xblock", "timestamp": 110, **extra}
 

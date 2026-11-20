@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Finite activity leaderboard
-  version: 1.0.0
+  version: 1.1.0
   description: Immutable snapshots of every participant's confirmed actually-paid successful draws.
 servers:
   - url: https://tcg-api.up.railway.app
@@ -15,6 +15,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/EventId'
         - $ref: '#/components/parameters/SnapshotId'
+        - $ref: '#/components/parameters/Builder'
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/All'
@@ -31,6 +32,8 @@ paths:
           description: Existing Profile API authentication required
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/BuilderUnavailable'
         '503':
           $ref: '#/components/responses/Incomplete'
   /v1/leaderboards/{event_id}/search:
@@ -40,6 +43,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/EventId'
         - $ref: '#/components/parameters/SnapshotId'
+        - $ref: '#/components/parameters/Builder'
         - name: q
           in: query
           required: true
@@ -58,6 +62,8 @@ paths:
           description: Existing Profile API authentication required
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/BuilderUnavailable'
 components:
   securitySchemes:
     bearerAuth:
@@ -74,6 +80,11 @@ components:
       name: snapshot_id
       in: query
       schema: {type: string}
+    Builder:
+      name: builder
+      in: query
+      description: Optional platform bytes32. Filter checkouts before totals/ranks. Cursor carries the scope; an explicit builder must match it. Requires the builder-filter release and a complete v2 snapshot.
+      schema: {type: string, pattern: '^0x[0-9a-fA-F]{64}$'}
     Limit:
       name: limit
       in: query
@@ -119,6 +130,18 @@ components:
               update_interval_seconds: {type: integer, minimum: 60, default: 600}
               stale_after_seconds: {type: integer, minimum: 1, default: 1200}
               message: {type: string}
+    BuilderUnavailable:
+      description: Historical snapshot lacks complete builder evidence. Refresh after the versioned rescan; do not treat as an empty leaderboard.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: {const: builder_filter_unavailable}
+              event_id: {type: string}
+              snapshot_id: {type: [string, 'null']}
+              builder: {type: string}
+              message: {type: string}
     Invalid:
       description: Invalid request, cursor, or snapshot mismatch
     NotFound:
@@ -139,6 +162,8 @@ components:
       type: object
       required: [event_id, revision, config_hash, start_at, end_at, snapshot_id, generated_at, data_through_at, through_block, total_participants, status, counting_rule, contracts, stale, last_error, rows, next_cursor, total_matches]
       properties:
+        builder: {type: [string, 'null'], description: Selected platform; null is the entire activity.}
+        builder_filter_supported: {type: boolean, description: Snapshot has complete builder evidence.}
         event_id: {type: string}
         revision: {type: integer, minimum: 1}
         config_hash: {type: string}

@@ -88,7 +88,7 @@ def main(argv=None):
                        else load_event_definitions(args.config))
         extra = os.getenv("EVENT_LEADERBOARD_CONTRACT_SCHEMAS")
         extra_schemas = json.loads(extra) if extra else {}
-        events = [store.register_event(replace(row, contract_schemas={**row.contract_schemas,
+        events = [store.register_event(replace(row, checkout_schema_version=2, contract_schemas={**row.contract_schemas,
             **{k.lower(): v for k, v in extra_schemas.items() if k.lower() in row.contracts}})) for row in definitions]
         selected = [row for row in events if args.event is None or row.event_id == args.event]
         if not selected:

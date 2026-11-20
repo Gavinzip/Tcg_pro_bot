@@ -1,8 +1,9 @@
 """Evidence/coverage tests; fixtures do not establish live registry completeness."""
 import json
 from pathlib import Path
-import tempfile
+from types import SimpleNamespace
 import unittest
+import uuid
 
 from runtime.event_leaderboards.config import EventDefinition, source_key
 from runtime.event_leaderboards.scanner import (
@@ -15,6 +16,7 @@ from runtime.event_leaderboards.store import EventLeaderboardStore
 WALLET = "0x" + "1" * 40
 OTHER = "0x" + "2" * 40
 PACK = "0x" + "a" * 64
+RUN_DIR = Path(__file__).resolve().parents[1] / '.scratch' / 'event-scanner-tests' / ('run-' + uuid.uuid4().hex)
 
 
 def h(n):
@@ -89,13 +91,12 @@ class Provider:
 
 class ScannerTests(unittest.TestCase):
     def setUp(self):
-        root = Path(__file__).resolve().parents[1] / ".scratch" / "event-scanner-tests"
+        root = RUN_DIR / self._testMethodName
         root.mkdir(parents=True, exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(dir=root)
+        self.temp = SimpleNamespace(name=str(root))
         self.store = EventLeaderboardStore(str(Path(self.temp.name) / "ledger.sqlite3"))
 
-    def tearDown(self):
-        self.temp.cleanup()
+    # Root lists the exact test-owned paths before explicit cleanup.
 
     def setup_event(self, contracts=(VRF_V3_CONTRACT,)):
         return self.store.register_event(EventDefinition("test", 100, 140, contracts=contracts))
@@ -294,25 +295,24 @@ class ScannerTests(unittest.TestCase):
 class MigrationEvidenceTests(unittest.TestCase):
     def test_only_provenance_bearing_helper_maps_merge_wallets(self):
         from scripts.sync_event_leaderboards import verified_file_aliases, MIGRATION_HELPER, MIGRATION_TOPIC
-        root = Path(__file__).resolve().parents[1] / ".scratch" / "event-scanner-tests"
+        root = RUN_DIR / 'migration-evidence'
         root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=root) as folder:
-            path = Path(folder) / "map.json"
-            self.assertEqual(verified_file_aliases(path), [])
-            path.write_text(json.dumps({WALLET: OTHER}))
-            with self.assertRaisesRegex(SourceIncomplete, "unverified_migration_map"):
-                verified_file_aliases(path)
-            payload = {"source": "bsc_logs:helper_migration_event", "helper_contract": MIGRATION_HELPER,
-                "helper_event_topic": MIGRATION_TOPIC, "last_scanned_block": 500,
-                "mappings": [{"old": WALLET, "new": OTHER, "block": 400, "tx": h(99), "source": "helper_event_only"}]}
-            path.write_text(json.dumps(payload))
-            rows = verified_file_aliases(path)
-            self.assertEqual(rows[0]["new"], OTHER)
-            self.assertIn("map_sha256:", rows[0]["evidence"])
-            payload["mappings"][0]["source"] = "existing_flat_map"
-            path.write_text(json.dumps(payload))
-            with self.assertRaisesRegex(SourceIncomplete, "unverified_migration_row"):
-                verified_file_aliases(path)
+        path = root / "map.json"
+        self.assertEqual(verified_file_aliases(path), [])
+        path.write_text(json.dumps({WALLET: OTHER}))
+        with self.assertRaisesRegex(SourceIncomplete, "unverified_migration_map"):
+            verified_file_aliases(path)
+        payload = {"source": "bsc_logs:helper_migration_event", "helper_contract": MIGRATION_HELPER,
+            "helper_event_topic": MIGRATION_TOPIC, "last_scanned_block": 500,
+            "mappings": [{"old": WALLET, "new": OTHER, "block": 400, "tx": h(99), "source": "helper_event_only"}]}
+        path.write_text(json.dumps(payload))
+        rows = verified_file_aliases(path)
+        self.assertEqual(rows[0]["new"], OTHER)
+        self.assertIn("map_sha256:", rows[0]["evidence"])
+        payload["mappings"][0]["source"] = "existing_flat_map"
+        path.write_text(json.dumps(payload))
+        with self.assertRaisesRegex(SourceIncomplete, "unverified_migration_row"):
+            verified_file_aliases(path)
 
 
 if __name__ == "__main__":

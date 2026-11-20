@@ -8,10 +8,12 @@
 - [OpenAPI 規格](EVENT_LEADERBOARD_OPENAPI.yaml)：供工程師匯入支援 OpenAPI 3.1 的工具。
 - [完整技術說明](EVENT_LEADERBOARD_API.md)：補充同步、版本與復原機制。
 - 目前 Base URL：`https://tcg-api.up.railway.app`。
-- `Authorization: Bearer <PROFILE_API_TOKEN>`。實際金鑰另以安全管道交付，不放入本文件、Git、前端程式或網址。
-- 這是共用服務金鑰，持有者能讀取活動內所有參與者，並非個別玩家的登入憑證。
+- `Authorization: Bearer <TCG_LEADERBOARD_API_TOKEN>`。實際金鑰另以安全管道交付，不放入本文件、Git、前端程式或網址。
+- 這是網站後端使用的服務憑證，可讀取已配置活動中的參與者，並非個別玩家的登入憑證。
 
-網站獨立憑證的新版程式已準備，但尚待正式部署及設定：我們網站與合作方將各有自己的排行榜唯讀 token。屆時接入方的 server-only 變數為 `TCG_LEADERBOARD_API_TOKEN`，Header 格式不變，詳見 [網站 token 分工與部署](API_CLIENT_TOKENS.md)。目前已分享的舊 token 仍是內部共用憑證，不表示兩組網站 token 已生效。
+2026-11-20 已完成兩網站獨立憑證的正式部署與驗證：兩組各自可讀排行榜／搜尋，不能讀 Profile／BBW。server-only 變數為 `TCG_LEADERBOARD_API_TOKEN`，Header 格式不變，詳見 [網站 token 分工與部署](API_CLIENT_TOKENS.md)。原先分享的舊項目仍屬內部共用憑證，合作方應使用新的專用項目。
+
+新增的 [builder 平台來源篩選](EVENT_LEADERBOARD_BUILDER.md) 為後續本機變更，尚未部署。正式 b02f13f 不具備此篩選，接入方須核對回顯與支援旗標。
 
 範例活動 `event_id=2026-11-20`：台北時間 2026-11-20 00:00（含）至 2026-11-21 00:00（不含）。活動 ID 必須由後端預先設定，不能任填日期，也不能在查詢時帶 start/end 自行改期間。
 
@@ -29,6 +31,7 @@
 | name | 位置／型別 | 必填與預設 | description |
 | --- | --- | --- | --- |
 | `event_id` | path / string | 必填 | 已設定的活動識別碼。 |
+| `builder` | query / string | 可省略 | 新版平台來源篩選：0x 加 64 hex，下一頁可由 cursor 攜帶；尚待正式部署。 |
 | `snapshot_id` | query / string | 榜單可省略；搜尋首次必填 | 榜單省略時取目前設定版本最新成功快照；搜尋續頁可由 cursor 攜帶。 |
 | `q` | query / string | 搜尋每次必填 | 去除首尾空白後 1–200 字；地址／別名／名稱不分大小寫子字串搜尋。搜尋翻頁仍須帶同一 q。 |
 | `limit` | query / integer | 預設 100 | 每頁 1–1000 人。 |
@@ -45,22 +48,22 @@ query 值須 URL encode。相同 query 參數不可重複傳入。
 
 ```http
 GET https://tcg-api.up.railway.app/v1/leaderboards/2026-11-20?all=true&sort=rank&order=asc
-Authorization: Bearer <PROFILE_API_TOKEN>
+Authorization: Bearer <TCG_LEADERBOARD_API_TOKEN>
 ```
 
 ```http
 GET https://tcg-api.up.railway.app/v1/leaderboards/2026-11-20?limit=100&sort=rank&order=asc
-Authorization: Bearer <PROFILE_API_TOKEN>
+Authorization: Bearer <TCG_LEADERBOARD_API_TOKEN>
 ```
 
 ```http
 GET https://tcg-api.up.railway.app/v1/leaderboards/2026-11-20?limit=100&sort=rank&order=asc&cursor=<next_cursor>
-Authorization: Bearer <PROFILE_API_TOKEN>
+Authorization: Bearer <TCG_LEADERBOARD_API_TOKEN>
 ```
 
 ```http
 GET https://tcg-api.up.railway.app/v1/leaderboards/2026-11-20/search?snapshot_id=<榜單回傳的snapshot_id>&q=<錢包地址或名稱>&sort=rank&order=asc&limit=100
-Authorization: Bearer <PROFILE_API_TOKEN>
+Authorization: Bearer <TCG_LEADERBOARD_API_TOKEN>
 ```
 
 ## 欄位 name、description 與計算方式
@@ -70,6 +73,8 @@ Authorization: Bearer <PROFILE_API_TOKEN>
 | name | type | description／計算方式 |
 | --- | --- | --- |
 | `event_id` | string | 有限期間活動識別碼。 |
+| `builder` | string/null | 本次平台來源；null 為全活動。 |
+| `builder_filter_supported` | boolean | 此快照是否具備完整 builder 證據；接入方啟用篩選前必須核對。 |
 | `revision` | integer | 活動設定版本；時間、合約、鏈、小數位或 schema 等計分來源設定改變時建立新版本。 |
 | `config_hash` | string | 該版本有效活動設定的 SHA-256 雜湊。 |
 | `start_at` | timestamp | 計分起點，包含此時間。 |
@@ -125,6 +130,7 @@ Authorization: Bearer <PROFILE_API_TOKEN>
 | 400 | 參數、游標、活動／快照或查詢組合不符。 |
 | 401 | 缺少或錯誤的服務金鑰。 |
 | 404 | 活動或路徑不存在。 |
+| 409 | 指定快照沒有完整 builder 證據，請刷新至重掃完成的新快照。 |
 | 503 | 尚無成功快照且同步失敗，顯示暫時無法取得資料。 |
 
 排行榜查詢只讀 SQLite 快照，不會因每次查詢重新掃鏈。現行實作每次讀取選定快照後排序／篩選，分頁只限制輸出量；目前沒有榜單專用限流或大量併發承載驗證，且與 Bot 共用運算資源，不承諾無限制大量呼叫。

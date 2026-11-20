@@ -11,11 +11,16 @@ import sqlite3
 import time
 import uuid
 
-from .config import DEFAULT_DB_PATH, EventDefinition, iso_time, timestamp, wallet, source_key
+from .config import DEFAULT_DB_PATH, EventDefinition, builder_code, iso_time, timestamp, wallet, source_key
+from .aggregation import build_rankings
 
 
 class LedgerConflict(ValueError):
     """A checkpoint race, inconsistent duplicate, migration, or reorg needs inspection."""
+
+
+class BuilderFilterUnavailable(ValueError):
+    """A historical snapshot has no complete builder evidence."""
 
 
 class EventLeaderboardStore:
@@ -55,6 +60,9 @@ class EventLeaderboardStore:
                 CREATE TABLE IF NOT EXISTS snapshot_rows (
                     snapshot_id TEXT, wallet TEXT, payload TEXT NOT NULL,
                     PRIMARY KEY(snapshot_id,wallet));
+                CREATE TABLE IF NOT EXISTS snapshot_builder_rows (
+                    snapshot_id TEXT, builder TEXT, wallet TEXT, payload TEXT NOT NULL,
+                    PRIMARY KEY(snapshot_id,builder,wallet));
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(checkpoints)")}
             if "block_hash" not in columns:
@@ -83,7 +91,7 @@ class EventLeaderboardStore:
                          "ON c.event_id=d.event_id AND c.revision=d.revision WHERE c.event_id=?", (event_id,)).fetchone()
         if row is None:
             raise KeyError(event_id)
-        return replace(EventDefinition.from_dict(json.loads(row["definition"])), revision=row["revision"])
+        return replace(EventDefinition.from_dict(json.loads(row["definition"]), stored=True), revision=row["revision"])
 
     def register_event(self, definition: EventDefinition) -> EventDefinition:
         with self._connection(write=True) as db:
@@ -171,6 +179,13 @@ class EventLeaderboardStore:
                 row["tx_hash"] = str(row["tx_hash"]).lower()
                 row["block_hash"] = str(row["block_hash"]).lower()
                 row["pack_id"] = str(row["pack_id"])
+                if definition.checkout_schema_version >= 2:
+                    if definition.contract_schemas.get(row["pack_contract"]) == "v3":
+                        row["builder"] = builder_code(row.get("builder"))
+                    elif row.get("builder") is not None:
+                        raise ValueError("legacy checkout cannot claim a builder")
+                    else:
+                        row["builder"] = None
                 if (not row["tx_hash"] or not row["block_hash"] or row["chain_id"] != definition.chain_id
                         or row["pack_contract"] not in definition.contracts
                         or not definition.start_ts <= row["timestamp"] < definition.end_ts
@@ -226,54 +241,38 @@ class EventLeaderboardStore:
                 raise ValueError("cannot finalize before the event end is confirmed")
             aliases = dict(db.execute("SELECT old_wallet,new_wallet FROM aliases WHERE event_id=? AND revision=?",
                                       (event_id, definition.revision)))
-            def canonical(address):
-                while address in aliases:
-                    address = aliases[address]
-                return address
-            names = {wallet(key): str(value) for key, value in (usernames or {}).items() if value is not None}
-            totals = {}
-            for record in db.execute("SELECT payload FROM ledger WHERE event_id=? AND revision=?", (event_id, definition.revision)):
-                entry = json.loads(record[0])
-                if entry["block_number"] > through_block or entry["timestamp"] > through_at:
-                    raise ValueError("snapshot bound does not cover the committed ledger")
-                address = canonical(entry["wallet"])
-                current = totals.setdefault(address, {"draw_count": 0, "paid_amount_raw": 0, "aliases": set()})
-                current["draw_count"] += entry["draw_count"]
-                current["paid_amount_raw"] += int(entry["paid_amount_raw"])
-                current["aliases"].add(entry["wallet"])
-            for old in aliases:
-                address = canonical(old)
-                if address in totals:
-                    totals[address]["aliases"].add(old)
+            rankings = build_rankings((json.loads(record[0]) for record in db.execute(
+                "SELECT payload FROM ledger WHERE event_id=? AND revision=?", (event_id, definition.revision))),
+                definition=definition, aliases=aliases, usernames=usernames, through_block=through_block,
+                through_at=through_at, format_amount=self._amount)
             generated = int(time.time())
             snapshot_id = uuid.uuid4().hex
             metadata = {"event_id": event_id, "revision": definition.revision, "config_hash": definition.config_hash,
                         "start_at": iso_time(definition.start_ts), "end_at": iso_time(definition.end_ts),
                         "snapshot_id": snapshot_id, "generated_at": iso_time(generated),
                         "data_through_at": iso_time(through_at), "through_block": through_block,
-                        "total_participants": len(totals), "status": "final" if finalized else ("settling" if generated >= definition.end_ts else "live"),
+                        "total_participants": len(rankings[None]), "status": "final" if finalized else ("settling" if generated >= definition.end_ts else "live"),
                         "counting_rule": "confirmed_paid_checkout", "contracts": list(definition.contracts),
                         "chain_id": definition.chain_id, "token_decimals": definition.token_decimals,
-                        "ranking_rule": "competition_draw_count_desc_wallet_asc"}
+                        "ranking_rule": "competition_draw_count_desc_wallet_asc",
+                        "builder_filter_supported": definition.checkout_schema_version >= 2, "builder": None}
             seq = db.execute("SELECT COALESCE(MAX(created_seq),0)+1 FROM snapshots").fetchone()[0]
             db.execute("INSERT INTO snapshots VALUES (?,?,?,?,?)", (snapshot_id, event_id, definition.revision, seq, json.dumps(metadata)))
-            previous_count = None
-            rank = 0
-            for position, (address, total) in enumerate(sorted(totals.items(), key=lambda item: (-item[1]["draw_count"], item[0])), 1):
-                if total["draw_count"] != previous_count:
-                    rank = position
-                    previous_count = total["draw_count"]
-                frozen_aliases = sorted(total["aliases"] | {address})
-                username = names.get(address) or next((names[item] for item in frozen_aliases if names.get(item)), None)
-                row = {"rank": rank, "wallet": address, "username": username, "aliases": frozen_aliases,
-                       "draw_count": total["draw_count"], "paid_amount_raw": str(total["paid_amount_raw"]),
-                       "paid_amount": self._amount(total["paid_amount_raw"], definition.token_decimals)}
-                db.execute("INSERT INTO snapshot_rows VALUES (?,?,?)", (snapshot_id, address, json.dumps(row, ensure_ascii=False)))
+            for code, rows in rankings.items():
+                for row in rows:
+                    payload = json.dumps(row, ensure_ascii=False)
+                    if code is None:
+                        db.execute("INSERT INTO snapshot_rows VALUES (?,?,?)", (snapshot_id, row["wallet"], payload))
+                    else:
+                        db.execute("INSERT INTO snapshot_builder_rows VALUES (?,?,?,?)",
+                                   (snapshot_id, code, row["wallet"], payload))
             db.execute("INSERT INTO event_state VALUES (?,?,NULL,NULL) ON CONFLICT(event_id,revision) DO UPDATE SET last_error=NULL",
                        (event_id, definition.revision))
             return metadata
 
-    def read_snapshot(self, event_id, snapshot_id=None):
+    def read_snapshot(self, event_id, snapshot_id=None, *, builder=None):
+        if builder is not None:
+            builder = builder_code(builder)
         with self._connection() as db:
             definition = self._event(db, event_id)
             latest = db.execute("SELECT * FROM snapshots WHERE event_id=? AND revision=? ORDER BY created_seq DESC LIMIT 1",
@@ -299,5 +298,15 @@ class EventLeaderboardStore:
             if record is None:
                 return None, [], health
             metadata = json.loads(record["metadata"])
-            rows = [json.loads(row[0]) for row in db.execute("SELECT payload FROM snapshot_rows WHERE snapshot_id=?", (record["snapshot_id"],))]
+            metadata.setdefault("builder_filter_supported", False)
+            metadata["builder"] = builder
+            if builder is not None:
+                if not metadata["builder_filter_supported"]:
+                    raise BuilderFilterUnavailable("Snapshot has no complete builder evidence; refresh after the versioned rescan.")
+                rows = [json.loads(row[0]) for row in db.execute(
+                    "SELECT payload FROM snapshot_builder_rows WHERE snapshot_id=? AND builder=?",
+                    (record["snapshot_id"], builder))]
+                metadata["total_participants"] = len(rows)
+            else:
+                rows = [json.loads(row[0]) for row in db.execute("SELECT payload FROM snapshot_rows WHERE snapshot_id=?", (record["snapshot_id"],))]
             return metadata, rows, health

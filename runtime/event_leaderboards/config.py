@@ -29,7 +29,7 @@ def source_key(definition, contract: str) -> str:
     if contract not in definition.contracts:
         raise ValueError("contract outside event definition")
     schema = definition.contract_schemas[contract]
-    return f"checkout-v1:{definition.chain_id}:{contract}:{schema}:{AUDITED_CHECKOUT_TOPICS[schema]}"
+    return f"checkout-v{definition.checkout_schema_version}:{definition.chain_id}:{contract}:{schema}:{AUDITED_CHECKOUT_TOPICS[schema]}"
 
 
 def timestamp(value: str | int) -> int:
@@ -52,6 +52,13 @@ def wallet(value: str) -> str:
     return normalized
 
 
+def builder_code(value: str) -> str:
+    normalized = str(value).lower()
+    if not re.fullmatch(r"0x[0-9a-f]{64}", normalized):
+        raise ValueError("builder must be 0x followed by 64 hexadecimal characters")
+    return normalized
+
+
 @dataclass(frozen=True)
 class EventDefinition:
     event_id: str
@@ -63,12 +70,15 @@ class EventDefinition:
     revision: int = 1
     config_hash: str = ""
     contract_schemas: dict[str, str] = field(default_factory=dict)
+    checkout_schema_version: int = 2
 
     def __post_init__(self):
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", self.event_id):
             raise ValueError("invalid event_id")
         if self.end_ts <= self.start_ts or self.chain_id <= 0 or not 0 <= self.token_decimals <= 36:
             raise ValueError("invalid event definition")
+        if type(self.checkout_schema_version) is not int or self.checkout_schema_version not in {1, 2}:
+            raise ValueError("unsupported checkout schema version")
         contracts = tuple(sorted(set(wallet(item) for item in self.contracts)))
         if not contracts:
             raise ValueError("contracts cannot be empty")
@@ -84,15 +94,22 @@ class EventDefinition:
         object.__setattr__(self, "config_hash", hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest())
 
     def payload(self) -> dict:
-        return {key: value for key, value in asdict(self).items() if key not in {"revision", "config_hash"}}
+        content = {key: value for key, value in asdict(self).items() if key not in {"revision", "config_hash"}}
+        if self.checkout_schema_version == 1:
+            content.pop("checkout_schema_version")
+        return content
 
     @classmethod
-    def from_dict(cls, row: dict) -> "EventDefinition":
+    def from_dict(cls, row: dict, *, stored=False) -> "EventDefinition":
+        version = row.get("checkout_schema_version", 1 if stored else 2)
+        if not stored and version != 2:
+            raise ValueError("new activity configuration requires checkout schema version 2")
         return cls(event_id=row["event_id"], start_ts=timestamp(row.get("start_at", row.get("start_ts"))),
                    end_ts=timestamp(row.get("end_at", row.get("end_ts"))),
                    contracts=tuple(row.get("contracts", DEFAULT_PACK_CONTRACTS)),
                    chain_id=int(row.get("chain_id", 56)), token_decimals=int(row.get("token_decimals", 18)),
-                   revision=int(row.get("revision", 1)), contract_schemas=row.get("contract_schemas", {}))
+                   revision=int(row.get("revision", 1)), contract_schemas=row.get("contract_schemas", {}),
+                   checkout_schema_version=version)
 
 
 def load_event_definitions(path: str | None = None) -> list[EventDefinition]:
