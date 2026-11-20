@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -17,13 +18,23 @@ def enabled(name: str, default=False):
     return os.getenv(name, '1' if default else '0').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
-def backup_due(interval):
+def backup_remaining(interval):
+    """Seconds until the last successful backup expires; failed/incomplete backups remain due."""
     path = Path(os.getenv('TCG_BACKUP_SOURCE', '/data')) / '.tcg-drive-backup' / 'status.json'
     try:
         status = json.loads(path.read_text())
-        return status.get('phase') != 'complete' or time.time() - float(status['updatedAt']) >= interval
+        if not isinstance(status, dict) or status.get('phase') != 'complete':
+            return 0
+        completed_at = float(status['updatedAt'])
+        if not math.isfinite(completed_at):
+            raise ValueError('invalid backup completion time')
+        return max(0, interval - (time.time() - completed_at))
     except (OSError, ValueError, KeyError, TypeError):
-        return True
+        return 0
+
+
+def backup_due(interval):
+    return backup_remaining(interval) == 0
 
 
 async def run_command(name, script, args, timeout):
@@ -50,8 +61,13 @@ async def run_command(name, script, args, timeout):
 async def periodic(name, script, args, interval, timeout, skip_until_due=False):
     while True:
         try:
-            if not skip_until_due or backup_due(interval):
-                await run_command(name, script, args, timeout)
+            if skip_until_due:
+                remaining = backup_remaining(interval)
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                    # A manual backup may have succeeded while this job was waiting.
+                    continue
+            await run_command(name, script, args, timeout)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
