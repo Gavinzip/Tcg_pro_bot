@@ -243,6 +243,13 @@ async def handle_market_bootstrap(
         await interaction.followup.send(summary_msg, ephemeral=True)
         return
 
+    if os.getenv("BACKUP_GIT_ENABLED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        await interaction.followup.send(
+            summary_msg + "\nGit 資料備份已停用；Drive 備份請查看獨立備份狀態。",
+            ephemeral=True,
+        )
+        return
+
     await interaction.followup.send(summary_msg + "\n⏳ 正在觸發備份推送...", ephemeral=True)
     backup_ok = await run_ranking_sync_script(
         "market_bootstrap",
@@ -266,6 +273,12 @@ async def handle_market_push_backup(
     *,
     deps: dict,
 ) -> None:
+    if os.getenv("BACKUP_GIT_ENABLED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        await interaction.response.send_message(
+            "Git 資料備份已停用；Drive 備份請查看獨立備份狀態。",
+            ephemeral=True,
+        )
+        return
     run_ranking_sync_script = deps["run_ranking_sync_script"]
 
     await interaction.response.send_message(

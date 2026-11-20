@@ -1056,10 +1056,12 @@ def _fetch_event_logs_page(
 
             message = str(data.get("message") or "").strip()
             result = data.get("result")
+            if isinstance(result, list):
+                if any(not isinstance(row, dict) for row in result):
+                    raise RuntimeError("bscscan logs malformed records")
+                return result
             if message == "No records found":
                 return []
-            if isinstance(result, list):
-                return [x for x in result if isinstance(x, dict)]
             if isinstance(result, str):
                 lowered = result.lower()
                 if "no records found" in lowered or "no transactions found" in lowered:

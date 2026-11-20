@@ -48,6 +48,9 @@ class BbwMetricsRateLimitTests(unittest.TestCase):
             self.request_times.append(now)
 
         action = params["action"]
+        if action == "getblocknobytime":
+            self.assertEqual(params["closest"], "before")
+            return self.response({"status": "1", "message": "OK", "result": "134000000"})
         if action == "token1155tx":
             self.assertEqual(params["offset"], 1000)
             rows = [{"from": "0x" + "0" * 40, "to": params["address"], "timeStamp": "1700000000",
@@ -62,7 +65,7 @@ class BbwMetricsRateLimitTests(unittest.TestCase):
             rows = []
         else:
             rows = [{"transactionHash": self.tx_hash, "logIndex": "0x1", "address": self.contract,
-                     "topics": [params["topic0"], params["topic1"]], "data": f"0x{self.amount:064x}"}]
+                     "topics": [params["topic0"], params["topic1"], "0x" + "2" * 64], "data": f"0x{self.amount:064x}"}]
         return self.response({"status": "1", "message": "OK", "result": rows})
 
     def test_full_usdt_window_is_not_reported_as_complete(self):
@@ -72,6 +75,25 @@ class BbwMetricsRateLimitTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "metrics_provider_page_limit"):
                 metrics._pack_payments(self.lookup.chain, wallet, 1_800_000_000)
         fetch_page.assert_called_once_with(self.lookup.chain, wallet, page=1, sort="asc", offset=10_000)
+
+    def test_slow_success_keeps_a_full_cache_lifetime_after_completion(self):
+        wallet = f"0x{1:040x}"
+        clock = [1_800_000_000.0]
+        result = (HTTPStatus.OK, {"sbtCount": 150, "paidPackSpendUsdt": "123.45"})
+
+        def slow_compute(*_):
+            clock[0] += metrics.SBT_AND_SPEND_CACHE_TTL + 30
+            return result
+
+        with (patch.object(metrics.time, "time", side_effect=lambda: clock[0]),
+              patch.object(self.lookup, "_compute", side_effect=slow_compute) as compute):
+            self.assertEqual(self.lookup.lookup(wallet), result)
+            clock[0] += metrics.SBT_AND_SPEND_CACHE_TTL - 1
+            self.assertEqual(self.lookup.lookup(wallet), result)
+            self.assertEqual(compute.call_count, 1)
+            clock[0] += 2
+            self.assertEqual(self.lookup.lookup(wallet), result)
+            self.assertEqual(compute.call_count, 2)
 
 
     def test_simultaneous_wallets_stay_below_provider_limit_and_keep_totals(self):

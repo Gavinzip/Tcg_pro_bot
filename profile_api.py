@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 from runtime.bbw_community_metrics import BbwCommunityMetrics
 from runtime.profile_data import normalize_wallet_address
+from runtime.profile_api_auth import authorized, load_leaderboard_client_tokens
 from runtime.profile_job_lock import ProfileJobLockTimeout, profile_job_lock
 from runtime.profile_lookup_worker import (
     ProfileLookupWorker,
@@ -29,6 +30,9 @@ load_dotenv()
 HOST = str(os.getenv("PROFILE_API_HOST", "0.0.0.0") or "0.0.0.0").strip()
 PORT = max(1, int(os.getenv("PROFILE_API_PORT", os.getenv("PORT", "8091")) or "8091"))
 API_TOKEN = str(os.getenv("PROFILE_API_TOKEN", "") or "").strip()
+LEADERBOARD_CLIENT_TOKENS = load_leaderboard_client_tokens(
+    os.getenv("EVENT_LEADERBOARD_CLIENT_TOKENS_JSON"), profile_token=API_TOKEN,
+)
 CACHE_TTL_SECONDS = max(0, int(os.getenv("PROFILE_API_CACHE_TTL_SECONDS", "300") or "300"))
 CACHE_MAX_ENTRIES = max(1, int(os.getenv("PROFILE_API_CACHE_MAX_ENTRIES", "256") or "256"))
 MAX_CONCURRENT_LOOKUPS = max(1, int(os.getenv("PROFILE_API_MAX_CONCURRENT_LOOKUPS", "2") or "2"))
@@ -49,6 +53,8 @@ _INFLIGHT_LOCK = threading.Lock()
 _INFLIGHT: dict[str, dict[str, Any]] = {}
 _PROFILE_WORKER = ProfileLookupWorker()
 _COMMUNITY_METRICS = BbwCommunityMetrics(os.environ)
+_EVENT_CONTROLLER = None
+_EVENT_CONTROLLER_LOCK = threading.Lock()
 
 
 def _env_true(value: str | None, default: bool = False) -> bool:
@@ -56,6 +62,16 @@ def _env_true(value: str | None, default: bool = False) -> bool:
     if not text:
         return default
     return text in {"1", "true", "yes", "on"}
+
+
+def _event_leaderboard_response(path, query):
+    global _EVENT_CONTROLLER
+    if _EVENT_CONTROLLER is None:
+        with _EVENT_CONTROLLER_LOCK:
+            if _EVENT_CONTROLLER is None:
+                from runtime.event_leaderboards.http import EventLeaderboardHTTP
+                _EVENT_CONTROLLER = EventLeaderboardHTTP()
+    return _EVENT_CONTROLLER.dispatch(path, query)
 
 
 def _publish_inflight(cache_key: str, inflight: dict[str, Any]) -> None:
@@ -81,10 +97,10 @@ class ProfileApiHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
 
-    def _authorized(self) -> bool:
-        if not API_TOKEN:
-            return True
-        return str(self.headers.get("Authorization") or "").strip() == f"Bearer {API_TOKEN}"
+    def _authorized(self, *, leaderboard: bool = False) -> bool:
+        return authorized(self.headers.get("Authorization"), profile_token=API_TOKEN,
+                          leaderboard_clients=LEADERBOARD_CLIENT_TOKENS,
+                          leaderboard=leaderboard)
 
     def do_POST(self) -> None:  # noqa: N802
         if urlparse(self.path).path != "/v1/bbw-community-metrics":
@@ -126,6 +142,25 @@ class ProfileApiHandler(BaseHTTPRequestHandler):
                     "total_timeout_seconds": TOTAL_TIMEOUT_SECONDS,
                 },
             )
+            return
+        if path.startswith("/v1/leaderboards/"):
+            if not _env_true(os.getenv("EVENT_LEADERBOARD_API_ENABLED"), False):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                return
+            if not self._authorized(leaderboard=True):
+                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+                return
+            try:
+                result = _event_leaderboard_response(path, parse_qs(parsed.query, keep_blank_values=True))
+            except Exception as exc:
+                print(f"[leaderboard-api] failed type={type(exc).__name__}", flush=True)
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "leaderboard_unavailable"})
+                return
+            if result is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+            else:
+                status, payload = result
+                self._send_json(status, payload)
             return
         if path != "/v1/profile":
             self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})

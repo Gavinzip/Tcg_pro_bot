@@ -771,7 +771,7 @@
       <div class="glass-card stat-card">
         <div class="stat-label-row">
           <div class="stat-label">{{ metric_total_spent_label }}</div>
-          <div class="rank-chip rank-{{ metric_total_spent_rank_tier }}">{{ metric_total_spent_rank }}</div>
+          {% if legacy_ranks_enabled %}<div class="rank-chip rank-{{ metric_total_spent_rank_tier }}">{{ metric_total_spent_rank }}</div>{% endif %}
         </div>
         <div class="stat-note">({{ metric_total_spent_note }})</div>
         <div class="stat-value usdt metal-red">{{ metric_total_spent_value }}</div>
@@ -779,7 +779,7 @@
       <div class="glass-card stat-card">
         <div class="stat-label-row">
           <div class="stat-label">{{ metric_assets_value_label }}</div>
-          <div class="rank-chip rank-{{ metric_assets_value_rank_tier }}">{{ metric_assets_value_rank }}</div>
+          {% if legacy_ranks_enabled %}<div class="rank-chip rank-{{ metric_assets_value_rank_tier }}">{{ metric_assets_value_rank }}</div>{% endif %}
         </div>
         <div class="stat-value usdt metal-gold">{{ metric_assets_value_value }}</div>
       </div>
@@ -799,7 +799,7 @@
       <div class="glass-card stat-card">
         <div class="stat-label-row">
           <div class="stat-label">{{ metric_net_label }}</div>
-          <div class="rank-chip rank-{{ metric_net_rank_tier }}">{{ metric_net_rank }}</div>
+          {% if legacy_ranks_enabled %}<div class="rank-chip rank-{{ metric_net_rank_tier }}">{{ metric_net_rank }}</div>{% endif %}
         </div>
         <div class="stat-note">({{ metric_net_note }})</div>
         <div class="stat-value net-gold metal-gold">{{ metric_net_value }}</div>
@@ -845,14 +845,14 @@
           <div class="rank-summary-item">
             <div class="rank-summary-head">
               <div class="rank-summary-label">{{ metric_trade_volume_label }}</div>
-              <div class="rank-chip rank-{{ metric_trade_volume_rank_tier }}">{{ metric_trade_volume_rank }}</div>
+              {% if legacy_ranks_enabled %}<div class="rank-chip rank-{{ metric_trade_volume_rank_tier }}">{{ metric_trade_volume_rank }}</div>{% endif %}
             </div>
             <div class="rank-summary-value usdt metal-gold">{{ metric_trade_volume_value }}</div>
           </div>
           <div class="rank-summary-item">
             <div class="rank-summary-head">
               <div class="rank-summary-label">{{ metric_sbt_label }}</div>
-              <div class="rank-chip rank-{{ metric_sbt_rank_tier }}">{{ metric_sbt_rank }}</div>
+              {% if legacy_ranks_enabled %}<div class="rank-chip rank-{{ metric_sbt_rank_tier }}">{{ metric_sbt_rank }}</div>{% endif %}
             </div>
             <div class="rank-summary-value metal-gold">{{ metric_sbt_value }}</div>
           </div>
@@ -868,7 +868,7 @@
           <div class="activity-item activity-item-days">
             <div class="activity-name-row">
               <div class="activity-name">{{ active_days_label }}</div>
-              <div class="rank-chip rank-{{ active_days_rank_tier }}">{{ active_days_rank }}</div>
+              {% if legacy_ranks_enabled %}<div class="rank-chip rank-{{ active_days_rank_tier }}">{{ active_days_rank }}</div>{% endif %}
             </div>
             <div class="activity-count activity-count-gold">{{ active_days_value }}</div>
           </div>
