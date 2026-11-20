@@ -4,11 +4,11 @@ The activity is one finite interval, not a repeating daily/monthly/yearly rankin
 
 The Profile API serves these routes through its existing authentication. Supply its configured bearer token when enabled. Responses must not use long-lived HTTP caches. Machine-readable contract: [OpenAPI](EVENT_LEADERBOARD_OPENAPI.yaml).
 
-The [checkout evidence extension](EVENT_CHECKOUT_EVIDENCE.md) adds frozen per-checkout pack/builder/payment evidence for campaign reward calculation and preserves complete-block progress across hard job deadlines. Its local implementation is not yet deployed; existing draw-count leaderboard semantics are unchanged.
+The [checkout evidence extension](EVENT_CHECKOUT_EVIDENCE.md) adds frozen per-checkout pack/builder/payment evidence for campaign reward calculation and preserves complete-block progress across hard job deadlines. It is deployed as `733a925`; [production release verification](EVENT_LEADERBOARD_RELEASE_2026_11_21.md) covers the complete schema-v2 snapshot and live HTTP/consumer checks. Existing draw-count leaderboard semantics are unchanged.
 
 The separate website-token implementation is documented in [API client tokens](API_CLIENT_TOKENS.md). It requires deploying the updated server and configuring `EVENT_LEADERBOARD_CLIENT_TOKENS_JSON`; the two website credentials are not provisioned merely by adding this code. They authorize only leaderboard GET routes, while the existing internal `PROFILE_API_TOKEN` retains its original access.
 
-The website credentials were verified live on 2026-11-20 with release b02f13f. The [builder-filter extension](EVENT_LEADERBOARD_BUILDER.md) cda79f2 was deployed on Railway at 10:35 UTC the same day. Its initial bounded rebuild is in progress: the latest scoped request returns 202 without rows; an old snapshot is readable unfiltered (200), but returns 409 when filtered. Complete scoped results and live cursor/search acceptance remain pending the first rebuilt snapshot. Filtering precedes aggregation; snapshot_id plus builder pins a scope and cursors bind it. Search ranks remain global within that builder.
+Website-scoped credentials and the [builder-filter extension](EVENT_LEADERBOARD_BUILDER.md) are live. The November 20 finite activity's schema-v2 rebuild completed on November 21 at 01:46 Taipei time: snapshot `3140f6689c664479a7a24892899c7107` is final, with 407 wallets, 3,607 verified paid checkouts and 7,568 draws. Complete scoped results, cursor/search and frozen checkout reads passed live checks. Filtering precedes aggregation; snapshot_id plus builder pins a scope and cursors bind it. Search ranks remain global within that builder. Historical snapshots lacking builder evidence still return 409 when filtered.
 
 ## Counting and ranking
 

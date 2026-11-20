@@ -1,5 +1,7 @@
 # 依 builder code 查詢平台來源
 
+**目前狀態（台北 2026-11-21 01:47）**：733a925 已部署，首次 schema-v2 有限活動補掃完成。快照 `3140f6689c664479a7a24892899c7107` 為 final，407 個錢包、3,607 筆實付 checkout、7,568 抽，五個來源到界、last_error=null。三個 builder 的全量／分頁／搜尋與 checkout 證據已完成正式驗證，詳見[發布驗證](EVENT_LEADERBOARD_RELEASE_2026_11_21.md)。以下帶時間的初始部署／診斷記錄保留為歷史，並非目前就緒狀態。
+
 2026-11-20 18:35（台北）：builder 擴充 cda79f2 已推送，並透過 Railway 網頁部署成功。兩網站獨立 token 沿用；首次有限期間補掃仍在進行，尚未發布支援 builder 的完整快照。
 
 18:44 正式驗證：範例活動 revision=2、state=catching_up、last_error=null；最新帶 builder 查詢回 202 並回顯相同 builder，沒有 rows。舊快照不帶 builder 回 200、帶 builder 回 409；錯誤格式回 400。這些是部署與保護行為的驗證，完整平台成績與分頁／搜尋結果仍須待新快照發布後驗證。接入方須核對 builder_filter_supported=true 與回顯，不能因接口接受 query 就認定資料已完整。

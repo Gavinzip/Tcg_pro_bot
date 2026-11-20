@@ -1,6 +1,6 @@
 # Checkout evidence and restart progress
 
-Local implementation on `codex/campaign-rewards-scan`, based on production `fb10bf9`. Not uploaded or deployed yet.
+Implemented on `codex/campaign-rewards-scan` from `fb10bf9`, pushed to the existing deployment branch and deployed as `733a925`. The first complete schema-v2 snapshot and live consumer checks passed; see [production release verification](EVENT_LEADERBOARD_RELEASE_2026_11_21.md).
 
 `GET /v1/leaderboards/{event_id}/checkouts` reuses website-specific read authentication. It returns only the paid checkout ledger frozen atomically with a complete snapshot. Parameters: `snapshot_id`, `builder`, `cursor`, `limit` (1–1000, default 1000). No arbitrary wallet or source override, chain request, social mutation or secret is exposed.
 
