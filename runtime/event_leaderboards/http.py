@@ -1,0 +1,124 @@
+"""Read-only HTTP controller; the hosting Profile API retains authentication."""
+from __future__ import annotations
+
+import base64
+import json
+from urllib.parse import parse_qs, unquote, urlsplit
+
+from .config import load_event_definitions
+from .store import EventLeaderboardStore
+
+SORT_FIELDS = {"rank", "draw_count", "wallet", "username", "paid_amount"}
+
+
+def _one(query, name, default=None):
+    value = query.get(name, default)
+    if isinstance(value, (list, tuple)):
+        if len(value) != 1:
+            raise ValueError("parameter must occur exactly once: " + name)
+        return value[0]
+    return value
+
+
+def _cursor(payload):
+    return base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+
+
+def _decode_cursor(raw):
+    if len(raw) > 4096:
+        raise ValueError("invalid cursor")
+    try:
+        value = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4), altchars=b"-_", validate=True))
+        if (not isinstance(value, dict) or set(value) != {"snapshot_id", "sort", "order", "offset", "q"}
+                or not isinstance(value["offset"], int) or isinstance(value["offset"], bool) or value["offset"] < 0
+                or not isinstance(value["snapshot_id"], str)):
+            raise ValueError()
+        return value
+    except (ValueError, TypeError, UnicodeError) as exc:
+        raise ValueError("invalid cursor") from exc
+
+
+class EventLeaderboardHTTP:
+    def __init__(self, store=None):
+        self.store = store or EventLeaderboardStore()
+        if not self.store.list_events():
+            for definition in load_event_definitions():
+                self.store.register_event(definition)
+
+    def handle_request(self, path, query=None):
+        return self.dispatch(path, query)
+
+    def dispatch(self, path, query=None):
+        parsed = urlsplit(path)
+        if not parsed.path.startswith("/v1/leaderboards/"):
+            return None
+        pieces = parsed.path.removeprefix("/v1/leaderboards/").split("/")
+        if len(pieces) not in (1, 2) or (len(pieces) == 2 and pieces[1] != "search") or not pieces[0]:
+            return 404, {"error": "not_found"}
+        event_id = unquote(pieces[0])
+        query = parse_qs(parsed.query, keep_blank_values=True) if query is None else query
+        search = len(pieces) == 2
+        try:
+            self.store.get_event(event_id)
+            snapshot_id = _one(query, "snapshot_id")
+            sort = _one(query, "sort", "rank")
+            order = _one(query, "order", "asc")
+            if sort not in SORT_FIELDS or order not in {"asc", "desc"}:
+                raise ValueError("invalid sort or order")
+            limit = int(_one(query, "limit", "100"))
+            if not 1 <= limit <= 1000:
+                raise ValueError("limit must be between 1 and 1000")
+            all_value = _one(query, "all", "false")
+            if all_value not in {"true", "false"}:
+                raise ValueError("all must be true or false")
+            all_rows = all_value == "true"
+            q = _one(query, "q", "").strip() if search else ""
+            if search and (not q or len(q) > 200):
+                raise ValueError("search requires q between 1 and 200 characters")
+            raw_cursor = _one(query, "cursor")
+            offset = 0
+            if raw_cursor:
+                if all_rows:
+                    raise ValueError("all=true cannot be combined with cursor")
+                cursor = _decode_cursor(raw_cursor)
+                if (snapshot_id and snapshot_id != cursor["snapshot_id"]) or any(
+                    cursor[key] != value for key, value in (("sort", sort), ("order", order), ("q", q.casefold()))):
+                    raise ValueError("cursor does not match snapshot or query")
+                snapshot_id, offset = cursor["snapshot_id"], cursor["offset"]
+            if search and not snapshot_id:
+                raise ValueError("search requires snapshot_id from the leaderboard response")
+            metadata, rows, health = self.store.read_snapshot(event_id, snapshot_id)
+            if metadata is None:
+                return (503 if health["last_error"] else 202), {
+                    "event_id": event_id, "snapshot_id": None, "status": "initializing", **health,
+                    "message": "No complete confirmed scan has been published yet."}
+            if search:
+                needle = q.casefold()
+                rows = [row for row in rows if needle in (row["username"] or "").casefold()
+                        or any(needle in address for address in row["aliases"])]
+            # Stable wallet tie order is independent of client sort direction.
+            rows.sort(key=lambda row: row["wallet"])
+            def sort_key(row):
+                if sort == "paid_amount":
+                    return int(row["paid_amount_raw"])
+                if sort == "username":
+                    return (row["username"] or "").casefold()
+                return row[sort]
+            rows.sort(key=sort_key, reverse=order == "desc")
+            if offset > len(rows):
+                raise ValueError("cursor offset outside snapshot")
+            selected = rows if all_rows else rows[offset:offset + limit]
+            next_offset = offset + len(selected)
+            next_cursor = None if all_rows or next_offset >= len(rows) else _cursor({
+                "snapshot_id": metadata["snapshot_id"], "sort": sort, "order": order,
+                "offset": next_offset, "q": q.casefold()})
+            return 200, {**metadata, **health, "sort": sort, "order": order, "rows": selected,
+                         "total_matches": len(rows), "next_cursor": next_cursor}
+        except KeyError:
+            return 404, {"error": "unknown_event", "event_id": event_id}
+        except (ValueError, TypeError) as exc:
+            return 400, {"error": "invalid_request", "message": str(exc)}
+
+
+def handle_request(path, query=None, store=None):
+    return EventLeaderboardHTTP(store).dispatch(path, query)

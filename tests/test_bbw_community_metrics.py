@@ -49,7 +49,8 @@ class BbwMetricsRateLimitTests(unittest.TestCase):
 
         action = params["action"]
         if action == "getblocknobytime":
-            return self.response({"status": "1", "result": "100000000"})
+            self.assertEqual(params["closest"], "before")
+            return self.response({"status": "1", "message": "OK", "result": "134000000"})
         if action == "token1155tx":
             self.assertEqual(params["offset"], 1000)
             rows = [{"from": "0x" + "0" * 40, "to": params["address"], "timeStamp": "1700000000",
