@@ -13,7 +13,7 @@
 
 2026-11-20 已完成兩網站獨立憑證的正式部署與驗證：兩組各自可讀排行榜／搜尋，不能讀 Profile／BBW。server-only 變數為 `TCG_LEADERBOARD_API_TOKEN`，Header 格式不變，詳見 [網站 token 分工與部署](API_CLIENT_TOKENS.md)。原先分享的舊項目仍屬內部共用憑證，合作方應使用新的專用項目。
 
-新增的 [builder 平台來源篩選](EVENT_LEADERBOARD_BUILDER.md) 為後續本機變更，尚未部署。正式 b02f13f 不具備此篩選，接入方須核對回顯與支援旗標。
+[builder 平台來源篩選](EVENT_LEADERBOARD_BUILDER.md) cda79f2 已於 2026-11-20 18:35（台北）部署；首次有限期間補掃進行中，最新榜暫回 202，尚未發布支援 builder 的完整快照。接入方須核對回顯與支援旗標；不能把準備中當成零人榜。舊快照不帶 builder 仍可查，帶 builder 回 409。
 
 範例活動 `event_id=2026-11-20`：台北時間 2026-11-20 00:00（含）至 2026-11-21 00:00（不含）。活動 ID 必須由後端預先設定，不能任填日期，也不能在查詢時帶 start/end 自行改期間。
 
@@ -31,7 +31,7 @@
 | name | 位置／型別 | 必填與預設 | description |
 | --- | --- | --- | --- |
 | `event_id` | path / string | 必填 | 已設定的活動識別碼。 |
-| `builder` | query / string | 可省略 | 新版平台來源篩選：0x 加 64 hex，下一頁可由 cursor 攜帶；尚待正式部署。 |
+| `builder` | query / string | 可省略 | 平台來源篩選：0x 加 64 hex，下一頁可由 cursor 攜帶；首次須等待完整快照。 |
 | `snapshot_id` | query / string | 榜單可省略；搜尋首次必填 | 榜單省略時取目前設定版本最新成功快照；搜尋續頁可由 cursor 攜帶。 |
 | `q` | query / string | 搜尋每次必填 | 去除首尾空白後 1–200 字；地址／別名／名稱不分大小寫子字串搜尋。搜尋翻頁仍須帶同一 q。 |
 | `limit` | query / integer | 預設 100 | 每頁 1–1000 人。 |
@@ -140,5 +140,5 @@ Authorization: Bearer <TCG_LEADERBOARD_API_TOKEN>
 ## 本次交接檢查
 
 - 2026-11-20：現行 API health 回 200；未授權榜單請求回 401。
-- 文件依 codex/tcg-drive-backup 的 d214be3 版程式核對；此交接文件為其後新增文件，不代表已部署新功能。
+- 正式程式固定 cda79f2；46 個相關本機測試通過。部署後已核對初次 202、舊快照未篩選 200／篩選 409、builder 格式錯誤 400；新完整快照的成績與游標／搜尋驗證尚待首次補掃完成。
 - 正式交接使用 https://tcg-api.up.railway.app；原長網址暫時保留，兩者連至同一 API 服務，既有接入方可持續使用。

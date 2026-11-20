@@ -1,6 +1,8 @@
 # 依 builder code 查詢平台來源
 
-2026-11-20：builder 擴充已完成本機實作與測試，尚未部署。正式 b02f13f 已支援兩網站獨立 token，但不支援 builder 篩選；不能因舊版接受未知 query，就認定資料已篩選。
+2026-11-20 18:35（台北）：builder 擴充 cda79f2 已推送，並透過 Railway 網頁部署成功。兩網站獨立 token 沿用；首次有限期間補掃仍在進行，尚未發布支援 builder 的完整快照。
+
+18:44 正式驗證：範例活動 revision=2、state=catching_up、last_error=null；最新帶 builder 查詢回 202 並回顯相同 builder，沒有 rows。舊快照不帶 builder 回 200、帶 builder 回 409；錯誤格式回 400。這些是部署與保護行為的驗證，完整平台成績與分頁／搜尋結果仍須待新快照發布後驗證。接入方須核對 builder_filter_supported=true 與回顯，不能因接口接受 query 就認定資料已完整。
 
 ## 用途與接口
 
