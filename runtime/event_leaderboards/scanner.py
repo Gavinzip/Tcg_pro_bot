@@ -19,6 +19,7 @@ import urllib.request
 
 from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC
 from .config import AUDITED_CHECKOUT_TOPICS, source_key
+from .provider_errors import classify_failure, safe_diagnostic
 
 USDT = "0x55d398326f99059ff775485246999027b3197955"
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -34,6 +35,10 @@ _HASH = re.compile(r"0x[0-9a-f]{64}\Z")
 
 class SourceIncomplete(RuntimeError):
     """Evidence is unavailable, malformed, inconsistent, or unsupported."""
+
+    def __init__(self, code, *, diagnostic=None):
+        super().__init__(code)
+        self.diagnostic = diagnostic
 
 
 def number(value):
@@ -109,11 +114,14 @@ class EtherscanProvider:
                 time.sleep(delay)
             self._next = time.monotonic() + self.spacing
         query = dict(chainid=self.chain_id, module=module, action=action, apikey=self.api_key, **params)
+        started, stage = time.monotonic(), "connect"
         try:
             with urllib.request.urlopen(self.api_url + "?" + urllib.parse.urlencode(query), timeout=self.timeout) as response:
+                stage = "read_json"
                 data = json.load(response)
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-            raise SourceIncomplete("provider_transport_failure") from None
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+            raise SourceIncomplete(classify_failure(error, stage=stage), diagnostic=safe_diagnostic(
+                module, action, params, (time.monotonic() - started) * 1000, error, stage=stage)) from None
         if not isinstance(data, dict) or data.get("error"):
             raise SourceIncomplete("provider_invalid_response")
         result = data.get("result")
@@ -416,5 +424,7 @@ class EventLeaderboardScanner:
             # Error class/code only: provider URLs and credentials cannot leak to API/logs.
             code = str(error) if isinstance(error, SourceIncomplete) else type(error).__name__
             progress.update(state="stale", error=code)
+            if isinstance(error, SourceIncomplete) and error.diagnostic:
+                progress["error_details"] = error.diagnostic
             self.store.record_failure(event_id, code, progress=progress)
             return progress

@@ -4,6 +4,10 @@
 
 18:44 正式驗證：範例活動 revision=2、state=catching_up、last_error=null；最新帶 builder 查詢回 202 並回顯相同 builder，沒有 rows。舊快照不帶 builder 回 200、帶 builder 回 409；錯誤格式回 400。這些是部署與保護行為的驗證，完整平台成績與分頁／搜尋結果仍須待新快照發布後驗證。接入方須核對 builder_filter_supported=true 與回顯，不能因接口接受 query 就認定資料已完整。
 
+19:08 更新：後續兩輪正常補掃均遇到 `provider_transport_failure`，最新榜暫回 503；checkpoint 已提交部分保留，尚無新完整快照。DNS 回 NOERROR、網路紀錄未見 dropCause，不足以排除 TLS／HTTP／逾時。19:12 在容器內用同來源與原速率重查 b289 的下一段 logs 及 checkpoint 錨點，共兩個請求均成功，錨點雜湊相符；不能據此認定先前失敗已解決。
+
+本機後續診斷修正（尚未 push／部署）：原本混為一類的請求錯誤分為 `provider_http_<status>`、`provider_timeout`、`provider_dns_failure`、`provider_tls_verification_failure`、`provider_tls_failure`、`provider_invalid_json`、`provider_invalid_request`、`provider_connection_failure`。失敗時的 `progress.error_details` 僅允許 module/action、階段、耗時、HTTP 狀態及數字區塊範圍；不保存 URL、金鑰、請求／回應內容或原始例外文字。維持單次請求、原來源、速率與 checkpoint 流程；25 個分類／scanner 回歸測試通過。此修改只改善診斷，不宣稱已修復上游連線。
+
 ## 用途與接口
 
 同一抽卡合約可由多個平台呼叫。V3 CheckoutSuccess 的 indexed builder（topics[3]）辨識平台來源，packId 辨識卡機，實際付款另外核對。兩個既有 GET 端點新增可選 builder query：0x 加 64 個 hex 字元，輸入可用大小寫，回應統一小寫。
