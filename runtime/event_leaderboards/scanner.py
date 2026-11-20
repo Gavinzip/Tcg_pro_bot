@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import replace
+from itertools import groupby
 import json
 import os
 import re
@@ -364,6 +365,11 @@ class EventLeaderboardScanner:
         try:
             snapshot, _, _ = self.store.read_snapshot(event_id)
             if snapshot and snapshot.get("status") == "final":
+                if not snapshot.get('checkout_evidence_supported'):
+                    # Add the new immutable evidence format from the already
+                    # complete, anchored ledger; never rescan a finalized event.
+                    snapshot = self.store.publish_snapshot(event_id,snapshot['through_block'],
+                        snapshot['data_through_at'],finalized=True,usernames=usernames,expected_revision=definition.revision)
                 return dict(progress, state="finalized", snapshot=snapshot)
             if definition.chain_id != 56 or definition.token_decimals != 18:
                 raise SourceIncomplete("unsupported_chain_or_decimals")
@@ -411,21 +417,32 @@ class EventLeaderboardScanner:
                 while next_block <= bound and used < self.max_chunks:
                     end = min(bound, next_block + self.chunk_blocks - 1)
                     logs = complete_logs(self.provider, contract, topic, next_block, end)
-                    checkouts = []
-                    for log in logs:
-                        tx_hash, index = identity(log)
-                        if tx_hash not in receipts:
-                            receipts[tx_hash] = verified_receipt_checkouts(self.provider, tx_hash, schemas)
-                        row = receipts[tx_hash].get((tx_hash, index))
-                        candidate = decode_checkout(log, schema)
-                        if (row is None or candidate["paid_amount_raw"] != row.get("checkout_event_amount_raw", row["paid_amount_raw"])
-                                or any(candidate[k] != row[k] for k in ("wallet", "draw_count", "pack_id", "builder", "block_hash", "block_number", "checkout_ids"))):
-                            raise SourceIncomplete("indexed_log_receipt_mismatch")
-                        if definition.start_ts <= row["timestamp"] < definition.end_ts and row["paid_amount_raw"] > 0:
-                            checkouts.append(dict(row, chain_id=definition.chain_id))
-                    self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
-                                            end + 1, checkouts, block_hash=self.provider.block(end)["hash"], expected_revision=definition.revision)
-                    checkpoint = {"next_block": end + 1}
+                    # getLogs is complete for the whole range. Commit each fully
+                    # verified block as an anchored prefix; a hard job deadline
+                    # must not discard twenty minutes of completed receipts.
+                    # Never checkpoint inside a block or before all its logs pass.
+                    for block_number, block_logs in groupby(logs, key=lambda log: number(log["blockNumber"])):
+                        checkouts = []
+                        for log in block_logs:
+                            tx_hash, index = identity(log)
+                            if tx_hash not in receipts:
+                                receipts[tx_hash] = verified_receipt_checkouts(self.provider, tx_hash, schemas)
+                            row = receipts[tx_hash].get((tx_hash, index))
+                            candidate = decode_checkout(log, schema)
+                            if (row is None or candidate["paid_amount_raw"] != row.get("checkout_event_amount_raw", row["paid_amount_raw"])
+                                    or any(candidate[k] != row[k] for k in ("wallet", "draw_count", "pack_id", "builder", "block_hash", "block_number", "checkout_ids"))):
+                                raise SourceIncomplete("indexed_log_receipt_mismatch")
+                            if definition.start_ts <= row["timestamp"] < definition.end_ts and row["paid_amount_raw"] > 0:
+                                checkouts.append(dict(row, chain_id=definition.chain_id))
+                        self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
+                                                block_number + 1, checkouts, block_hash=self.provider.block(block_number)["hash"], expected_revision=definition.revision)
+                        checkpoint = {"next_block": block_number + 1}
+                        progress["sources"][source] = {"next_block": block_number + 1, "complete": block_number >= bound}
+                        self.store.set_progress(event_id, progress)
+                    if checkpoint is None or checkpoint["next_block"] <= end:
+                        self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
+                                                end + 1, [], block_hash=self.provider.block(end)["hash"], expected_revision=definition.revision)
+                        checkpoint = {"next_block": end + 1}
                     next_block, used = end + 1, used + 1
                 progress["sources"][source] = {"next_block": next_block, "complete": next_block > bound}
                 self.store.set_progress(event_id, progress)

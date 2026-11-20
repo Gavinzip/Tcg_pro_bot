@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Finite activity leaderboard
-  version: 1.1.0
+  version: 1.2.0
   description: Immutable snapshots of every participant's confirmed actually-paid successful draws.
 servers:
   - url: https://tcg-api.up.railway.app
@@ -64,6 +64,60 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/BuilderUnavailable'
+  /v1/leaderboards/{event_id}/checkouts:
+    get:
+      operationId: getEventCheckoutEvidence
+      description: Frozen, actually-paid checkout evidence. Use pack_id and builder for campaign tickets. Pagination pins the immutable snapshot. This route does not scan the chain.
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+        - $ref: '#/components/parameters/SnapshotId'
+        - $ref: '#/components/parameters/Builder'
+        - $ref: '#/components/parameters/Cursor'
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 1000}
+      responses:
+        '200':
+          description: Complete published checkout evidence. identities is supplied on the first page and uses the same frozen global aliases as the snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [event_id, snapshot_id, builder, checkout_evidence_supported, evidence_type, total_checkouts, next_cursor, rows, stale]
+                properties:
+                  event_id: {type: string}
+                  snapshot_id: {type: string}
+                  builder: {type: [string, 'null']}
+                  checkout_evidence_supported: {const: true}
+                  evidence_type: {const: confirmed_paid_checkout}
+                  total_checkouts: {type: integer, minimum: 0}
+                  next_cursor: {type: [string, 'null']}
+                  stale: {type: boolean}
+                  identities:
+                    type: array
+                    items:
+                      type: object
+                      required: [wallet, aliases, username]
+                      properties:
+                        wallet: {type: string}
+                        aliases: {type: array, items: {type: string}}
+                        username: {type: [string, 'null']}
+                  rows:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Checkout'
+        '202':
+          $ref: '#/components/responses/Incomplete'
+        '400':
+          $ref: '#/components/responses/Invalid'
+        '401':
+          description: Website-specific leaderboard read token or internal authentication required.
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: checkout_evidence_unavailable; the historical snapshot has no frozen evidence. Wait for a new complete snapshot.
+        '503':
+          $ref: '#/components/responses/Incomplete'
 components:
   securitySchemes:
     bearerAuth:
@@ -147,6 +201,24 @@ components:
     NotFound:
       description: Unknown event or route
   schemas:
+    Checkout:
+      type: object
+      required: [wallet, source_wallet, pack_id, builder, draw_count, paid_amount_raw, timestamp, tx_hash, log_index, block_number, block_hash, pack_contract]
+      properties:
+        wallet: {type: string, pattern: '^0x[0-9a-f]{40}$', description: Canonical identity in the frozen snapshot.}
+        source_wallet: {type: string, pattern: '^0x[0-9a-f]{40}$'}
+        aliases: {type: array, items: {type: string}}
+        username: {type: [string, 'null']}
+        pack_id: {type: [string, 'null'], pattern: '^0x[0-9a-f]{64}$'}
+        builder: {type: [string, 'null'], pattern: '^0x[0-9a-f]{64}$'}
+        draw_count: {type: integer, minimum: 1}
+        paid_amount_raw: {type: string, pattern: '^[1-9][0-9]*$'}
+        timestamp: {type: integer, description: Confirmed successful checkout block timestamp in UTC seconds.}
+        tx_hash: {type: string, pattern: '^0x[0-9a-f]{64}$'}
+        log_index: {type: integer, minimum: 0}
+        block_number: {type: integer, minimum: 0}
+        block_hash: {type: string}
+        pack_contract: {type: string}
     Participant:
       type: object
       required: [rank, wallet, username, aliases, draw_count, paid_amount_raw, paid_amount]

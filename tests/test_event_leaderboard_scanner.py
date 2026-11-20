@@ -101,6 +101,52 @@ class ScannerTests(unittest.TestCase):
     def setup_event(self, contracts=(VRF_V3_CONTRACT,)):
         return self.store.register_event(EventDefinition("test", 100, 140, contracts=contracts))
 
+    def test_hard_deadline_keeps_complete_blocks_and_resumes_without_rechecking_them(self):
+        a,b=checkout(block=10,tx=1),checkout(block=11,tx=2)
+        class Interrupted(Provider):
+            stopped=False
+            receipt_calls=[]
+            def receipt(self,tx):
+                self.receipt_calls.append(tx)
+                if tx==h(2) and not self.stopped:
+                    self.stopped=True
+                    raise KeyboardInterrupt('simulated process deadline')
+                return super().receipt(tx)
+        p=Interrupted([a,b])
+        for row in [a,b]:p.add_receipt([row],[payment(row)])
+        self.setup_event()
+        with self.assertRaises(KeyboardInterrupt):self.scanner(p).sync('test',now=150)
+        key=source_key(self.store.get_event('test'),VRF_V3_CONTRACT)
+        self.assertEqual(self.store.get_checkpoint('test',key)['next_block'],11)
+        self.assertIsNone(self.store.read_snapshot('test')[0])
+        self.assertEqual(self.scanner(p).sync('test',now=150)['state'],'finalized')
+        self.assertEqual(p.receipt_calls.count(h(1)),1)
+        self.assertEqual(self.store.read_snapshot('test')[1][0]['draw_count'],6)
+
+    def test_incomplete_block_never_advances_its_cursor(self):
+        a,b=checkout(block=10,tx=1),checkout(block=10,tx=2,index=3)
+        p=Provider([a,b]);p.add_receipt([a],[payment(a)]);p.add_receipt([b],[payment(b)])
+        p.receipts[h(2)]['status']='0x0'
+        self.setup_event()
+        self.assertEqual(self.scanner(p).sync('test',now=150)['state'],'stale')
+        key=source_key(self.store.get_event('test'),VRF_V3_CONTRACT)
+        self.assertIsNone(self.store.get_checkpoint('test',key))
+        self.assertIsNone(self.store.read_snapshot('test')[0])
+
+    def test_final_snapshot_format_upgrade_uses_existing_ledger_without_chain_requests(self):
+        a=checkout();p=Provider([a]);p.add_receipt([a],[payment(a)]);self.setup_event()
+        self.scanner(p).sync('test',now=150)
+        before=self.store.read_snapshot('test')[0]
+        with self.store._connection(write=True) as db:
+            old=dict(before);old.pop('checkout_evidence_supported')
+            db.execute('UPDATE snapshots SET metadata=? WHERE snapshot_id=?',(json.dumps(old),before['snapshot_id']))
+        class NoChain:
+            def head(self):raise AssertionError('final format upgrade must not query chain')
+        result=self.scanner(NoChain()).sync('test',now=150)
+        self.assertTrue(result['snapshot']['checkout_evidence_supported'])
+        self.assertNotEqual(result['snapshot']['snapshot_id'],before['snapshot_id'])
+        self.assertEqual(self.store.read_checkout_snapshot('test')[1][0]['draw_count'],3)
+
     def scanner(self, provider, **kwargs):
         return EventLeaderboardScanner(self.store, provider, confirmations=2, **kwargs)
 
