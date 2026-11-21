@@ -1,4 +1,4 @@
-"""Validated finite activity definitions. The database retains every revision."""
+"""Validated finite or ongoing activity definitions. Every revision is retained."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -63,7 +63,7 @@ def builder_code(value: str) -> str:
 class EventDefinition:
     event_id: str
     start_ts: int
-    end_ts: int
+    end_ts: int | None
     contracts: tuple[str, ...] = DEFAULT_PACK_CONTRACTS
     chain_id: int = 56
     token_decimals: int = 18
@@ -75,7 +75,9 @@ class EventDefinition:
     def __post_init__(self):
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", self.event_id):
             raise ValueError("invalid event_id")
-        if self.end_ts <= self.start_ts or self.chain_id <= 0 or not 0 <= self.token_decimals <= 36:
+        if (type(self.start_ts) is not int or self.start_ts < 0
+                or (self.end_ts is not None and (type(self.end_ts) is not int or self.end_ts <= self.start_ts))
+                or self.chain_id <= 0 or not 0 <= self.token_decimals <= 36):
             raise ValueError("invalid event definition")
         if type(self.checkout_schema_version) is not int or self.checkout_schema_version not in {1, 2}:
             raise ValueError("unsupported checkout schema version")
@@ -101,11 +103,14 @@ class EventDefinition:
 
     @classmethod
     def from_dict(cls, row: dict, *, stored=False) -> "EventDefinition":
+        if "end_at" not in row and "end_ts" not in row:
+            raise ValueError("explicit end_at is required; use null for an ongoing activity")
         version = row.get("checkout_schema_version", 1 if stored else 2)
         if not stored and version != 2:
             raise ValueError("new activity configuration requires checkout schema version 2")
         return cls(event_id=row["event_id"], start_ts=timestamp(row.get("start_at", row.get("start_ts"))),
-                   end_ts=timestamp(row.get("end_at", row.get("end_ts"))),
+                   end_ts=(None if row.get("end_at", row.get("end_ts")) is None
+                           else timestamp(row.get("end_at", row.get("end_ts")))),
                    contracts=tuple(row.get("contracts", DEFAULT_PACK_CONTRACTS)),
                    chain_id=int(row.get("chain_id", 56)), token_decimals=int(row.get("token_decimals", 18)),
                    revision=int(row.get("revision", 1)), contract_schemas=row.get("contract_schemas", {}),

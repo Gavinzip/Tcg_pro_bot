@@ -12,6 +12,7 @@ from runtime.event_leaderboards.scanner import (
     USDT, TRANSFER, LEGACY_SINGLE, LEGACY_BATCH, DEFAULT_PACK_CONTRACTS, SCHEMAS,
 )
 from runtime.event_leaderboards.store import EventLeaderboardStore
+from runtime.event_leaderboards.seed import publish_confirmed_prefix
 
 WALLET = "0x" + "1" * 40
 OTHER = "0x" + "2" * 40
@@ -100,6 +101,50 @@ class ScannerTests(unittest.TestCase):
 
     def setup_event(self, contracts=(VRF_V3_CONTRACT,)):
         return self.store.register_event(EventDefinition("test", 100, 140, contracts=contracts))
+
+    def test_ongoing_activity_reuses_a_verified_prefix_and_keeps_indexing_new_draws(self):
+        a, b = checkout(block=10, tx=1), checkout(block=15, tx=2)
+        p = Provider([a, b], head=20)
+        for row in (a, b):
+            p.add_receipt([row], [payment(row)])
+        self.setup_event()
+        self.assertEqual(self.scanner(p).sync('test', now=200)['state'], 'finalized')
+        archived = self.store.read_snapshot('test')[0]
+        self.store.register_event(EventDefinition('ongoing', 100, None, (VRF_V3_CONTRACT,)))
+        seeded = publish_confirmed_prefix(self.store, p, 'test', 'ongoing')
+        self.assertIsNone(seeded['snapshot']['end_at'])
+        p.calls.clear()
+        self.assertEqual(self.scanner(p).sync('ongoing', now=200)['state'], 'active')
+        metadata, rows, _ = self.store.read_snapshot('ongoing')
+        self.assertEqual((metadata['status'], rows[0]['draw_count']), ('live', 6))
+        self.assertTrue(all(call[1] >= 14 for call in p.calls))
+        self.assertEqual(self.store.read_snapshot('test')[0]['snapshot_id'], archived['snapshot_id'])
+        self.assertEqual(publish_confirmed_prefix(self.store, p, 'test', 'ongoing')['snapshot']['snapshot_id'], metadata['snapshot_id'])
+        with self.assertRaises(ValueError):
+            self.store.publish_snapshot('ongoing', 18, 180, finalized=True)
+
+    def test_seeded_prefix_must_pass_a_fresh_chain_anchor_before_publication(self):
+        p = Provider()
+        self.setup_event()
+        self.scanner(p).sync('test', now=200)
+        self.store.register_event(EventDefinition('ongoing', 100, None, (VRF_V3_CONTRACT,)))
+        p.changed[13] = h(999)
+        with self.assertRaises(ValueError):
+            publish_confirmed_prefix(self.store, p, 'test', 'ongoing')
+        self.assertIsNone(self.store.read_snapshot('ongoing')[0])
+
+    def test_ongoing_chunk_budget_publishes_a_complete_watermarked_prefix(self):
+        a,b=checkout(block=10,tx=1),checkout(block=15,tx=2)
+        p=Provider([a,b],head=20)
+        for row in (a,b):p.add_receipt([row],[payment(row)])
+        self.store.register_event(EventDefinition('ongoing',100,None,(VRF_V3_CONTRACT,)))
+        result=self.scanner(p,chunk_blocks=4,max_chunks=1).sync('ongoing',now=200)
+        self.assertEqual(result['state'],'catching_up')
+        metadata,rows,_=self.store.read_checkout_snapshot('ongoing')
+        self.assertEqual(metadata['through_block'],13)
+        self.assertEqual([r['tx_hash'] for r in rows],[h(1)])
+        self.assertEqual(self.scanner(p).sync('ongoing',now=200)['state'],'active')
+        self.assertEqual(len(self.store.read_checkout_snapshot('ongoing')[1]),2)
 
     def test_hard_deadline_keeps_complete_blocks_and_resumes_without_rechecking_them(self):
         a,b=checkout(block=10,tx=1),checkout(block=11,tx=2)

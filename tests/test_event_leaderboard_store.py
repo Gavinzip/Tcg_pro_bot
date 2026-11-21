@@ -5,9 +5,10 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from runtime.event_leaderboards.config import EventDefinition, source_key
+from runtime.event_leaderboards.config import EventDefinition, source_key, DEFAULT_PACK_CONTRACTS
 from runtime.event_leaderboards.http import EventLeaderboardHTTP
 from runtime.event_leaderboards.store import EventLeaderboardStore, LedgerConflict
+from runtime.event_leaderboards.seed import seed_from_final_snapshot
 
 CONTRACT = "0x" + "a" * 40
 RUN_DIR = Path(__file__).resolve().parents[1] / ".scratch" / "event-store-tests" / ("run-" + uuid.uuid4().hex)
@@ -34,6 +35,59 @@ class EventStoreTests(unittest.TestCase):
     def publish(self, rows, usernames=None):
         self.store.commit_chunk("finite", self.source, None, 20, rows, block_hash="0xanchor")
         return self.store.publish_snapshot("finite", 19, 120, usernames=usernames)
+
+    def test_seed_rejects_incomplete_sources_wrong_dates_and_nonempty_targets(self):
+        self.publish([self.row()])
+        target = EventDefinition('ongoing', 100, None, (CONTRACT,), contract_schemas={CONTRACT:'v3'})
+        self.store.register_event(target)
+        with self.assertRaises(LedgerConflict):
+            seed_from_final_snapshot(self.store, 'finite', 'ongoing')
+        self.store.publish_snapshot('finite', 19, 200, finalized=True)
+        self.store.register_event(replace(target, start_ts=99))
+        with self.assertRaises(ValueError):
+            seed_from_final_snapshot(self.store, 'finite', 'ongoing')
+        self.store.register_event(target)
+        self.store.commit_chunk('ongoing', self.source, None, 20, [], block_hash='0xanchor')
+        with self.assertRaises(LedgerConflict):
+            seed_from_final_snapshot(self.store, 'finite', 'ongoing')
+        self.assertEqual(self.http.dispatch('/v1/leaderboards/ongoing')[0], 202)
+
+    def test_open_end_round_trips_and_explicit_end_still_excludes_its_boundary(self):
+        definition = EventDefinition.from_dict({'event_id':'ongoing','start_at':'2026-11-20T00:00:00+08:00','end_at':None,
+            'contracts':[CONTRACT],'contract_schemas':{CONTRACT:'v3'}})
+        self.store.register_event(definition)
+        self.assertIsNone(EventLeaderboardStore(self.store.path).get_event('ongoing').end_ts)
+        with self.assertRaises(ValueError):
+            self.store.register_event(replace(definition, end_ts=definition.start_ts))
+
+    def test_confirmed_prefix_can_select_a_contract_subset_without_copying_legacy_rows(self):
+        legacy = DEFAULT_PACK_CONTRACTS[0]
+        source = self.store.register_event(EventDefinition('source',100,200,(CONTRACT,legacy),contract_schemas={CONTRACT:'v3'}))
+        for contract, entry in ((CONTRACT,self.row()),(legacy,self.row(2,pack_contract=legacy,pack_id=None,builder=None))):
+            self.store.commit_chunk('source',source_key(source,contract),None,20,[entry],block_hash='0xanchor')
+        archived=self.store.publish_snapshot('source',19,200,finalized=True)
+        self.store.register_event(EventDefinition('ongoing',100,None,(CONTRACT,),contract_schemas={CONTRACT:'v3'}))
+        report=seed_from_final_snapshot(self.store,'source','ongoing')
+        self.assertEqual(report['checkouts'],1)
+        self.assertEqual(report['source_snapshot_id'],archived['snapshot_id'])
+        self.assertEqual(seed_from_final_snapshot(self.store,'source','ongoing')['already_seeded'],True)
+
+    def test_ongoing_checkout_pages_pin_ledger_range_and_identity_without_full_copy(self):
+        self.store.register_event(EventDefinition('ongoing',100,None,(CONTRACT,),contract_schemas={CONTRACT:'v3'}))
+        self.store.commit_chunk('ongoing',self.source,None,20,[self.row()],block_hash='0xanchor')
+        first=self.store.publish_snapshot('ongoing',19,120)
+        self.store.commit_chunk('ongoing',self.source,20,30,[self.row(2,block_number=25,timestamp=125)],
+            block_hash='0xnext',aliases=[{'old':address(1),'new':address(3),'verified':True,'evidence':'verified migration'}])
+        second=self.store.publish_snapshot('ongoing',29,130)
+        recovered=EventLeaderboardStore(self.store.path)
+        old_rows=recovered.read_checkout_snapshot('ongoing',first['snapshot_id'])[1]
+        new_rows=recovered.read_checkout_snapshot('ongoing',second['snapshot_id'])[1]
+        self.assertEqual([r['wallet'] for r in old_rows],[address(1)])
+        self.assertEqual([r['wallet'] for r in new_rows],[address(3),address(2)])
+        self.assertEqual(len(recovered.read_checkout_snapshot('ongoing',second['snapshot_id'],builder='0x'+'B'*64)[1]),2)
+        with self.store._connection() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM snapshot_checkout_rows WHERE snapshot_id IN (?,?)',
+                (first['snapshot_id'],second['snapshot_id'])).fetchone()[0],0)
 
     def test_all_wallets_and_immutable_pagination(self):
         first = self.publish([self.row(i) for i in range(1, 352)])

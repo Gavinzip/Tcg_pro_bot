@@ -1,4 +1,4 @@
-"""Confirmed, contract-wide paid checkout indexing for finite activity windows.
+"""Confirmed, contract-wide paid checkout indexing for finite or ongoing activities.
 
 Only audited CheckoutSuccess schemas are accepted. Legacy implementations emit one
 success per checkout, including every member of a batch; V3 emits checkoutIds.
@@ -394,7 +394,7 @@ class EventLeaderboardScanner:
             start = (self.provider.first_block_at(definition.start_ts, head)
                      if any(checkpoint is None for checkpoint in checkpoints.values()) else None)
             boundary = self.provider.block(bound)
-            finalized = boundary["timestamp"] >= definition.end_ts
+            finalized = definition.end_ts is not None and boundary["timestamp"] >= definition.end_ts
             if finalized:
                 bound = self.provider.first_block_at(definition.end_ts, head) - 1
                 boundary = self.provider.block(bound)
@@ -432,7 +432,9 @@ class EventLeaderboardScanner:
                             if (row is None or candidate["paid_amount_raw"] != row.get("checkout_event_amount_raw", row["paid_amount_raw"])
                                     or any(candidate[k] != row[k] for k in ("wallet", "draw_count", "pack_id", "builder", "block_hash", "block_number", "checkout_ids"))):
                                 raise SourceIncomplete("indexed_log_receipt_mismatch")
-                            if definition.start_ts <= row["timestamp"] < definition.end_ts and row["paid_amount_raw"] > 0:
+                            if (row["timestamp"] >= definition.start_ts
+                                    and (definition.end_ts is None or row["timestamp"] < definition.end_ts)
+                                    and row["paid_amount_raw"] > 0):
                                 checkouts.append(dict(row, chain_id=definition.chain_id))
                         self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
                                                 block_number + 1, checkouts, block_hash=self.provider.block(block_number)["hash"], expected_revision=definition.revision)
@@ -444,6 +446,11 @@ class EventLeaderboardScanner:
                                                 end + 1, [], block_hash=self.provider.block(end)["hash"], expected_revision=definition.revision)
                         checkpoint = {"next_block": end + 1}
                     next_block, used = end + 1, used + 1
+                    if definition.end_ts is None and len(definition.contracts) == 1 and end < bound:
+                        # A fully verified single-source prefix is complete as
+                        # of its own watermark, even while catching up to head.
+                        progress['snapshot'] = self.store.publish_snapshot(event_id,end,
+                            self.provider.block(end)['timestamp'],usernames=usernames,expected_revision=definition.revision)
                 progress["sources"][source] = {"next_block": next_block, "complete": next_block > bound}
                 self.store.set_progress(event_id, progress)
             complete = all(x["complete"] for x in progress["sources"].values())
