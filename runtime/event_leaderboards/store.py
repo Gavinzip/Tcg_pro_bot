@@ -194,7 +194,9 @@ class EventLeaderboardStore:
                         row["builder"] = None
                 if (not row["tx_hash"] or not row["block_hash"] or row["chain_id"] != definition.chain_id
                         or row["pack_contract"] not in definition.contracts
-                        or not definition.start_ts <= row["timestamp"] < definition.end_ts
+                        or (definition.builder is not None and row.get("builder") != definition.builder)
+                        or row["timestamp"] < definition.start_ts
+                        or (definition.end_ts is not None and row["timestamp"] >= definition.end_ts)
                         or row["block_number"] < 0 or row["block_number"] >= next_block
                         or (expected_next_block is not None and row["block_number"] < expected_next_block)):
                     raise ValueError("checkout outside validated event/chunk scope")
@@ -243,7 +245,7 @@ class EventLeaderboardStore:
                     (event_id, definition.revision, source_key(definition, contract))).fetchone()
                 if checkpoint is None or checkpoint[0] <= through_block or not checkpoint[1]:
                     raise LedgerConflict("publication requires complete anchored checkpoints for every contract")
-            if finalized and through_at < definition.end_ts:
+            if finalized and (definition.end_ts is None or through_at < definition.end_ts):
                 raise ValueError("cannot finalize before the event end is confirmed")
             aliases = dict(db.execute("SELECT old_wallet,new_wallet FROM aliases WHERE event_id=? AND revision=?",
                                       (event_id, definition.revision)))
@@ -255,15 +257,22 @@ class EventLeaderboardStore:
             generated = int(time.time())
             snapshot_id = uuid.uuid4().hex
             metadata = {"event_id": event_id, "revision": definition.revision, "config_hash": definition.config_hash,
-                        "start_at": iso_time(definition.start_ts), "end_at": iso_time(definition.end_ts),
+                        "start_at": iso_time(definition.start_ts), "end_at": iso_time(definition.end_ts) if definition.end_ts is not None else None,
                         "snapshot_id": snapshot_id, "generated_at": iso_time(generated),
                         "data_through_at": iso_time(through_at), "through_block": through_block,
-                        "total_participants": len(rankings[None]), "status": "final" if finalized else ("settling" if generated >= definition.end_ts else "live"),
+                        "total_participants": len(rankings[None]), "status": "final" if finalized else ("settling" if definition.end_ts is not None and generated >= definition.end_ts else "live"),
                         "counting_rule": "confirmed_paid_checkout", "contracts": list(definition.contracts),
                         "chain_id": definition.chain_id, "token_decimals": definition.token_decimals,
                         "ranking_rule": "competition_draw_count_desc_wallet_asc",
                         "builder_filter_supported": definition.checkout_schema_version >= 2, "builder": None,
                         "checkout_evidence_supported": True}
+            if definition.end_ts is None:
+                # The ledger is append-only within a revision. Pin the verified
+                # block range and frozen identity rows instead of duplicating
+                # the entire checkout ledger at every ongoing publication.
+                metadata["checkout_evidence_storage"] = "ledger_range_v1"
+            if definition.builder is not None:
+                metadata["indexed_builder"] = definition.builder
             seq = db.execute("SELECT COALESCE(MAX(created_seq),0)+1 FROM snapshots").fetchone()[0]
             db.execute("INSERT INTO snapshots VALUES (?,?,?,?,?)", (snapshot_id, event_id, definition.revision, seq, json.dumps(metadata)))
             for code, rows in rankings.items():
@@ -275,27 +284,51 @@ class EventLeaderboardStore:
                         db.execute("INSERT INTO snapshot_builder_rows VALUES (?,?,?,?)",
                                    (snapshot_id, code, row["wallet"], payload))
             identities = {alias: row for row in rankings[None] for alias in row['aliases']}
-            for checkout in checkouts:
-                identity = identities[checkout['wallet']]
-                frozen = {**checkout, 'source_wallet': checkout['wallet'], 'wallet': identity['wallet'],
-                          'aliases': identity['aliases'], 'username': identity['username'],
-                          'pack_id': None if checkout['pack_id'] in (None,'None') else checkout['pack_id']}
-                db.execute('INSERT INTO snapshot_checkout_rows VALUES(?,?,?,?)',
-                           (snapshot_id,checkout['tx_hash'],checkout['log_index'],json.dumps(frozen,ensure_ascii=False)))
+            if definition.end_ts is not None:
+                for checkout in checkouts:
+                    identity = identities[checkout['wallet']]
+                    frozen = {**checkout, 'source_wallet': checkout['wallet'], 'wallet': identity['wallet'],
+                              'aliases': identity['aliases'], 'username': identity['username'],
+                              'pack_id': None if checkout['pack_id'] in (None,'None') else checkout['pack_id']}
+                    db.execute('INSERT INTO snapshot_checkout_rows VALUES(?,?,?,?)',
+                               (snapshot_id,checkout['tx_hash'],checkout['log_index'],json.dumps(frozen,ensure_ascii=False)))
             db.execute("INSERT INTO event_state VALUES (?,?,NULL,NULL) ON CONFLICT(event_id,revision) DO UPDATE SET last_error=NULL",
                        (event_id, definition.revision))
             return metadata
 
     def read_checkout_snapshot(self, event_id, snapshot_id=None, *, builder=None):
-        metadata, _, health = self.read_snapshot(event_id,snapshot_id,builder=builder)
+        if builder is not None:
+            builder = builder_code(builder)
+        metadata, identities, health = self.read_snapshot(event_id,snapshot_id,builder=builder)
         if metadata is None:
             return None, [], health
+        builder = metadata["builder"]
         if not metadata.get('checkout_evidence_supported'):
             raise CheckoutEvidenceUnavailable('Snapshot has no frozen checkout evidence; wait for a new complete snapshot.')
         with self._connection() as db:
-            rows = [json.loads(r[0]) for r in db.execute(
-                'SELECT payload FROM snapshot_checkout_rows WHERE snapshot_id=? ORDER BY tx_hash,log_index',
-                (metadata['snapshot_id'],))]
+            storage = metadata.get('checkout_evidence_storage')
+            if storage == 'ledger_range_v1':
+                frozen_identities = {alias: row for row in identities for alias in row['aliases']}
+                rows = []
+                for raw in db.execute('SELECT payload FROM ledger WHERE event_id=? AND revision=? ORDER BY tx_hash,log_index',
+                                      (event_id,metadata['revision'])):
+                    checkout = json.loads(raw[0])
+                    if (checkout['block_number'] > metadata['through_block']
+                            or checkout['timestamp'] > timestamp(metadata['data_through_at'])
+                            or (builder is not None and checkout.get('builder') != builder)):
+                        continue
+                    identity = frozen_identities.get(checkout['wallet'])
+                    if identity is None:
+                        raise LedgerConflict('frozen checkout identity missing')
+                    rows.append({**checkout,'source_wallet':checkout['wallet'],'wallet':identity['wallet'],
+                        'aliases':identity['aliases'],'username':identity['username'],
+                        'pack_id':None if checkout['pack_id'] in (None,'None') else checkout['pack_id']})
+            elif storage is None:
+                rows = [json.loads(r[0]) for r in db.execute(
+                    'SELECT payload FROM snapshot_checkout_rows WHERE snapshot_id=? ORDER BY tx_hash,log_index',
+                    (metadata['snapshot_id'],))]
+            else:
+                raise CheckoutEvidenceUnavailable('Unsupported checkout snapshot storage version.')
         if builder is not None:
             rows = [r for r in rows if r.get('builder') == builder]
         return metadata, rows, health
@@ -305,6 +338,10 @@ class EventLeaderboardStore:
             builder = builder_code(builder)
         with self._connection() as db:
             definition = self._event(db, event_id)
+            if definition.builder is not None:
+                if builder is not None and builder != definition.builder:
+                    raise ValueError("builder outside indexed activity scope")
+                builder = definition.builder
             latest = db.execute("SELECT * FROM snapshots WHERE event_id=? AND revision=? ORDER BY created_seq DESC LIMIT 1",
                                 (event_id, definition.revision)).fetchone()
             if snapshot_id:
@@ -328,6 +365,8 @@ class EventLeaderboardStore:
             if record is None:
                 return None, [], health
             metadata = json.loads(record["metadata"])
+            if metadata.get("indexed_builder") is not None and metadata["indexed_builder"] != builder:
+                raise ValueError("snapshot indexed for another builder")
             metadata.setdefault("builder_filter_supported", False)
             metadata["builder"] = builder
             if builder is not None:

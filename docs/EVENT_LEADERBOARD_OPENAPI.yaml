@@ -241,7 +241,7 @@ components:
         config_hash: {type: string}
         snapshot_id: {type: string}
         start_at: {type: string, format: date-time}
-        end_at: {type: string, format: date-time}
+        end_at: {type: [string, 'null'], format: date-time, description: Exclusive end or null for an ongoing activity.}
         generated_at: {type: string, format: date-time}
         data_through_at: {type: string, format: date-time}
         through_block: {type: integer}

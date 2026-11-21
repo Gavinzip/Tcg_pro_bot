@@ -103,6 +103,7 @@ class EventLeaderboardHTTP:
                 return (503 if health["last_error"] else 202), {
                     "event_id": event_id, "snapshot_id": None, "builder": builder, "status": "initializing", **health,
                     "message": "No complete confirmed scan has been published yet."}
+            builder = metadata["builder"]
             if search:
                 needle = q.casefold()
                 rows = [row for row in rows if needle in (row["username"] or "").casefold()
@@ -159,6 +160,7 @@ class EventLeaderboardHTTP:
                 return (503 if health["last_error"] else 202), {
                     "event_id": event_id, "snapshot_id": None, "builder": builder,
                     "status": "initializing", **health}
+            builder = metadata["builder"]
             if offset > len(rows):
                 raise ValueError("cursor offset outside snapshot")
             selected = rows[offset:offset + limit]

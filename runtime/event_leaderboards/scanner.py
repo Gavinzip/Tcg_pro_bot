@@ -1,4 +1,4 @@
-"""Confirmed, contract-wide paid checkout indexing for finite activity windows.
+"""Confirmed, contract-wide paid checkout indexing for finite or ongoing activities.
 
 Only audited CheckoutSuccess schemas are accepted. Legacy implementations emit one
 success per checkout, including every member of a batch; V3 emits checkoutIds.
@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 
 from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC
-from .config import AUDITED_CHECKOUT_TOPICS, source_key
+from .config import AUDITED_CHECKOUT_TOPICS, source_key, builder_code
 from .provider_errors import classify_failure, safe_diagnostic
 
 USDT = "0x55d398326f99059ff775485246999027b3197955"
@@ -96,7 +96,8 @@ class EtherscanProvider:
 
     def __init__(self, env=None):
         env = os.environ if env is None else env
-        self.api_key = env.get("BSCSCAN_API_KEY", "").strip()
+        # The campaign has its own quota. Never consume the Bot's shared key.
+        self.api_key = env.get("EVENT_LEADERBOARD_API_KEY", "").strip()
         if not self.api_key:
             raise SourceIncomplete("missing_chain_api_key")
         self.api_url = env.get("BSCSCAN_API_URL") or "https://api.etherscan.io/v2/api"
@@ -177,9 +178,10 @@ class EtherscanProvider:
             height += 1
         return height
 
-    def logs_page(self, contract, topic, start, end, page):
+    def logs_page(self, contract, topic, start, end, page, *, builder=None):
+        filters = {} if builder is None else {"topic3": builder_code(builder), "topic0_3_opr": "and"}
         rows = self.request("logs", "getLogs", address=contract, topic0=topic, fromBlock=start,
-                            toBlock=end, page=page, offset=self.page_size)
+                            toBlock=end, page=page, offset=self.page_size, **filters)
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows) or len(rows) > self.page_size:
             raise SourceIncomplete("invalid_logs_page")
         return rows
@@ -191,29 +193,31 @@ class EtherscanProvider:
         return result
 
 
-def complete_logs(provider, contract, topic, start, end):
+def complete_logs(provider, contract, topic, start, end, *, builder=None):
     """Split full ranges; exhaust pages within one block without dropping ties.
 
     No cursor is moved until the entire requested range is proven complete.
     A full provider result window in one block is deliberately an error.
     """
+    builder = builder_code(builder) if builder is not None else None
+    filters = {} if builder is None else {"builder": builder}
     try:
-        first = provider.logs_page(contract, topic, start, end, 1)
+        first = provider.logs_page(contract, topic, start, end, 1, **filters)
     except SourceIncomplete as error:
         if str(error) != "provider_query_limit" or start == end:
             raise
         middle = (start + end) // 2
-        return complete_logs(provider, contract, topic, start, middle) + complete_logs(provider, contract, topic, middle + 1, end)
+        return complete_logs(provider, contract, topic, start, middle, builder=builder) + complete_logs(provider, contract, topic, middle + 1, end, builder=builder)
     if len(first) < provider.page_size:
         rows = first
     elif start < end:
         middle = (start + end) // 2
-        return complete_logs(provider, contract, topic, start, middle) + complete_logs(provider, contract, topic, middle + 1, end)
+        return complete_logs(provider, contract, topic, start, middle, builder=builder) + complete_logs(provider, contract, topic, middle + 1, end, builder=builder)
     else:
         rows = list(first)
         previous = {identity(row) for row in first}
         for page in range(2, provider.max_pages + 1):
-            batch = provider.logs_page(contract, topic, start, end, page)
+            batch = provider.logs_page(contract, topic, start, end, page, **filters)
             keys = {identity(row) for row in batch}
             if keys & previous:
                 raise SourceIncomplete("provider_repeated_log_page")
@@ -229,6 +233,8 @@ def complete_logs(provider, contract, topic, start, end):
             raise SourceIncomplete("log_outside_requested_range")
         if address(row.get("address")) != contract or not row.get("topics") or str(row["topics"][0]).lower() != topic:
             raise SourceIncomplete("unexpected_checkout_log")
+        if builder is not None and (len(row["topics"]) != 4 or str(row["topics"][3]).lower() != builder):
+            raise SourceIncomplete("unexpected_checkout_builder")
         key = identity(row)
         if key in unique and unique[key] != row:
             raise SourceIncomplete("conflicting_duplicate_log")
@@ -394,7 +400,7 @@ class EventLeaderboardScanner:
             start = (self.provider.first_block_at(definition.start_ts, head)
                      if any(checkpoint is None for checkpoint in checkpoints.values()) else None)
             boundary = self.provider.block(bound)
-            finalized = boundary["timestamp"] >= definition.end_ts
+            finalized = definition.end_ts is not None and boundary["timestamp"] >= definition.end_ts
             if finalized:
                 bound = self.provider.first_block_at(definition.end_ts, head) - 1
                 boundary = self.provider.block(bound)
@@ -416,7 +422,7 @@ class EventLeaderboardScanner:
                         raise SourceIncomplete("checkpoint_reorg_mismatch")
                 while next_block <= bound and used < self.max_chunks:
                     end = min(bound, next_block + self.chunk_blocks - 1)
-                    logs = complete_logs(self.provider, contract, topic, next_block, end)
+                    logs = complete_logs(self.provider, contract, topic, next_block, end, builder=definition.builder)
                     # getLogs is complete for the whole range. Commit each fully
                     # verified block as an anchored prefix; a hard job deadline
                     # must not discard twenty minutes of completed receipts.
@@ -432,7 +438,9 @@ class EventLeaderboardScanner:
                             if (row is None or candidate["paid_amount_raw"] != row.get("checkout_event_amount_raw", row["paid_amount_raw"])
                                     or any(candidate[k] != row[k] for k in ("wallet", "draw_count", "pack_id", "builder", "block_hash", "block_number", "checkout_ids"))):
                                 raise SourceIncomplete("indexed_log_receipt_mismatch")
-                            if definition.start_ts <= row["timestamp"] < definition.end_ts and row["paid_amount_raw"] > 0:
+                            if (row["timestamp"] >= definition.start_ts
+                                    and (definition.end_ts is None or row["timestamp"] < definition.end_ts)
+                                    and row["paid_amount_raw"] > 0):
                                 checkouts.append(dict(row, chain_id=definition.chain_id))
                         self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
                                                 block_number + 1, checkouts, block_hash=self.provider.block(block_number)["hash"], expected_revision=definition.revision)
@@ -444,6 +452,11 @@ class EventLeaderboardScanner:
                                                 end + 1, [], block_hash=self.provider.block(end)["hash"], expected_revision=definition.revision)
                         checkpoint = {"next_block": end + 1}
                     next_block, used = end + 1, used + 1
+                    if definition.end_ts is None and len(definition.contracts) == 1 and end < bound:
+                        # A fully verified single-source prefix is complete as
+                        # of its own watermark, even while catching up to head.
+                        progress['snapshot'] = self.store.publish_snapshot(event_id,end,
+                            self.provider.block(end)['timestamp'],usernames=usernames,expected_revision=definition.revision)
                 progress["sources"][source] = {"next_block": next_block, "complete": next_block > bound}
                 self.store.set_progress(event_id, progress)
             complete = all(x["complete"] for x in progress["sources"].values())
@@ -453,6 +466,7 @@ class EventLeaderboardScanner:
                 # Every configured contract has reached the identical confirmed bound.
                 progress["snapshot"] = self.store.publish_snapshot(event_id, bound,
                     definition.end_ts if finalized else boundary["timestamp"], finalized=finalized, usernames=usernames, expected_revision=definition.revision)
+                self.store.set_progress(event_id, progress)
             return progress
         except Exception as error:
             # Error class/code only: provider URLs and credentials cannot leak to API/logs.
