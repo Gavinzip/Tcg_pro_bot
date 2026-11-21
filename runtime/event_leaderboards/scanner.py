@@ -465,6 +465,7 @@ class EventLeaderboardScanner:
                 # Every configured contract has reached the identical confirmed bound.
                 progress["snapshot"] = self.store.publish_snapshot(event_id, bound,
                     definition.end_ts if finalized else boundary["timestamp"], finalized=finalized, usernames=usernames, expected_revision=definition.revision)
+                self.store.set_progress(event_id, progress)
             return progress
         except Exception as error:
             # Error class/code only: provider URLs and credentials cannot leak to API/logs.
