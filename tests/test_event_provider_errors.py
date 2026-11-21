@@ -13,7 +13,7 @@ from runtime.event_leaderboards.scanner import EtherscanProvider, EventLeaderboa
 
 class ProviderErrorTests(unittest.TestCase):
     def provider(self):
-        return EtherscanProvider({"BSCSCAN_API_KEY": "private-test-key"})
+        return EtherscanProvider({"EVENT_LEADERBOARD_API_KEY": "private-test-key"})
 
     def failure(self, error, expected_attempts=1):
         with patch("runtime.event_leaderboards.scanner.urllib.request.urlopen", side_effect=error) as call, \

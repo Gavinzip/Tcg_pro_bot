@@ -1,5 +1,7 @@
 # Finite activity leaderboard API
 
+The event scanner requires its own `EVENT_LEADERBOARD_API_KEY`. It never reads or falls back to the Bot's shared `BSCSCAN_API_KEY`; a missing dedicated key fails explicitly. Production obtains the dedicated campaign key from the owner's 1Password `bsc_apikey` item through protected Railway configuration, never from Git. The current campaign uses a 60-second wait after each completed scan and a 180-second overdue threshold; the scanner's original 0.5 requests/second pacing and all receipt/payment checks remain unchanged.
+
 An activity is one configured interval, not a repeating daily/monthly/yearly ranking. An explicit `end_at: null` means ongoing: scan through the latest confirmed head, publish `status=live`, and never finalize until a finite end is configured. The built-in archived activity `2026-11-20` remains **2026-11-20 00:00:00 +08:00** inclusive to **2026-11-21 00:00:00 +08:00** exclusive. A missing optional default configuration selects this explicit built-in activity; an explicitly configured missing or malformed file is an error. No API response invents scan results.
 
 The Profile API serves these routes through its existing authentication. Supply its configured bearer token when enabled. Responses must not use long-lived HTTP caches. Machine-readable contract: [OpenAPI](EVENT_LEADERBOARD_OPENAPI.yaml).

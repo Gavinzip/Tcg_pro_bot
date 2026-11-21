@@ -130,13 +130,22 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(self.scanner(p).sync('unpaid',now=200)['state'],'stale')
 
     def test_real_provider_builds_a_conjunctive_v3_builder_query(self):
-        provider=EtherscanProvider({'BSCSCAN_API_KEY':'fixture-key'})
+        provider=EtherscanProvider({'EVENT_LEADERBOARD_API_KEY':'fixture-key'})
         calls=[]
         provider.request=lambda *args,**kwargs: calls.append((args,kwargs)) or []
         provider.logs_page(VRF_V3_CONTRACT,VRF_V3_CHECKOUT_TOPIC,10,20,1,builder=h(7))
         self.assertEqual(calls[0][1]['topic0'],VRF_V3_CHECKOUT_TOPIC)
         self.assertEqual(calls[0][1]['topic3'],h(7))
         self.assertEqual(calls[0][1]['topic0_3_opr'],'and')
+
+    def test_campaign_requires_its_dedicated_key_and_never_uses_the_bot_key(self):
+        provider = EtherscanProvider({'EVENT_LEADERBOARD_API_KEY': 'activity-only',
+                                      'BSCSCAN_API_KEY': 'borrowed-bot-key'})
+        self.assertEqual(provider.api_key, 'activity-only')
+        for values in ({'BSCSCAN_API_KEY': 'borrowed-bot-key'},
+                       {'EVENT_LEADERBOARD_API_KEY': ' ', 'BSCSCAN_API_KEY': 'borrowed-bot-key'}):
+            with self.assertRaisesRegex(SourceIncomplete, 'missing_chain_api_key'):
+                EtherscanProvider(values)
 
     def test_scoped_range_splitting_preserves_builder_and_rejects_ignored_filters(self):
         rows=[checkout(block=n,tx=n) for n in range(10,14)]

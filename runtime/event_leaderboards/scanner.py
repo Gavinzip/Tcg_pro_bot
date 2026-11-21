@@ -96,7 +96,8 @@ class EtherscanProvider:
 
     def __init__(self, env=None):
         env = os.environ if env is None else env
-        self.api_key = env.get("BSCSCAN_API_KEY", "").strip()
+        # The campaign has its own quota. Never consume the Bot's shared key.
+        self.api_key = env.get("EVENT_LEADERBOARD_API_KEY", "").strip()
         if not self.api_key:
             raise SourceIncomplete("missing_chain_api_key")
         self.api_url = env.get("BSCSCAN_API_URL") or "https://api.etherscan.io/v2/api"

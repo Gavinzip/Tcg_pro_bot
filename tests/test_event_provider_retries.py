@@ -20,7 +20,7 @@ class Clock:
 class ProviderRetryTests(unittest.TestCase):
     def run_requests(self, outcomes, *, count=1, action="getLogs"):
         clock, starts, urls, timeouts = Clock(), [], [], []
-        provider = EtherscanProvider({"BSCSCAN_API_KEY": "private-test-key",
+        provider = EtherscanProvider({"EVENT_LEADERBOARD_API_KEY": "private-test-key",
                                      "EVENT_LEADERBOARD_REQUESTS_PER_SECOND": "0.5"})
         def open_request(url, timeout):
             starts.append(clock.now); urls.append(url); timeouts.append(timeout)
