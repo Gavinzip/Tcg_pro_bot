@@ -7,10 +7,11 @@ import uuid
 
 from runtime.event_leaderboards.config import EventDefinition, source_key
 from runtime.event_leaderboards.scanner import (
-    EventLeaderboardScanner, SourceIncomplete, complete_logs, decode_checkout,
+    EtherscanProvider, EventLeaderboardScanner, SourceIncomplete, complete_logs, decode_checkout,
     verified_receipt_checkouts, VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC,
     USDT, TRANSFER, LEGACY_SINGLE, LEGACY_BATCH, DEFAULT_PACK_CONTRACTS, SCHEMAS,
 )
+from runtime.event_leaderboards.http import EventLeaderboardHTTP
 from runtime.event_leaderboards.store import EventLeaderboardStore
 from runtime.event_leaderboards.seed import publish_confirmed_prefix
 
@@ -57,6 +58,7 @@ class Provider:
     def __init__(self, logs=(), head=16):
         self.rows, self.height = list(logs), head
         self.receipts, self.calls = {}, []
+        self.builder_queries = []
         self.boundary_calls = []
         self.block_calls = []
         self.fail_contract = None
@@ -73,11 +75,14 @@ class Provider:
         self.boundary_calls.append((timestamp, head))
         return (timestamp + 9) // 10
 
-    def logs_page(self, contract, topic, start, end, page):
+    def logs_page(self, contract, topic, start, end, page, *, builder=None):
+        self.builder_queries.append(builder)
         self.calls.append((contract, start, end, page))
         if contract == self.fail_contract:
             raise SourceIncomplete("provider_transport_failure")
         found = [x for x in self.rows if x["address"] == contract and x["topics"][0] == topic and start <= int(x["blockNumber"], 16) <= end]
+        if builder is not None:
+            found = [x for x in found if len(x["topics"]) == 4 and x["topics"][3] == builder]
         return found[(page - 1) * self.page_size:page * self.page_size]
 
     def receipt(self, tx):
@@ -101,6 +106,78 @@ class ScannerTests(unittest.TestCase):
 
     def setup_event(self, contracts=(VRF_V3_CONTRACT,)):
         return self.store.register_event(EventDefinition("test", 100, 140, contracts=contracts))
+
+    def test_scoped_indexer_queries_only_its_builder_and_still_verifies_payment(self):
+        target, other = checkout(tx=1), checkout(tx=2)
+        target['topics'][3], other['topics'][3] = h(7), h(8)
+        p=Provider([target, other],head=20)
+        # No receipt exists for the unrelated builder: it must never be queried.
+        p.add_receipt([target],[payment(target)])
+        definition=self.store.register_event(EventDefinition('scoped',100,None,(VRF_V3_CONTRACT,),builder=h(7)))
+        self.assertEqual(self.scanner(p).sync('scoped',now=200)['state'],'active')
+        self.assertTrue(p.builder_queries and all(b==h(7) for b in p.builder_queries))
+        metadata,rows,_=self.store.read_checkout_snapshot('scoped')
+        self.assertEqual(metadata['builder'],h(7))
+        self.assertEqual([r['tx_hash'] for r in rows],[h(1)])
+        http=EventLeaderboardHTTP(self.store)
+        status,response=http.dispatch('/v1/leaderboards/scoped')
+        self.assertEqual((status,response['builder'],response['total_participants']),(200,h(7),1))
+        self.assertEqual(http.dispatch('/v1/leaderboards/scoped?builder='+h(8))[0],400)
+        with self.assertRaises(ValueError):self.store.read_snapshot('scoped',builder=h(8))
+        self.assertIn(':builder:'+h(7),source_key(definition,VRF_V3_CONTRACT))
+        p.receipts[h(1)]['logs']=[target] # No USDT payment: a matching builder is insufficient.
+        self.store.register_event(EventDefinition('unpaid',100,None,(VRF_V3_CONTRACT,),builder=h(7)))
+        self.assertEqual(self.scanner(p).sync('unpaid',now=200)['state'],'stale')
+
+    def test_real_provider_builds_a_conjunctive_v3_builder_query(self):
+        provider=EtherscanProvider({'BSCSCAN_API_KEY':'fixture-key'})
+        calls=[]
+        provider.request=lambda *args,**kwargs: calls.append((args,kwargs)) or []
+        provider.logs_page(VRF_V3_CONTRACT,VRF_V3_CHECKOUT_TOPIC,10,20,1,builder=h(7))
+        self.assertEqual(calls[0][1]['topic0'],VRF_V3_CHECKOUT_TOPIC)
+        self.assertEqual(calls[0][1]['topic3'],h(7))
+        self.assertEqual(calls[0][1]['topic0_3_opr'],'and')
+
+    def test_scoped_range_splitting_preserves_builder_and_rejects_ignored_filters(self):
+        rows=[checkout(block=n,tx=n) for n in range(10,14)]
+        for r in rows:r['topics'][3]=h(7)
+        p=Provider(rows,head=20)
+        self.assertEqual(len(complete_logs(p,VRF_V3_CONTRACT,VRF_V3_CHECKOUT_TOPIC,10,13,builder=h(7))),4)
+        self.assertTrue(len(p.builder_queries)>1 and all(b==h(7) for b in p.builder_queries))
+        class IgnoresBuilder(Provider):
+            def logs_page(self,*args,**kwargs):return [checkout()]
+        with self.assertRaisesRegex(SourceIncomplete,'unexpected_checkout_builder'):
+            complete_logs(IgnoresBuilder(),VRF_V3_CONTRACT,VRF_V3_CHECKOUT_TOPIC,10,13,builder=h(7))
+
+    def test_scoped_prefix_copies_only_matching_builder_and_preserves_archive(self):
+        a,b=checkout(block=10,tx=1),checkout(block=11,tx=2)
+        a['topics'][3],b['topics'][3]=h(7),h(8)
+        p=Provider([a,b],head=20)
+        for r in (a,b):p.add_receipt([r],[payment(r)])
+        self.setup_event();self.assertEqual(self.scanner(p).sync('test',now=200)['state'],'finalized')
+        archive=self.store.read_snapshot('test')[0]['snapshot_id']
+        self.store.register_event(EventDefinition('scoped',100,None,(VRF_V3_CONTRACT,),builder=h(7)))
+        self.assertEqual(publish_confirmed_prefix(self.store,p,'test','scoped')['checkouts'],1)
+        p.calls.clear();self.assertEqual(self.scanner(p).sync('scoped',now=200)['state'],'active')
+        self.assertTrue(all(c[1]>=14 for c in p.calls))
+        self.assertEqual([r['tx_hash'] for r in self.store.read_checkout_snapshot('scoped')[1]],[h(1)])
+        self.assertEqual(self.store.read_snapshot('test')[0]['snapshot_id'],archive)
+
+    def test_builder_scope_is_validated_persisted_and_does_not_change_global_hashes(self):
+        plain=EventDefinition('plain',100,None,(VRF_V3_CONTRACT,))
+        self.assertNotIn('builder',plain.payload())
+        scoped=EventDefinition('scoped',100,None,(VRF_V3_CONTRACT,),builder=h(7).upper().replace('0X','0x'))
+        stored=self.store.register_event(scoped)
+        self.assertEqual(self.store.get_event('scoped').builder,h(7))
+        self.assertNotEqual(source_key(plain,VRF_V3_CONTRACT),source_key(stored,VRF_V3_CONTRACT))
+        with self.assertRaises(ValueError):EventDefinition('invalid',100,None,(VRF_V3_CONTRACT,),builder='0x1234')
+        with self.assertRaises(ValueError):EventDefinition('legacy',100,None,(DEFAULT_PACK_CONTRACTS[0],),builder=h(7))
+        key=source_key(stored,VRF_V3_CONTRACT)
+        with self.assertRaises(ValueError):
+            self.store.commit_chunk('scoped',key,None,11,[dict(wallet=WALLET,tx_hash=h(1),log_index=2,
+                pack_contract=VRF_V3_CONTRACT,pack_id=PACK,draw_count=1,paid_amount_raw=1,timestamp=100,
+                block_number=10,block_hash=h(10),builder=h(8))])
+        self.assertIsNone(self.store.get_checkpoint('scoped',key))
 
     def test_ongoing_activity_reuses_a_verified_prefix_and_keeps_indexing_new_draws(self):
         a, b = checkout(block=10, tx=1), checkout(block=15, tx=2)

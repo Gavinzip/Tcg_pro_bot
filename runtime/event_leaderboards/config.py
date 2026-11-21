@@ -29,7 +29,8 @@ def source_key(definition, contract: str) -> str:
     if contract not in definition.contracts:
         raise ValueError("contract outside event definition")
     schema = definition.contract_schemas[contract]
-    return f"checkout-v{definition.checkout_schema_version}:{definition.chain_id}:{contract}:{schema}:{AUDITED_CHECKOUT_TOPICS[schema]}"
+    key = f"checkout-v{definition.checkout_schema_version}:{definition.chain_id}:{contract}:{schema}:{AUDITED_CHECKOUT_TOPICS[schema]}"
+    return key if definition.builder is None else key + ":builder:" + definition.builder
 
 
 def timestamp(value: str | int) -> int:
@@ -71,6 +72,7 @@ class EventDefinition:
     config_hash: str = ""
     contract_schemas: dict[str, str] = field(default_factory=dict)
     checkout_schema_version: int = 2
+    builder: str | None = None
 
     def __post_init__(self):
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", self.event_id):
@@ -92,11 +94,17 @@ class EventDefinition:
         if any(value is None for value in effective.values()):
             raise ValueError("every contract requires an audited schema")
         object.__setattr__(self, "contract_schemas", effective)
+        if self.builder is not None:
+            object.__setattr__(self, "builder", builder_code(self.builder))
+            if any(value != "v3" for value in effective.values()):
+                raise ValueError("builder-scoped indexing requires audited V3 contracts")
         content = self.payload()
         object.__setattr__(self, "config_hash", hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest())
 
     def payload(self) -> dict:
         content = {key: value for key, value in asdict(self).items() if key not in {"revision", "config_hash"}}
+        if self.builder is None:
+            content.pop("builder")  # Preserve every existing global definition hash.
         if self.checkout_schema_version == 1:
             content.pop("checkout_schema_version")
         return content
@@ -114,7 +122,7 @@ class EventDefinition:
                    contracts=tuple(row.get("contracts", DEFAULT_PACK_CONTRACTS)),
                    chain_id=int(row.get("chain_id", 56)), token_decimals=int(row.get("token_decimals", 18)),
                    revision=int(row.get("revision", 1)), contract_schemas=row.get("contract_schemas", {}),
-                   checkout_schema_version=version)
+                   checkout_schema_version=version, builder=row.get("builder"))
 
 
 def load_event_definitions(path: str | None = None) -> list[EventDefinition]:

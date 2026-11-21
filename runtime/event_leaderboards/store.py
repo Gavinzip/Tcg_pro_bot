@@ -194,6 +194,7 @@ class EventLeaderboardStore:
                         row["builder"] = None
                 if (not row["tx_hash"] or not row["block_hash"] or row["chain_id"] != definition.chain_id
                         or row["pack_contract"] not in definition.contracts
+                        or (definition.builder is not None and row.get("builder") != definition.builder)
                         or row["timestamp"] < definition.start_ts
                         or (definition.end_ts is not None and row["timestamp"] >= definition.end_ts)
                         or row["block_number"] < 0 or row["block_number"] >= next_block
@@ -270,6 +271,8 @@ class EventLeaderboardStore:
                 # block range and frozen identity rows instead of duplicating
                 # the entire checkout ledger at every ongoing publication.
                 metadata["checkout_evidence_storage"] = "ledger_range_v1"
+            if definition.builder is not None:
+                metadata["indexed_builder"] = definition.builder
             seq = db.execute("SELECT COALESCE(MAX(created_seq),0)+1 FROM snapshots").fetchone()[0]
             db.execute("INSERT INTO snapshots VALUES (?,?,?,?,?)", (snapshot_id, event_id, definition.revision, seq, json.dumps(metadata)))
             for code, rows in rankings.items():
@@ -299,6 +302,7 @@ class EventLeaderboardStore:
         metadata, identities, health = self.read_snapshot(event_id,snapshot_id,builder=builder)
         if metadata is None:
             return None, [], health
+        builder = metadata["builder"]
         if not metadata.get('checkout_evidence_supported'):
             raise CheckoutEvidenceUnavailable('Snapshot has no frozen checkout evidence; wait for a new complete snapshot.')
         with self._connection() as db:
@@ -334,6 +338,10 @@ class EventLeaderboardStore:
             builder = builder_code(builder)
         with self._connection() as db:
             definition = self._event(db, event_id)
+            if definition.builder is not None:
+                if builder is not None and builder != definition.builder:
+                    raise ValueError("builder outside indexed activity scope")
+                builder = definition.builder
             latest = db.execute("SELECT * FROM snapshots WHERE event_id=? AND revision=? ORDER BY created_seq DESC LIMIT 1",
                                 (event_id, definition.revision)).fetchone()
             if snapshot_id:
@@ -357,6 +365,8 @@ class EventLeaderboardStore:
             if record is None:
                 return None, [], health
             metadata = json.loads(record["metadata"])
+            if metadata.get("indexed_builder") is not None and metadata["indexed_builder"] != builder:
+                raise ValueError("snapshot indexed for another builder")
             metadata.setdefault("builder_filter_supported", False)
             metadata["builder"] = builder
             if builder is not None:

@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 
 from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC
-from .config import AUDITED_CHECKOUT_TOPICS, source_key
+from .config import AUDITED_CHECKOUT_TOPICS, source_key, builder_code
 from .provider_errors import classify_failure, safe_diagnostic
 
 USDT = "0x55d398326f99059ff775485246999027b3197955"
@@ -177,9 +177,10 @@ class EtherscanProvider:
             height += 1
         return height
 
-    def logs_page(self, contract, topic, start, end, page):
+    def logs_page(self, contract, topic, start, end, page, *, builder=None):
+        filters = {} if builder is None else {"topic3": builder_code(builder), "topic0_3_opr": "and"}
         rows = self.request("logs", "getLogs", address=contract, topic0=topic, fromBlock=start,
-                            toBlock=end, page=page, offset=self.page_size)
+                            toBlock=end, page=page, offset=self.page_size, **filters)
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows) or len(rows) > self.page_size:
             raise SourceIncomplete("invalid_logs_page")
         return rows
@@ -191,29 +192,31 @@ class EtherscanProvider:
         return result
 
 
-def complete_logs(provider, contract, topic, start, end):
+def complete_logs(provider, contract, topic, start, end, *, builder=None):
     """Split full ranges; exhaust pages within one block without dropping ties.
 
     No cursor is moved until the entire requested range is proven complete.
     A full provider result window in one block is deliberately an error.
     """
+    builder = builder_code(builder) if builder is not None else None
+    filters = {} if builder is None else {"builder": builder}
     try:
-        first = provider.logs_page(contract, topic, start, end, 1)
+        first = provider.logs_page(contract, topic, start, end, 1, **filters)
     except SourceIncomplete as error:
         if str(error) != "provider_query_limit" or start == end:
             raise
         middle = (start + end) // 2
-        return complete_logs(provider, contract, topic, start, middle) + complete_logs(provider, contract, topic, middle + 1, end)
+        return complete_logs(provider, contract, topic, start, middle, builder=builder) + complete_logs(provider, contract, topic, middle + 1, end, builder=builder)
     if len(first) < provider.page_size:
         rows = first
     elif start < end:
         middle = (start + end) // 2
-        return complete_logs(provider, contract, topic, start, middle) + complete_logs(provider, contract, topic, middle + 1, end)
+        return complete_logs(provider, contract, topic, start, middle, builder=builder) + complete_logs(provider, contract, topic, middle + 1, end, builder=builder)
     else:
         rows = list(first)
         previous = {identity(row) for row in first}
         for page in range(2, provider.max_pages + 1):
-            batch = provider.logs_page(contract, topic, start, end, page)
+            batch = provider.logs_page(contract, topic, start, end, page, **filters)
             keys = {identity(row) for row in batch}
             if keys & previous:
                 raise SourceIncomplete("provider_repeated_log_page")
@@ -229,6 +232,8 @@ def complete_logs(provider, contract, topic, start, end):
             raise SourceIncomplete("log_outside_requested_range")
         if address(row.get("address")) != contract or not row.get("topics") or str(row["topics"][0]).lower() != topic:
             raise SourceIncomplete("unexpected_checkout_log")
+        if builder is not None and (len(row["topics"]) != 4 or str(row["topics"][3]).lower() != builder):
+            raise SourceIncomplete("unexpected_checkout_builder")
         key = identity(row)
         if key in unique and unique[key] != row:
             raise SourceIncomplete("conflicting_duplicate_log")
@@ -416,7 +421,7 @@ class EventLeaderboardScanner:
                         raise SourceIncomplete("checkpoint_reorg_mismatch")
                 while next_block <= bound and used < self.max_chunks:
                     end = min(bound, next_block + self.chunk_blocks - 1)
-                    logs = complete_logs(self.provider, contract, topic, next_block, end)
+                    logs = complete_logs(self.provider, contract, topic, next_block, end, builder=definition.builder)
                     # getLogs is complete for the whole range. Commit each fully
                     # verified block as an anchored prefix; a hard job deadline
                     # must not discard twenty minutes of completed receipts.

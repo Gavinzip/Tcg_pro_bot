@@ -139,3 +139,7 @@ A completed chunk commits all verified checkout ledger entries, migrations and c
 ## Verification
 
 Run `python3 -m unittest tests.test_event_leaderboard_store -v`. Tests cover more than 300 wallets, immutable pagination across new publications, global tie ranks, verified multi-hop aliases, Unicode search, very large exact amounts, atomic rollback, revision isolation/recovery, invalid cursor and sort handling, failure preservation, publication coverage guards, overdue detection and pinned-snapshot freshness. Test SQLite files are isolated under `.scratch/event-store-tests/run-<id>/` and should be listed before cleanup.
+
+### Builder-scoped indexing
+
+An activity may set `builder` to a bytes32 code when every contract uses the audited V3 schema. Its revision/hash and source cursor include that scope. The provider query applies topic0 AND topic3; every returned log must match the builder, and its full successful receipt and actual USDT payment are still reconciled. A source ignoring the filter fails explicitly. A final global prefix may seed a narrower builder, copying only its proven checkout rows; global definition hashes and the archived activity remain unchanged. Queries for another builder are rejected.

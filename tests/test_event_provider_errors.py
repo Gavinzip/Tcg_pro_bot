@@ -69,7 +69,7 @@ class ProviderErrorTests(unittest.TestCase):
         diagnostic = {"module": "proxy", "action": "eth_blockNumber", "stage": "connect", "elapsed_ms": 15000}
         failure = SourceIncomplete("provider_timeout", diagnostic=diagnostic)
         definition = SimpleNamespace(checkout_schema_version=2, revision=2, chain_id=56, token_decimals=18,
-                                     start_ts=0, end_ts=100, contracts=[VRF_V3_CONTRACT],
+                                     start_ts=0, end_ts=100, contracts=[VRF_V3_CONTRACT], builder=None,
                                      contract_schemas={VRF_V3_CONTRACT: "v3"})
         recorded = []
         store = SimpleNamespace(get_event=lambda _: definition, read_snapshot=lambda _: (None, [], None),

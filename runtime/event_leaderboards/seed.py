@@ -19,6 +19,7 @@ def seed_from_final_snapshot(store, source_event_id, target_event_id):
         if (source.start_ts != target.start_ts or source.end_ts is None
                 or (target.end_ts is not None and target.end_ts < source.end_ts)
                 or source.chain_id != target.chain_id or source.token_decimals != target.token_decimals
+                or (source.builder is not None and source.builder != target.builder)
                 or source.checkout_schema_version != 2 or target.checkout_schema_version != 2
                 or not set(target.contracts).issubset(source.contracts)
                 or any(source.contract_schemas[c] != target.contract_schemas[c] for c in target.contracts)):
@@ -72,7 +73,8 @@ def seed_from_final_snapshot(store, source_event_id, target_event_id):
                     or any(proof[k] != payload[k] for k in ("pack_contract", "paid_amount_raw", "draw_count",
                         "block_number", "block_hash", "timestamp", "builder"))):
                 raise LedgerConflict("source frozen evidence does not match the verified ledger")
-            if payload["pack_contract"] not in target.contracts:
+            if (payload["pack_contract"] not in target.contracts
+                    or (target.builder is not None and payload.get("builder") != target.builder)):
                 continue
             if payload["block_number"] > through or not source.start_ts <= payload["timestamp"] < source.end_ts:
                 raise LedgerConflict("ledger exceeds the published verified prefix")
