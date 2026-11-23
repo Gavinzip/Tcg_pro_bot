@@ -168,7 +168,8 @@ class ScannerTests(unittest.TestCase):
         self.store.register_event(EventDefinition('scoped',100,None,(VRF_V3_CONTRACT,),builder=h(7)))
         self.assertEqual(publish_confirmed_prefix(self.store,p,'test','scoped')['checkouts'],1)
         p.calls.clear();self.assertEqual(self.scanner(p).sync('scoped',now=200)['state'],'active')
-        self.assertTrue(all(c[1]>=14 for c in p.calls))
+        self.assertIn((VRF_V3_CONTRACT,10,13,1),p.calls)  # Recheck the seeded prefix too.
+        self.assertTrue(any(c[1]>=14 for c in p.calls))
         self.assertEqual([r['tx_hash'] for r in self.store.read_checkout_snapshot('scoped')[1]],[h(1)])
         self.assertEqual(self.store.read_snapshot('test')[0]['snapshot_id'],archive)
 
@@ -204,7 +205,8 @@ class ScannerTests(unittest.TestCase):
         metadata, rows, health = self.store.read_snapshot('ongoing')
         self.assertEqual(health['progress']['snapshot']['snapshot_id'],metadata['snapshot_id'])
         self.assertEqual((metadata['status'], rows[0]['draw_count']), ('live', 6))
-        self.assertTrue(all(call[1] >= 14 for call in p.calls))
+        self.assertIn((VRF_V3_CONTRACT,10,13,1),p.calls)
+        self.assertTrue(any(call[1] >= 14 for call in p.calls))
         self.assertEqual(self.store.read_snapshot('test')[0]['snapshot_id'], archived['snapshot_id'])
         self.assertEqual(publish_confirmed_prefix(self.store, p, 'test', 'ongoing')['snapshot']['snapshot_id'], metadata['snapshot_id'])
         with self.assertRaises(ValueError):
@@ -395,7 +397,7 @@ class ScannerTests(unittest.TestCase):
         self.assertIsNone(self.store.read_snapshot("test")[0])
         self.assertEqual(self.scanner(p, chunk_blocks=1, max_chunks=5).sync("test", now=150)["state"], "finalized")
 
-    def test_resumed_all_source_cursors_avoid_start_boundary_requests(self):
+    def test_explicitly_disabled_replay_retains_forward_only_boundary_optimization(self):
         contracts = (VRF_V3_CONTRACT, DEFAULT_PACK_CONTRACTS[1])
         self.setup_event(contracts)
         initial = Provider(head=14)
@@ -404,15 +406,15 @@ class ScannerTests(unittest.TestCase):
         # A new provider/scanner models a later process: optimization must rely
         # on SQLite progress rather than an in-process cached start block.
         resumed = Provider(head=15)
-        self.assertEqual(self.scanner(resumed).sync("test", now=135)["state"], "active")
+        self.assertEqual(self.scanner(resumed,replay_seconds=0).sync("test", now=135)["state"], "active")
         self.assertEqual(resumed.boundary_calls, [])
         self.assertEqual(resumed.block_calls.count(12), len(contracts), "Every prior cursor anchor is still verified")
         self.assertEqual({(row[1], row[2]) for row in resumed.calls}, {(13, 13)})
         # With no newer confirmed block, retain the active snapshot behavior.
-        self.assertEqual(self.scanner(resumed).sync("test", now=136)["state"], "active")
+        self.assertEqual(self.scanner(resumed,replay_seconds=0).sync("test", now=136)["state"], "active")
         self.assertEqual(resumed.boundary_calls, [])
         final = Provider(head=16)
-        self.assertEqual(self.scanner(final).sync("test", now=150)["state"], "finalized")
+        self.assertEqual(self.scanner(final,replay_seconds=0).sync("test", now=150)["state"], "finalized")
         self.assertEqual(final.boundary_calls, [(140, 16)], "Finalization still resolves the exclusive end boundary")
         finished = Provider(head=17)
         self.assertEqual(self.scanner(finished).sync("test", now=160)["state"], "finalized")
@@ -426,9 +428,9 @@ class ScannerTests(unittest.TestCase):
         self.assertIsNone(self.store.read_snapshot("test")[0])
         resumed = Provider(head=14)
         self.assertEqual(self.scanner(resumed).sync("test", now=130)["state"], "active")
-        self.assertEqual(resumed.boundary_calls, [(100, 14)])
+        self.assertEqual(resumed.boundary_calls, [(100, 14), (100, 14)])
         # The first source resumes at13; the missing source begins at10.
-        self.assertEqual([(row[1], row[2]) for row in resumed.calls], [(10, 12)])
+        self.assertEqual([(row[1], row[2]) for row in resumed.calls], [(10, 12), (10, 12)])
 
     def test_reorg_anchor_stops_advancing(self):
         p = Provider(head=14)

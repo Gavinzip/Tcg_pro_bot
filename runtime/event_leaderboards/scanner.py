@@ -21,6 +21,7 @@ import urllib.request
 from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC
 from .config import AUDITED_CHECKOUT_TOPICS, source_key, builder_code
 from .provider_errors import classify_failure, safe_diagnostic
+from .replay import ReplayIncomplete, replay_confirmed_window
 
 USDT = "0x55d398326f99059ff775485246999027b3197955"
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -352,14 +353,41 @@ def verified_receipt_checkouts(provider, tx_hash, schemas):
 
 
 class EventLeaderboardScanner:
-    def __init__(self, store, provider=None, *, confirmations=64, chunk_blocks=2000, max_chunks=100, schemas=None):
+    def __init__(self, store, provider=None, *, confirmations=64, chunk_blocks=2000, max_chunks=100, schemas=None,
+                 replay_seconds=300):
         self.store = store
         self.provider = provider or EtherscanProvider()
         self.confirmations = int(confirmations)
         self.chunk_blocks, self.max_chunks = int(chunk_blocks), int(max_chunks)
         self.schemas = dict(SCHEMAS if schemas is None else schemas)
-        if self.confirmations < 1 or self.chunk_blocks < 1 or self.max_chunks < 1:
+        self.replay_seconds = int(replay_seconds)
+        if self.confirmations < 1 or self.chunk_blocks < 1 or self.max_chunks < 1 or self.replay_seconds < 0:
             raise ValueError("invalid scanner limits")
+
+    def _verified_log(self, definition, schemas, schema, log, receipts, known=None):
+        tx_hash, index = identity(log)
+        # Previously verified identical evidence can be reused. Newly discovered
+        # identities still require a complete receipt, payment and canonical block.
+        row = known.get((tx_hash, index)) if known is not None else None
+        if row is None:
+            if tx_hash not in receipts:
+                receipts[tx_hash] = verified_receipt_checkouts(self.provider, tx_hash, schemas)
+            row = receipts[tx_hash].get((tx_hash, index))
+        candidate = decode_checkout(log, schema)
+        if (row is None or candidate["paid_amount_raw"] != int(row.get("checkout_event_amount_raw", row["paid_amount_raw"]))
+                or str(candidate['pack_id']) != str(row['pack_id'])
+                or any(candidate[k] != row[k] for k in ("wallet", "draw_count", "builder", "block_hash", "block_number", "checkout_ids"))):
+            raise SourceIncomplete("indexed_log_receipt_mismatch")
+        if (row["timestamp"] >= definition.start_ts
+                and (definition.end_ts is None or row["timestamp"] < definition.end_ts)
+                and int(row["paid_amount_raw"]) > 0):
+            return dict(row, chain_id=definition.chain_id)
+
+    def _overlap_rows(self, definition, schemas, contract, start, end, receipts, known):
+        schema = schemas[contract]
+        logs = complete_logs(self.provider, contract, TOPICS[schema], start, end, builder=definition.builder)
+        return [row for log in logs
+                if (row := self._verified_log(definition, schemas, schema, log, receipts, known)) is not None]
 
     def sync(self, event_id, *, now=None, usernames=None):
         now = int(time.time()) if now is None else int(now)
@@ -420,6 +448,12 @@ class EventLeaderboardScanner:
                 if checkpoint:
                     if self.provider.block(next_block - 1)["hash"] != checkpoint["block_hash"]:
                         raise SourceIncomplete("checkpoint_reorg_mismatch")
+                    if self.replay_seconds:
+                        report = replay_confirmed_window(store=self.store, provider=self.provider, definition=definition,
+                            contract=contract, checkpoint=checkpoint, head=head, bound=bound, seconds=self.replay_seconds,
+                            read_verified=lambda start, end, known: self._overlap_rows(
+                                definition, schemas, contract, start, end, receipts, known))
+                        progress.setdefault('overlap', {})[source] = report
                 while next_block <= bound and used < self.max_chunks:
                     end = min(bound, next_block + self.chunk_blocks - 1)
                     logs = complete_logs(self.provider, contract, topic, next_block, end, builder=definition.builder)
@@ -430,18 +464,9 @@ class EventLeaderboardScanner:
                     for block_number, block_logs in groupby(logs, key=lambda log: number(log["blockNumber"])):
                         checkouts = []
                         for log in block_logs:
-                            tx_hash, index = identity(log)
-                            if tx_hash not in receipts:
-                                receipts[tx_hash] = verified_receipt_checkouts(self.provider, tx_hash, schemas)
-                            row = receipts[tx_hash].get((tx_hash, index))
-                            candidate = decode_checkout(log, schema)
-                            if (row is None or candidate["paid_amount_raw"] != row.get("checkout_event_amount_raw", row["paid_amount_raw"])
-                                    or any(candidate[k] != row[k] for k in ("wallet", "draw_count", "pack_id", "builder", "block_hash", "block_number", "checkout_ids"))):
-                                raise SourceIncomplete("indexed_log_receipt_mismatch")
-                            if (row["timestamp"] >= definition.start_ts
-                                    and (definition.end_ts is None or row["timestamp"] < definition.end_ts)
-                                    and row["paid_amount_raw"] > 0):
-                                checkouts.append(dict(row, chain_id=definition.chain_id))
+                            row = self._verified_log(definition, schemas, schema, log, receipts)
+                            if row is not None:
+                                checkouts.append(row)
                         self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
                                                 block_number + 1, checkouts, block_hash=self.provider.block(block_number)["hash"], expected_revision=definition.revision)
                         checkpoint = {"next_block": block_number + 1}
@@ -470,7 +495,7 @@ class EventLeaderboardScanner:
             return progress
         except Exception as error:
             # Error class/code only: provider URLs and credentials cannot leak to API/logs.
-            code = str(error) if isinstance(error, SourceIncomplete) else type(error).__name__
+            code = str(error) if isinstance(error, (SourceIncomplete, ReplayIncomplete)) else type(error).__name__
             progress.update(state="stale", error=code)
             if isinstance(error, SourceIncomplete) and error.diagnostic:
                 progress["error_details"] = error.diagnostic

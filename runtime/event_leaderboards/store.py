@@ -13,6 +13,7 @@ import uuid
 
 from .config import DEFAULT_DB_PATH, EventDefinition, builder_code, iso_time, timestamp, wallet, source_key
 from .aggregation import build_rankings
+from .evidence_history import initialize_evidence_history, insertion_watermark, checkout_payloads
 
 
 class LedgerConflict(ValueError):
@@ -73,6 +74,9 @@ class EventLeaderboardStore:
             columns = {row[1] for row in db.execute("PRAGMA table_info(checkpoints)")}
             if "block_hash" not in columns:
                 db.execute("ALTER TABLE checkpoints ADD COLUMN block_hash TEXT")
+
+        with self._connection(write=True) as db:
+            initialize_evidence_history(db)
 
     @contextmanager
     def _connection(self, write=False):
@@ -156,6 +160,48 @@ class EventLeaderboardStore:
         with self._connection(write=True) as db:
             self._put_aliases(db, self._event(db, event_id), aliases)
 
+    @staticmethod
+    def _put_checkouts(db, definition, checkouts, lower_block, upper_block, *, contract=None):
+        inserted = 0
+        for original in checkouts:
+            row = dict(original)
+            for key in ("draw_count", "block_number", "log_index", "timestamp"):
+                if isinstance(row.get(key), bool) or not isinstance(row.get(key), int):
+                    raise ValueError("invalid checkout integer: " + key)
+            row["wallet"] = wallet(row["wallet"])
+            row["pack_contract"] = wallet(row["pack_contract"])
+            row["chain_id"] = int(row.get("chain_id", definition.chain_id))
+            raw = str(row["paid_amount_raw"])
+            if not raw.isdigit() or int(raw) <= 0 or row["draw_count"] <= 0 or row["log_index"] < 0:
+                raise ValueError("only positive actually-paid successful checkouts count")
+            row["paid_amount_raw"] = str(int(raw))
+            row["tx_hash"] = str(row["tx_hash"]).lower()
+            row["block_hash"] = str(row["block_hash"]).lower()
+            row["pack_id"] = str(row["pack_id"])
+            if definition.checkout_schema_version >= 2:
+                if definition.contract_schemas.get(row["pack_contract"]) == "v3":
+                    row["builder"] = builder_code(row.get("builder"))
+                elif row.get("builder") is not None:
+                    raise ValueError("legacy checkout cannot claim a builder")
+                else:
+                    row["builder"] = None
+            if (not row["tx_hash"] or not row["block_hash"] or row["chain_id"] != definition.chain_id
+                    or row["pack_contract"] not in definition.contracts
+                    or (contract is not None and row["pack_contract"] != contract)
+                    or (definition.builder is not None and row.get("builder") != definition.builder)
+                    or row["timestamp"] < definition.start_ts
+                    or (definition.end_ts is not None and row["timestamp"] >= definition.end_ts)
+                    or row["block_number"] < 0 or row["block_number"] >= upper_block
+                    or (lower_block is not None and row["block_number"] < lower_block)):
+                raise ValueError("checkout outside validated event/chunk scope")
+            payload = json.dumps(row, sort_keys=True, separators=(",", ":"))
+            identity = (definition.event_id, definition.revision, row["chain_id"], row["tx_hash"], row["log_index"])
+            existing = db.execute("SELECT payload FROM ledger WHERE event_id=? AND revision=? AND chain_id=? AND tx_hash=? AND log_index=?", identity).fetchone()
+            if existing and existing[0] != payload:
+                raise LedgerConflict("checkout identity changed (possible reorg)")
+            inserted += db.execute("INSERT OR IGNORE INTO ledger VALUES (?,?,?,?,?,?)", (*identity, payload)).rowcount
+        return inserted
+
     def commit_chunk(self, event_id, source_key, expected_next_block, next_block, checkouts, aliases=(), block_hash=None, expected_revision=None):
         """Only complete verified chunks enter the ledger; all validation rolls back checkpoint too."""
         if not source_key or not isinstance(next_block, int) or next_block < 0:
@@ -170,45 +216,50 @@ class EventLeaderboardStore:
             previous = db.execute("SELECT next_block FROM checkpoints WHERE event_id=? AND revision=? AND source_key=?", scope).fetchone()
             if (previous[0] if previous else None) != expected_next_block:
                 raise LedgerConflict("checkpoint changed; rescan current checkpoint")
-            for original in checkouts:
-                row = dict(original)
-                for key in ("draw_count", "block_number", "log_index", "timestamp"):
-                    if isinstance(row.get(key), bool) or not isinstance(row.get(key), int):
-                        raise ValueError("invalid checkout integer: " + key)
-                row["wallet"] = wallet(row["wallet"])
-                row["pack_contract"] = wallet(row["pack_contract"])
-                row["chain_id"] = int(row.get("chain_id", definition.chain_id))
-                raw = str(row["paid_amount_raw"])
-                if not raw.isdigit() or int(raw) <= 0 or row["draw_count"] <= 0 or row["log_index"] < 0:
-                    raise ValueError("only positive actually-paid successful checkouts count")
-                row["paid_amount_raw"] = str(int(raw))
-                row["tx_hash"] = str(row["tx_hash"]).lower()
-                row["block_hash"] = str(row["block_hash"]).lower()
-                row["pack_id"] = str(row["pack_id"])
-                if definition.checkout_schema_version >= 2:
-                    if definition.contract_schemas.get(row["pack_contract"]) == "v3":
-                        row["builder"] = builder_code(row.get("builder"))
-                    elif row.get("builder") is not None:
-                        raise ValueError("legacy checkout cannot claim a builder")
-                    else:
-                        row["builder"] = None
-                if (not row["tx_hash"] or not row["block_hash"] or row["chain_id"] != definition.chain_id
-                        or row["pack_contract"] not in definition.contracts
-                        or (definition.builder is not None and row.get("builder") != definition.builder)
-                        or row["timestamp"] < definition.start_ts
-                        or (definition.end_ts is not None and row["timestamp"] >= definition.end_ts)
-                        or row["block_number"] < 0 or row["block_number"] >= next_block
-                        or (expected_next_block is not None and row["block_number"] < expected_next_block)):
-                    raise ValueError("checkout outside validated event/chunk scope")
-                payload = json.dumps(row, sort_keys=True, separators=(",", ":"))
-                identity = (event_id, definition.revision, row["chain_id"], row["tx_hash"], row["log_index"])
-                existing = db.execute("SELECT payload FROM ledger WHERE event_id=? AND revision=? AND chain_id=? AND tx_hash=? AND log_index=?", identity).fetchone()
-                if existing and existing[0] != payload:
-                    raise LedgerConflict("checkout identity changed (possible reorg)")
-                db.execute("INSERT OR IGNORE INTO ledger VALUES (?,?,?,?,?,?)", (*identity, payload))
+            self._put_checkouts(db, definition, checkouts, expected_next_block, next_block)
             self._put_aliases(db, definition, aliases)
             db.execute("INSERT INTO checkpoints VALUES (?,?,?,?,?) ON CONFLICT(event_id,revision,source_key) "
                        "DO UPDATE SET next_block=excluded.next_block,block_hash=excluded.block_hash", (*scope, next_block, block_hash))
+
+    def checkouts_in_range(self, event_id, contract, start_block, end_block, *, expected_revision):
+        with self._connection() as db:
+            definition = self._event(db, event_id)
+            if definition.revision != expected_revision or contract not in definition.contracts:
+                raise LedgerConflict("event definition changed during overlap scan")
+            return self._range_checkouts(db, definition, contract, start_block, end_block)
+
+    @staticmethod
+    def _range_checkouts(db, definition, contract, start_block, end_block):
+        return [json.loads(r[0]) for r in db.execute(
+            "SELECT payload FROM ledger WHERE event_id=? AND revision=? "
+            "AND json_extract(payload,'$.pack_contract')=? "
+            "AND json_extract(payload,'$.block_number') BETWEEN ? AND ?",
+            (definition.event_id, definition.revision, contract, start_block, end_block))]
+
+    def reconcile_confirmed_range(self, event_id, contract, checkpoint, start_block, end_block, checkouts):
+        """Append verified late records atomically without rewinding/advancing a cursor.
+
+        A successful response that now omits already-known records is an error,
+        not a request to delete evidence. Conflicting identities roll back too.
+        """
+        if (type(start_block) is not int or type(end_block) is not int
+                or not 0 <= start_block <= end_block < checkpoint['next_block']):
+            raise ValueError("invalid confirmed overlap bounds")
+        with self._connection(write=True) as db:
+            definition = self._event(db, event_id)
+            if definition.revision != checkpoint['revision']:
+                raise LedgerConflict("event definition changed during overlap scan")
+            current = db.execute("SELECT next_block,block_hash FROM checkpoints "
+                "WHERE event_id=? AND revision=? AND source_key=?",
+                (event_id, definition.revision, source_key(definition, contract))).fetchone()
+            if (current is None or current[0] != checkpoint['next_block']
+                    or current[1] != checkpoint['block_hash']):
+                raise LedgerConflict("checkpoint changed during overlap scan")
+            known = self._range_checkouts(db, definition, contract, start_block, end_block)
+            key = lambda r: (r['chain_id'], r['tx_hash'].lower(), r['log_index'])
+            if not {key(r) for r in known}.issubset({key(r) for r in checkouts}):
+                raise LedgerConflict("overlap response omitted known paid checkout")
+            return self._put_checkouts(db, definition, checkouts, start_block, end_block + 1, contract=contract)
 
     def set_progress(self, event_id, progress):
         with self._connection(write=True) as db:
@@ -267,10 +318,10 @@ class EventLeaderboardStore:
                         "builder_filter_supported": definition.checkout_schema_version >= 2, "builder": None,
                         "checkout_evidence_supported": True}
             if definition.end_ts is None:
-                # The ledger is append-only within a revision. Pin the verified
-                # block range and frozen identity rows instead of duplicating
-                # the entire checkout ledger at every ongoing publication.
-                metadata["checkout_evidence_storage"] = "ledger_range_v1"
+                # Pin insertion order as well as block/time and identities.
+                # A later repair of an older block must not alter this evidence.
+                metadata["checkout_evidence_storage"] = "ledger_range_v2"
+                metadata["ledger_insertion_watermark"] = insertion_watermark(db)
             if definition.builder is not None:
                 metadata["indexed_builder"] = definition.builder
             seq = db.execute("SELECT COALESCE(MAX(created_seq),0)+1 FROM snapshots").fetchone()[0]
@@ -307,11 +358,17 @@ class EventLeaderboardStore:
             raise CheckoutEvidenceUnavailable('Snapshot has no frozen checkout evidence; wait for a new complete snapshot.')
         with self._connection() as db:
             storage = metadata.get('checkout_evidence_storage')
-            if storage == 'ledger_range_v1':
+            if storage in {'ledger_range_v1', 'ledger_range_v2'}:
+                cutoff = metadata.get('ledger_insertion_watermark')
+                if storage == 'ledger_range_v1':
+                    record = db.execute('SELECT insertion_id FROM snapshot_ledger_watermarks WHERE snapshot_id=?',
+                                        (metadata['snapshot_id'],)).fetchone()
+                    cutoff = record[0] if record else None
+                if type(cutoff) is not int or cutoff < 0:
+                    raise CheckoutEvidenceUnavailable('Snapshot has no frozen insertion watermark.')
                 frozen_identities = {alias: row for row in identities for alias in row['aliases']}
                 rows = []
-                for raw in db.execute('SELECT payload FROM ledger WHERE event_id=? AND revision=? ORDER BY tx_hash,log_index',
-                                      (event_id,metadata['revision'])):
+                for raw in checkout_payloads(db, event_id, metadata['revision'], cutoff):
                     checkout = json.loads(raw[0])
                     if (checkout['block_number'] > metadata['through_block']
                             or checkout['timestamp'] > timestamp(metadata['data_through_at'])

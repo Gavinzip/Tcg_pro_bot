@@ -71,6 +71,8 @@ def main(argv=None):
     parser.add_argument("--confirmations", type=int, default=int(os.getenv("EVENT_LEADERBOARD_CONFIRMATIONS", "64")))
     parser.add_argument("--chunk-blocks", type=int, default=int(os.getenv("EVENT_LEADERBOARD_CHUNK_BLOCKS", "2000")))
     parser.add_argument("--max-chunks", type=int, default=int(os.getenv("EVENT_LEADERBOARD_MAX_CHUNKS", "100")))
+    parser.add_argument("--replay-seconds", type=int, default=int(os.getenv("EVENT_LEADERBOARD_REPLAY_SECONDS", "300")),
+                        help="Recheck this many seconds before each persisted confirmed cursor (default: 300)")
     args = parser.parse_args(argv)
     store = None
     selected = []
@@ -103,7 +105,7 @@ def main(argv=None):
         for event in selected:
             store.set_aliases(event.event_id, aliases)
         scanner = EventLeaderboardScanner(store, EtherscanProvider(), confirmations=args.confirmations,
-            chunk_blocks=args.chunk_blocks, max_chunks=args.max_chunks)
+            chunk_blocks=args.chunk_blocks, max_chunks=args.max_chunks, replay_seconds=args.replay_seconds)
         results = [scanner.sync(event.event_id, usernames=names) for event in selected]
         print(json.dumps({"events": results, "identity_sources": {"username_entries": len(names),
             "verified_migration_pairs": len(aliases)}}, sort_keys=True))

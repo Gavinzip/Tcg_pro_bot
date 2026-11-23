@@ -12,6 +12,50 @@ The separate website-token implementation is documented in [API client tokens](A
 
 Website-scoped credentials and the [builder-filter extension](EVENT_LEADERBOARD_BUILDER.md) are live. The November 20 finite activity's schema-v2 rebuild completed on November 21 at 01:46 Taipei time: snapshot `3140f6689c664479a7a24892899c7107` is final, with 407 wallets, 3,607 verified paid checkouts and 7,568 draws. Complete scoped results, cursor/search and frozen checkout reads passed live checks. Filtering precedes aggregation; snapshot_id plus builder pins a scope and cursors bind it. Search ranks remain global within that builder. Historical snapshots lacking builder evidence still return 409 when filtered.
 
+## Five-minute overlap repair
+
+The scanner now defaults to `EVENT_LEADERBOARD_REPLAY_SECONDS=300`, also exposed as
+`sync_event_leaderboards.py --replay-seconds 300`. Every resumed round checks the
+prior checkpoint's block hash, then rereads the preceding 300 seconds of confirmed
+chain time before advancing. The lower bound includes its timestamp and is clamped
+to the activity start. The reference is the persisted cursor, not wall-clock time;
+an outage therefore cannot skip the old scan boundary. Initial backfills retain
+their complete forward scan. Already-finalized archives remain stopped.
+
+Only newly discovered paid checkout identities are appended, using the existing
+`(event_id, revision, chain_id, tx_hash, log_index)` key. Different event indices in
+one transaction remain distinct. Identical verified evidence reuses its receipt
+proof; new identities still pass full receipt/payment/canonical-block validation.
+The whole overlap is committed atomically without changing the forward checkpoint.
+A failed read, omitted known paid record (`overlap_missing_known_checkout`), changed
+identity, or reorg prevents new publication; existing evidence is never deleted to
+match an incomplete provider reply. This is an explicit reconciliation step, not
+a provider fallback. Late indexing older than the window still needs a separate
+historical audit; overlap does not prove provider-wide completeness.
+
+New ongoing evidence uses `ledger_range_v2`, freezing a stable insertion watermark
+in addition to the block/time bound and participant identities. A transactional
+migration gives existing `ledger_range_v1` snapshots sidecar watermarks before any
+repair; their IDs and metadata are unchanged. New late records affect only new
+snapshots, including after restart or SQLite VACUUM. An insertion trigger covers
+normal scans and confirmed-prefix seeds. No per-snapshot history copy is required.
+
+Each round adds a bounded overlap log read and time-boundary resolution (which may
+need several block reads). Existing identical checkout receipts are not fetched
+again; newly discovered records and provider pagination add requests as necessary.
+The 60-second scheduler wait, 64 confirmations and provider rate limit are unchanged.
+
+Local verification: `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_event_replay -v`.
+For the real campaign ticket-engine integration, install the project's normal
+`python-dotenv` and `requests` dependencies and set `CAMPAIGN_TEST_SOURCE_PATH` to
+its existing checkout, then run `tests.test_event_replay_campaign`. This starts the
+normal authenticated Profile HTTP server on loopback, uses test-owned SQLite files
+and synthetic chain input, and launches the actual campaign modules in fresh Node
+processes. It never calls production or paid chain APIs. Optional
+`REPLAY_TEST_REPORT` writes the checked 29 → 39 → 39 ticket result and unchanged
+29-ticket pinned snapshot. Test artifacts live under `.scratch/event-replay-tests/`
+and `.scratch/event-replay-campaign-tests/`; list exact files before cleanup.
+
 ## Counting and ranking
 
 `counting_rule=confirmed_paid_checkout`: count each successfully settled, confirmed checkout's draw quantity only when the transaction's actual payment is verified. Free/gift draws and failed transactions do not count. The scanner reconciles successful checkout events with payment receipts. Publication independently checks in its SQLite transaction that every configured audited contract source has a checkpoint beyond the requested confirmed block and a nonempty reorg anchor. A published zero-participant snapshot is valid only after this complete scan.
@@ -134,7 +178,7 @@ Applying a different start/end/contract/chain/decimal definition creates a new r
 
 For an explicit new activity, `runtime.event_leaderboards.seed.publish_confirmed_prefix` can copy a completed prefix from an archived activity into an empty target revision. Starts, chain, decimals and audited schemas must match; target contracts must be a subset, the source must be final, every source cursor must share the published bound and anchor, and ledger rows must match frozen checkout evidence. A fresh same-provider chain anchor is required before publishing. The source archive is unchanged and seed provenance is durable. Backdating to an earlier start fails this compatibility check and requires a new full backfill rather than skipping the missing history.
 
-Single-contract ongoing activities also publish complete intermediate chunks while catching up; `data_through_at` is the verified prefix watermark, not a claim to have reached the current head. Finite activities retain their original all-source completion behavior. Ongoing checkout snapshots use `checkout_evidence_storage=ledger_range_v1`: an immutable ledger revision and block/time bound plus frozen snapshot identities. Later ledger appends or alias updates cannot alter old checkout pages. This avoids copying every historical checkout at every ongoing publication; legacy frozen checkout rows remain supported for archived finite snapshots.
+Single-contract ongoing activities also publish complete intermediate chunks while catching up; `data_through_at` is the verified prefix watermark, not a claim to have reached the current head. Finite activities retain their original all-source completion behavior. Ongoing checkout snapshots use `checkout_evidence_storage=ledger_range_v2`: an insertion watermark, immutable ledger revision and block/time bound plus frozen snapshot identities. Late ledger repairs and alias updates cannot alter old checkout pages; prior v1 snapshots receive sidecar watermarks during migration. This avoids copying every historical checkout at every ongoing publication; legacy frozen checkout rows remain supported for archived finite snapshots.
 
 A completed chunk commits all verified checkout ledger entries, migrations and checkpoint atomically; validation failure rolls back the whole chunk. Checkout identity is `(event_id,revision,chain_id,tx_hash,log_index)`. Identical duplicates are idempotent, inconsistent duplicates halt visibly. Publication verifies coverage using the same audited chain/contract/schema/topic source keys as the scanner and writes the metadata and every participant row in one transaction. Incomplete, unanchored, or lagging sources prevent publication. Reorg boundary checks are required before advancing a stored checkpoint; a mismatch preserves prior published results and marks the event stale for investigation.
 
