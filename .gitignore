@@ -1,4 +1,6 @@
 .env
+.secrets/
+.scratch/
 SERVER_ENV_BACKUP.md
 __pycache__/
 *.pyc

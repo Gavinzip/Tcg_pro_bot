@@ -193,7 +193,8 @@ def _coerce_thread_auto_archive_minutes(raw: str | int | None, default: int = 14
     return min(allowed, key=lambda x: abs(x - value))
 
 
-NFT_SYNC_ENABLE = _env_true("NFT_SYNC_ENABLE", True)
+LEGACY_LEADERBOARDS_ENABLED = _env_true("LEGACY_LEADERBOARDS_ENABLED", False)
+NFT_SYNC_ENABLE = LEGACY_LEADERBOARDS_ENABLED and _env_true("NFT_SYNC_ENABLE", True)
 NFT_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "sync_nft13_incremental.py")
 NFT_SYNC_STARTUP_DONE = False
 NFT_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
@@ -243,7 +244,7 @@ def _safe_tzinfo(name: str):
 
 NFT_SYNC_RUN_TIME = dt_time(hour=NFT_SYNC_HOUR, minute=NFT_SYNC_MINUTE, tzinfo=_safe_tzinfo(NFT_SYNC_TZ))
 
-RANK_SYNC_ENABLE = _env_true("RANK_SYNC_ENABLE", True)
+RANK_SYNC_ENABLE = LEGACY_LEADERBOARDS_ENABLED and _env_true("RANK_SYNC_ENABLE", True)
 RANK_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "update_rankings.py")
 RANK_SYNC_STARTUP_DONE = False
 RANK_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
@@ -261,7 +262,7 @@ RANK_SYNC_WEEKLY_FULL_ENABLE = _env_true("RANK_SYNC_WEEKLY_FULL_ENABLE", True)
 RANK_SYNC_WEEKLY_FULL_WEEKDAY = max(0, min(6, int(os.getenv("RANK_SYNC_WEEKLY_FULL_WEEKDAY", "6"))))
 RANK_SYNC_RUN_TIME = dt_time(hour=RANK_SYNC_HOUR, minute=RANK_SYNC_MINUTE, tzinfo=_safe_tzinfo(RANK_SYNC_TZ))
 
-PACK_RANK_SYNC_ENABLE = _env_true("PACK_RANK_SYNC_ENABLE", True)
+PACK_RANK_SYNC_ENABLE = LEGACY_LEADERBOARDS_ENABLED and _env_true("PACK_RANK_SYNC_ENABLE", True)
 PACK_RANK_SYNC_SCRIPT_PATH = os.path.join(BASE_DIR, "scripts", "update_pack_rank.py")
 PACK_RANK_SYNC_STARTUP_DONE = False
 PACK_RANK_SYNC_STARTUP_LOCK: asyncio.Lock | None = None
@@ -8984,7 +8985,7 @@ def _build_wallet_profile_context(
             username = _username_from_rankings_wallet(wallet_norm)
 
     short_wallet = f"{wallet_norm[:6]}...{wallet_norm[-4:]}" if wallet_norm and len(wallet_norm) >= 10 else wallet_norm
-    ranking_row = _load_rankings_wallet_map().get(wallet_norm, {}) if wallet_norm else {}
+    ranking_row = _load_rankings_wallet_map().get(wallet_norm, {}) if wallet_norm and LEGACY_LEADERBOARDS_ENABLED else {}
     if PROFILE_DATA_MODE == "chain_official":
         collection = _fetch_wallet_collection_chain(wallet_norm)
     else:
@@ -9243,6 +9244,7 @@ def _build_wallet_profile_context(
         "update_date": datetime.now().strftime("%Y-%m-%d"),
         "history_title": history_labels.get("title", "Collection History"),
         "history_subtitle": history_labels.get("subtitle", "Pack and trade history overview"),
+        "legacy_ranks_enabled": LEGACY_LEADERBOARDS_ENABLED,
         "history_range": history_data.get("history_range") or "-",
         "section_contract": history_labels.get("section_contract", "Contract / Pack Breakdown"),
         "section_activity": history_labels.get("section_activity", "Activity Counts"),
@@ -11526,7 +11528,7 @@ def _rank_sync_should_weekly_full_rebuild_today() -> bool:
 
 
 async def _market_auto_push_market_cache(reason: str, force: bool = False) -> bool:
-    if not MARKET_AUTO_PUSH_ON_NEW:
+    if not MARKET_AUTO_PUSH_ON_NEW or not _env_true("BACKUP_GIT_ENABLED", False):
         return False
     global MARKET_AUTO_PUSH_LOCK, MARKET_AUTO_PUSH_LAST_TS
     if MARKET_AUTO_PUSH_LOCK is None:
@@ -11699,6 +11701,9 @@ async def on_ready():
                 PACK_RANK_SYNC_STARTUP_DONE = True
         if not pack_rank_interval_sync_job.is_running():
             pack_rank_interval_sync_job.start()
+
+    from runtime.production_jobs import start_product_background_jobs
+    start_product_background_jobs()
 
     if MARKET_LIVE_SYNC_ON_EVENT and MARKET_SOURCE_CHANNEL_ID > 0:
         asyncio.create_task(_market_live_sync_refresh("startup", force=True))
