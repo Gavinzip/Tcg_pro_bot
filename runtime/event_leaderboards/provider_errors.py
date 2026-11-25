@@ -6,6 +6,18 @@ import urllib.error
 from .transport import ReusedConnectionClosed
 
 
+def classify_rejected_payload(result):
+    """Classify only an explicit API rejection; never return upstream text."""
+    message = result[:4096].lower() if isinstance(result, str) else ''
+    if 'daily' in message and any(word in message for word in ('limit', 'credit', 'quota')):
+        return 'provider_quota_exhausted'
+    if 'rate limit' in message:
+        return 'provider_rate_limit'
+    if 'query timeout' in message or 'result window' in message or 'more than' in message:
+        return 'provider_query_limit'
+    return 'provider_rejected_request'
+
+
 def classify_failure(error, *, stage):
     if isinstance(error, ReusedConnectionClosed):
         return 'provider_stale_connection'
