@@ -40,8 +40,8 @@
 
 ## 本機驗證
 
-**173 項測試通過，0 fail、0 skip。新增付費鏈 API 呼叫為 0。**
+**174 項測試通過，0 fail、0 skip。新增付費鏈 API 呼叫為 0。**
 
-新增案例先紅後綠，包含明確拒絕分類、冷卻後相同 query 成功、多 workers 共用冷卻、等待中期限延長、持續拒絕後不再發送、非白名單不重試、與 timeout 共用總 attempt 上限，以及正常掃描的暫時失敗成功／持續失敗保存前綴並於下一輪續掃。既有 builder、付款、重組、去重與 4 RPS pacing 回歸亦全部通過。
+新增案例先紅後綠，包含明確拒絕分類、冷卻後相同 query 成功、多 workers 共用冷卻、等待中期限延長、持續拒絕後不再發送、非白名單不重試、與 timeout 共用總 attempt 上限，以及正常掃描的暫時失敗成功／持續失敗保存前綴並於下一輪續掃。審查後補強的真實執行緒測試，先以 event 證明一個 peer 在 gate 內等待、另兩個 peer 非阻塞取鎖已失敗，才放出持續拒絕；確認它們全數零新增 API attempt。另一個三執行緒案例在等待中由兩個真實請求先後延長共享期限，證明原期限到達仍不會提早發送。既有 builder、付款、重組、去重與 4 RPS pacing 回歸亦全部通過。
 
 證據留在忽略目錄 `.scratch/safe-four-rps-20261125/`，包括 `red.log`、`green.log`、`safety-final.log` 與 `full-regression.log`。舊 ledger、audit 與其他取樣均保留。

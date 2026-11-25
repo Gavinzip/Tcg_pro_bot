@@ -73,6 +73,21 @@ class RateRecoveryTests(unittest.TestCase):
     def test_all_workers_stop_after_persistent_rate_limit(self):
         provider, clock = self.provider(), Clock()
         entered, release = threading.Event(), threading.Event()
+        waiting, wake_waiter = threading.Event(), threading.Event()
+        blocked = {label: threading.Event() for label in (1, 2)}
+        context = threading.local()
+        gate = provider._lock
+        class TrackedGate:
+            def __enter__(self):
+                if not gate.acquire(blocking=False):
+                    marker = blocked.get(getattr(context, 'label', None))
+                    if marker is not None:
+                        marker.set()  # Nonblocking acquire actually failed.
+                    gate.acquire()
+                return self
+            def __exit__(self, *args):
+                gate.release()
+        provider._lock = TrackedGate()
         lock = threading.Lock()
         calls = []
         def read(*args):
@@ -81,24 +96,115 @@ class RateRecoveryTests(unittest.TestCase):
                 n = len(calls)
             if n == 2:
                 entered.set()
-                release.wait(timeout=2)
+                if not release.wait(timeout=2):
+                    raise AssertionError('persistent-response release timed out')
             raise SourceIncomplete('provider_rate_limit')
         provider._read_response = read
-        def request():
-            try:
-                provider.head()
-            except SourceIncomplete as error:
-                return str(error)
-        with patch('time.monotonic', side_effect=clock.read), patch('time.sleep', side_effect=clock.sleep):
+        def sleep(delay):
+            if getattr(context, 'label', None) == 0:
+                waiting.set()  # This worker holds the gate and is pacing.
+                if not wake_waiter.wait(timeout=2):
+                    raise AssertionError('waiting-worker release timed out')
+            clock.sleep(delay)
+        def request(label):
+            context.label = label
+            with ScanDiagnostics(sink=None) as diagnostic:
+                try:
+                    provider.head()
+                except SourceIncomplete as error:
+                    code = str(error)
+            return code, diagnostic.summary()
+        with patch('time.monotonic', side_effect=clock.read), patch('time.sleep', side_effect=sleep):
             with ThreadPoolExecutor(max_workers=4) as executor:
-                first = executor.submit(request)
-                self.assertTrue(entered.wait(timeout=2))
-                # Mark the repeated refusal before admitting the queued workers.
-                release.set()
-                self.assertEqual(first.result(), 'provider_rate_limit')
-                rest = [executor.submit(request) for _ in range(3)]
-                self.assertEqual([f.result() for f in rest], ['provider_rate_limit'] * 3)
-        self.assertEqual(len(calls), 2)
+                try:
+                    first = executor.submit(request, 'first')
+                    self.assertTrue(entered.wait(timeout=2))
+                    rest = [executor.submit(request, 0)]
+                    self.assertTrue(waiting.wait(timeout=2))
+                    rest += [executor.submit(request, label) for label in (1, 2)]
+                    self.assertTrue(all(marker.wait(timeout=2) for marker in blocked.values()))
+                    self.assertTrue(all(not f.done() for f in rest))
+                    # All three peers are already pacing or blocked on the gate.
+                    release.set()
+                    first_code, first_summary = first.result(timeout=2)
+                    self.assertEqual(first_code, 'provider_rate_limit')
+                    wake_waiter.set()
+                    rest_results = [f.result(timeout=2) for f in rest]
+                finally:
+                    release.set()
+                    wake_waiter.set()
+        self.assertEqual(calls, [100., 105.])
+        self.assertEqual(first_summary['totals']['attempts'], 2)
+        self.assertEqual(first_summary['totals']['retries'], 1)
+        for code, summary in rest_results:
+            self.assertEqual(code, 'provider_rate_limit')
+            self.assertEqual(summary['totals']['attempts'], 0)
+            self.assertEqual(summary['totals']['retries'], 0)
+
+    def test_real_workers_extend_the_shared_cooldown_while_a_peer_is_waiting(self):
+        provider, clock = self.provider(), Clock()
+        context, lock = threading.local(), threading.Lock()
+        entered = {label: threading.Event() for label in ('a', 'c')}
+        release = {label: threading.Event() for label in ('a', 'c')}
+        cooled = {label: threading.Event() for label in ('a', 'c')}
+        waiting = [threading.Event(), threading.Event()]
+        wake = [threading.Event(), threading.Event()]
+        attempts, calls, waiting_delays = {}, [], []
+        def read(*args):
+            label = context.label
+            with lock:
+                attempts[label] = attempts.get(label, 0) + 1
+                attempt = attempts[label]
+                calls.append((label, clock.now))
+            if label in entered and attempt == 1:
+                entered[label].set()
+                if not release[label].wait(timeout=2):
+                    raise AssertionError('response release timed out')
+                raise SourceIncomplete('provider_rate_limit')
+            return '0xa'
+        provider._read_response = read
+        original_refusal = provider._rate_recovery.on_refusal
+        def refusal(*, can_retry):
+            result = original_refusal(can_retry=can_retry)
+            cooled[context.label].set()
+            return result
+        def sleep(delay):
+            if context.label == 'b':
+                index = len(waiting_delays)
+                waiting_delays.append(delay)
+                if index < 2:
+                    waiting[index].set()
+                    if not wake[index].wait(timeout=2):
+                        raise AssertionError('pacing release timed out')
+            clock.sleep(delay)
+        def request(label):
+            context.label = label
+            return provider.head()
+        with patch('time.monotonic', side_effect=clock.read), patch('time.sleep', side_effect=sleep), \
+                patch.object(provider._rate_recovery, 'on_refusal', side_effect=refusal):
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                try:
+                    a = executor.submit(request, 'a')
+                    self.assertTrue(entered['a'].wait(timeout=2))
+                    c = executor.submit(request, 'c')
+                    self.assertTrue(entered['c'].wait(timeout=2))
+                    b = executor.submit(request, 'b')
+                    self.assertTrue(waiting[0].wait(timeout=2))
+                    release['a'].set()
+                    self.assertTrue(cooled['a'].wait(timeout=2))
+                    wake[0].set()
+                    self.assertTrue(waiting[1].wait(timeout=2))
+                    release['c'].set()
+                    self.assertTrue(cooled['c'].wait(timeout=2))
+                    wake[1].set()
+                    self.assertEqual([f.result(timeout=2) for f in (a, b, c)], [10, 10, 10])
+                finally:
+                    for event in (*release.values(), *wake):
+                        event.set()
+        self.assertEqual(calls[:2], [('a', 100.), ('c', 100.25)])
+        self.assertEqual(waiting_delays, [.25, 4.75, .25])
+        self.assertEqual(sorted(stamp for _, stamp in calls[2:]), [105.5, 105.75, 106.])
+        self.assertEqual(attempts, {'a': 2, 'c': 2, 'b': 1})
 
     def test_daily_quota_unknown_receipt_and_auth_failures_do_not_retry(self):
         for code in ('provider_quota_exhausted', 'receipt_unavailable', 'provider_missing_result', 'provider_rejected_request'):
