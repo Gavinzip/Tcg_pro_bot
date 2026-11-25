@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 from runtime.renaiss_card_api import DEFAULT_RENAISS_CARD_API_BASE_URL, fetch_card_api_collectible
 from runtime.profile_job_lock import acquire_profile_job_lock_async, profile_job_lock
+from runtime.profile_sbt import ProfileSbtSnapshot, fetch_profile_sbt_snapshot, sbt_unavailable_text
 from runtime.wallet_migration import wallet_migration_api_payload
 from runtime.wallet_usernames import username_for_wallet
 from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_PACK_NAMES
@@ -8833,33 +8834,6 @@ def _build_wallet_profile_picker_data_unlocked(wallet_address: str) -> dict:
                 collection = []
         else:
             collection = []
-    if not collection:
-        sbt_badges = _fetch_user_sbt_badges(username, wallet_norm)
-        owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
-        sbt_options = []
-        for b in owned_badges[:25]:
-            name = str(b.get("name") or "").strip()
-            if not name:
-                continue
-            sbt_id = str(b.get("sbt_id") or "").strip()
-            balance = _parse_int(b.get("balance")) or 0
-            value = f"id:{sbt_id}" if sbt_id else f"name:{name.lower()}"
-            sbt_options.append(
-                {
-                    "value": value[:100],
-                    "label": name[:100],
-                    "full_label": name[:160],
-                    "description": f"Balance {balance}"[:100],
-                }
-            )
-        return {
-            "username": str(username or wallet_short),
-            "user_id": user_id,
-            "collection_count": 0,
-            "card_options": [],
-            "owned_sbt_count": len(owned_badges),
-            "sbt_options": sbt_options,
-        }
 
     parsed = []
     for item in collection:
@@ -8890,32 +8864,14 @@ def _build_wallet_profile_picker_data_unlocked(wallet_address: str) -> dict:
             }
         )
 
-    sbt_badges = _fetch_user_sbt_badges(username, wallet_norm)
-    owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
-    sbt_options = []
-    for b in owned_badges[:25]:
-        name = str(b.get("name") or "").strip()
-        if not name:
-            continue
-        sbt_id = str(b.get("sbt_id") or "").strip()
-        balance = _parse_int(b.get("balance")) or 0
-        value = f"id:{sbt_id}" if sbt_id else f"name:{name.lower()}"
-        sbt_options.append(
-            {
-                "value": value[:100],
-                "label": name[:100],
-                "full_label": name[:160],
-                "description": f"Balance {balance}"[:100],
-            }
-        )
+    sbt_snapshot = fetch_profile_sbt_snapshot(_fetch_user_sbt_badges, username, wallet_norm)
 
     return {
-        "username": str(username or "Unknown User"),
+        "username": str(username or wallet_short),
         "user_id": user_id,
         "collection_count": len(parsed_sorted),
         "card_options": card_options,
-        "owned_sbt_count": len(owned_badges),
-        "sbt_options": sbt_options,
+        **sbt_snapshot.picker_fields(),
     }
 
 
@@ -8933,6 +8889,7 @@ def _build_wallet_profile_context(
     profile_lang: str = "en",
     background_style: str = "classic",
     poster_types: list[str] | None = None,
+    sbt_snapshot: ProfileSbtSnapshot | None = None,
 ) -> dict:
     profile_lang = _profile_lang_from_locale(profile_lang)
     ui_labels = _profile_ui_labels(profile_lang)
@@ -8942,6 +8899,9 @@ def _build_wallet_profile_context(
     background_key = _normalize_profile_background_key(background_style)
     background_image = _profile_background_data_uri(background_key)
     wallet_norm = _normalize_wallet_address(wallet_address) or str(wallet_address or "").strip().lower()
+
+    if sbt_snapshot is not None and sbt_snapshot.wallet != wallet_norm:
+        raise ValueError("profile_sbt_snapshot_wallet_mismatch")
 
     # Start history build in background so collection/sbt/image preparation can run in parallel.
     history_holder: dict[str, object] = {"data": None, "error": None}
@@ -9061,16 +9021,17 @@ def _build_wallet_profile_context(
 
     hero_name = str(hero.get("name") or "Collection Overview")
     profile_name = str(username or short_wallet or "Unknown User")
-    sbt_badges = _fetch_user_sbt_badges(username, wallet_norm)
-    sbt_total = sum((b.get("balance") or 0) for b in sbt_badges)
-    sbt_live_total = int(sbt_total)
+    if sbt_snapshot is None:
+        sbt_snapshot = fetch_profile_sbt_snapshot(_fetch_user_sbt_badges, username, wallet_norm)
+    sbt_total = sbt_snapshot.total
+    sbt_live_total = sbt_total
     volume_rank_chip = _rank_chip_payload((ranking_row or {}).get("volume_rank"))
     total_spent_rank_chip = _rank_chip_payload((ranking_row or {}).get("total_spent_rank"))
     holdings_rank_chip = _rank_chip_payload((ranking_row or {}).get("holdings_rank"))
     pnl_rank_chip = _rank_chip_payload((ranking_row or {}).get("pnl_rank"))
     participation_rank_chip = _rank_chip_payload((ranking_row or {}).get("participation_days_rank"))
-    sbt_rank_chip = _rank_chip_payload((ranking_row or {}).get("sbt_rank"))
-    owned_badges = [b for b in sbt_badges if b.get("is_owned") and (b.get("balance") or 0) > 0]
+    sbt_rank_chip = _rank_chip_payload((ranking_row or {}).get("sbt_rank") if sbt_snapshot.available else None)
+    owned_badges = sbt_snapshot.owned_badges
 
     selected_lookup = {str(x).strip().lower() for x in (selected_sbt_names or []) if str(x).strip()}
     if include_collection_poster and selected_lookup:
@@ -9286,7 +9247,7 @@ def _build_wallet_profile_context(
         "metric_assets_value_rank_tier": holdings_rank_chip["tier"],
         "metric_sbt_label": "SBT",
         # SBT quantity must always reflect live badges; ranking snapshot is rank-only.
-        "metric_sbt_value": _format_number(sbt_live_total),
+        "metric_sbt_value": _format_number(sbt_live_total) if sbt_snapshot.available else "—",
         "metric_sbt_rank": sbt_rank_chip["text"],
         "metric_sbt_rank_tier": sbt_rank_chip["tier"],
         "metric_buyback_label": history_labels.get("kpi_buyback", "Buyback Total"),
@@ -9334,7 +9295,7 @@ def _build_wallet_profile_context(
         )
     sbt_rank_tier = sbt_rank_chip["tier"] if sbt_rank_chip["tier"] in ("gold", "silver", "bronze") else "none"
     sbt_rank_value = sbt_rank_chip["text"]
-    sbt_owned_badge_live = len(owned_badges)
+    sbt_owned_badge_live = len(owned_badges) if sbt_snapshot.available else None
     sbt_total_display = sbt_live_total
     sbt_badge_count_display = sbt_owned_badge_live
     sbt_badges_sorted = (
@@ -9390,8 +9351,8 @@ def _build_wallet_profile_context(
         "holders_suffix": _t(profile_lang, "位", "holders", "명", "位"),
         "wallet_short": history_data.get("wallet_short") or short_wallet or wallet_norm,
         "username": profile_name,
-        "sbt_total": _format_number(sbt_total_display),
-        "sbt_badge_count": _format_number(sbt_badge_count_display),
+        "sbt_total": _format_number(sbt_total_display) if sbt_snapshot.available else "—",
+        "sbt_badge_count": _format_number(sbt_badge_count_display) if sbt_snapshot.available else "—",
         "sbt_rank": sbt_rank_value,
         "sbt_rank_tier": sbt_rank_tier,
         "holders_total": _format_number(len(_load_rankings_wallet_map())),
@@ -9402,6 +9363,8 @@ def _build_wallet_profile_context(
     return {
         "username": profile_name,
         "user_id": user_id,
+        "sbt_available": sbt_snapshot.available,
+        "sbt_error": sbt_snapshot.error_code,
         "wallet_address": wallet_address,
         "poster_types": [x for x in _PROFILE_POSTER_TYPE_ORDER if x in selected_poster_types],
         "profile_poster_enabled": bool(include_collection_poster and has_collection and len(poster_items_raw) > 0),
@@ -9411,7 +9374,7 @@ def _build_wallet_profile_context(
         "shown_fmv": poster_total_fmv,
         "template_context": {
             "collection_name": f"{profile_name} Collection",
-            "sbt_total": sbt_total,
+            "sbt_total": sbt_total if sbt_snapshot.available else "—",
             "sbt_badges_display": display_badges,
             "items": poster_items,
             "assets_count": total_count,
@@ -9420,7 +9383,7 @@ def _build_wallet_profile_context(
             "items_count_label": ui_labels["items_count_label"],
             "assets_unit": ui_labels["assets_unit"],
             "sbt_badges_label": ui_labels["sbt_badges_label"],
-            "no_sbt_label": ui_labels["no_sbt_label"],
+            "no_sbt_label": ui_labels["no_sbt_label"] if sbt_snapshot.available else sbt_unavailable_text(profile_lang, short=True),
             "owned_prefix": ui_labels["owned_prefix"],
             "brand_name": ui_labels["brand_name"],
             "brand_site": ui_labels["brand_site"],
@@ -9726,7 +9689,11 @@ async def _render_wallet_profile_posters_bundle(
     profile_out = os.path.join(out_dir, f"{safe}_profile.png") if render_profile else None
     history_out = os.path.join(out_dir, f"{safe}_profile_history.png") if render_history else None
     extremes_out = os.path.join(out_dir, f"{safe}_profile_extremes.png") if render_extremes else None
-    sbt_rank_template_exists = PROFILE_ENABLE_SBT_RANK_POSTER and os.path.exists(PROFILE_SBT_RANK_TEMPLATE_PATH)
+    sbt_rank_template_exists = (
+        PROFILE_ENABLE_SBT_RANK_POSTER
+        and (not isinstance(template_payload, dict) or template_payload.get("sbt_available", True))
+        and os.path.exists(PROFILE_SBT_RANK_TEMPLATE_PATH)
+    )
     sbt_rank_out = os.path.join(out_dir, f"{safe}_profile_sbt_rank.png") if sbt_rank_template_exists else None
     holdings_out = os.path.join(out_dir, f"{safe}_profile_holdings.png") if render_holdings else None
 
@@ -12026,7 +11993,8 @@ class ProfileConfigView(discord.ui.View):
             ProfileSBTSelect(
                 self.sbt_options,
                 placeholder=self.texts["sbt_placeholder"],
-                no_option_label=self.texts["no_sbt_option"],
+                no_option_label=(self.texts["no_sbt_option"] if self.picker_data.get("sbt_available", True)
+                                 else sbt_unavailable_text(self.selected_lang, short=True)),
             )
         )
         self.add_item(
@@ -12074,7 +12042,10 @@ class ProfileConfigView(discord.ui.View):
 
     def render_message(self) -> str:
         collection_count = int((self.picker_data or {}).get("collection_count") or 0)
-        owned_sbt_count = int((self.picker_data or {}).get("owned_sbt_count") or 0)
+        sbt_available = self.picker_data.get("sbt_available", True)
+        owned_sbt_count = (str(int(self.picker_data.get("owned_sbt_count") or 0))
+                           if sbt_available else sbt_unavailable_text(self.selected_lang, short=True))
+        sbt_notice = "" if sbt_available else f"{sbt_unavailable_text(self.selected_lang)}\n\n"
         lang_text = f"{LANG_FLAGS.get(self.selected_lang, '🌐')} {LANG_LABELS.get(self.selected_lang, self.selected_lang)}"
         template_text = f"Top {self.selected_template}"
         poster_text = self._selected_lines(self.selected_poster_values, self.poster_label_map)
@@ -12085,6 +12056,7 @@ class ProfileConfigView(discord.ui.View):
             f"{self.texts['wallet_label']}: `{self.wallet}`\n"
             f"{self.texts['collection_label']}: **{collection_count}** ｜ "
             f"{self.texts['selectable_sbt_label']}: **{owned_sbt_count}**\n\n"
+            f"{sbt_notice}"
             f"**{self.texts['current_selection_title']}**\n"
             f"{self.texts['lang_selected_label']}: **{lang_text}**\n"
             f"{self.texts['poster_selected_label']}:\n{poster_text}\n"
@@ -12142,6 +12114,7 @@ class ProfileConfigView(discord.ui.View):
                 self.selected_lang,
                 selected_background,
                 selected_posters,
+                self.picker_data.get("sbt_snapshot"),
             )
             safe_name = f"{self.username}_{self.wallet[-6:]}"
             render_collection = "collection" in selected_poster_types
@@ -12211,8 +12184,11 @@ class ProfileConfigView(discord.ui.View):
                     f"History · Opened Packs: **{_format_number(history_summary.get('opened_packs'))}** | "
                     f"Net: **{_format_usdt_currency(history_summary.get('net_total'), signed=True)}**"
                 )
+            sbt_notice = ("" if profile_ctx.get("sbt_available", True)
+                          else f"{sbt_unavailable_text(self.selected_lang)}\n")
             summary = (
                 f"✅ **{self.username}** · {self.texts['summary_done']}\n"
+                f"{sbt_notice}"
                 f"{history_only_hint}"
                 f"{self.texts['wallet_label']}: `{self.wallet}`\n"
                 f"{self.texts['poster_selected_label']}: **{poster_names}**\n"
