@@ -14,6 +14,7 @@ import uuid
 from .config import DEFAULT_DB_PATH, EventDefinition, builder_code, iso_time, timestamp, wallet, source_key
 from .aggregation import build_rankings
 from .evidence_history import initialize_evidence_history, insertion_watermark, checkout_payloads
+from .query_retention import QueryRetention
 
 
 class LedgerConflict(ValueError):
@@ -28,7 +29,8 @@ class CheckoutEvidenceUnavailable(ValueError):
 
 
 class EventLeaderboardStore:
-    def __init__(self, path: str | None = None, *, update_interval_seconds=None, stale_after_seconds=None):
+    def __init__(self, path: str | None = None, *, update_interval_seconds=None, stale_after_seconds=None, query_retention_events=None):
+        self.query_retention = QueryRetention.configured(query_retention_events)
         self.path = str(path or os.getenv("EVENT_LEADERBOARD_DB_PATH") or DEFAULT_DB_PATH)
         self.update_interval_seconds = max(60, int(update_interval_seconds if update_interval_seconds is not None
             else os.getenv("EVENT_LEADERBOARD_SYNC_INTERVAL_SECONDS", "600")))
@@ -77,6 +79,7 @@ class EventLeaderboardStore:
 
         with self._connection(write=True) as db:
             initialize_evidence_history(db)
+            self.query_retention.initialize(db)
 
     @contextmanager
     def _connection(self, write=False):
@@ -324,6 +327,9 @@ class EventLeaderboardStore:
                 metadata["ledger_insertion_watermark"] = insertion_watermark(db)
             if definition.builder is not None:
                 metadata["indexed_builder"] = definition.builder
+            if event_id in self.query_retention.events and not finalized:
+                metadata['query_snapshot_retention_seconds'] = self.query_retention.seconds
+                metadata['query_snapshot_max_versions'] = self.query_retention.max_versions
             seq = db.execute("SELECT COALESCE(MAX(created_seq),0)+1 FROM snapshots").fetchone()[0]
             db.execute("INSERT INTO snapshots VALUES (?,?,?,?,?)", (snapshot_id, event_id, definition.revision, seq, json.dumps(metadata)))
             for code, rows in rankings.items():
@@ -345,6 +351,7 @@ class EventLeaderboardStore:
                                (snapshot_id,checkout['tx_hash'],checkout['log_index'],json.dumps(frozen,ensure_ascii=False)))
             db.execute("INSERT INTO event_state VALUES (?,?,NULL,NULL) ON CONFLICT(event_id,revision) DO UPDATE SET last_error=NULL",
                        (event_id, definition.revision))
+            self.query_retention.record(db, event_id, metadata, generated)
             return metadata
 
     def read_checkout_snapshot(self, event_id, snapshot_id=None, *, builder=None):
@@ -403,6 +410,7 @@ class EventLeaderboardStore:
                                 (event_id, definition.revision)).fetchone()
             if snapshot_id:
                 record = db.execute("SELECT * FROM snapshots WHERE event_id=? AND snapshot_id=?", (event_id, snapshot_id)).fetchone()
+                self.query_retention.check_pin(event_id, record, latest, int(time.time()))
                 if record is None:
                     raise ValueError("snapshot does not belong to this event")
             else:

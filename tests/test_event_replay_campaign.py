@@ -32,6 +32,7 @@ const {createLeaderboard}=await moduleAt('leaderboard');
 const {createCampaignRanking}=await moduleAt('campaign-ranking');
 const {lockedBinding}=await import(pathToFileURL(input.campaign+'/server/tests/binding-fixture.mjs').href);
 const store=new CampaignStore(input.database);
+let ranking;
 try {
  const rewards=createRewards(store);
  rewards.grant({event:'ongoing',wallet:input.wallet,kind:'cross-platform',subject:'synthetic-sol',
@@ -41,7 +42,8 @@ try {
    campaignRules:{eventId:'ongoing',from:100000,until:null,
    ticketRates:input.packs.map((packId,i)=>({packId,builder:input.builder,tickets:[1,2,5][i]}))}};
  const source=createLeaderboard(config);
- const ranking=createCampaignRanking({config,store,source,rewards});
+ ranking=createCampaignRanking({config,store,source,rewards});
+ await ranking.start();
  const latest=await ranking.read({});
  assert.equal(latest.rows[0].effectiveTickets,input.tickets);
  assert.equal(latest.totalParticipants,1);
@@ -55,7 +57,7 @@ try {
  console.log(JSON.stringify({snapshotId:latest.snapshotId,tickets:latest.rows[0].effectiveTickets,
    sourceSnapshotId:latest.sourceSnapshotId,bonusGrants:rewards.all('ongoing').length,oldTickets,
    summary:latest.summary}));
-} finally {store.close();}
+} finally {await ranking?.close(); store.close();}
 """
 
 

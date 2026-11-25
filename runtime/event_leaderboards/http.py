@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .config import builder_code, load_event_definitions
 from .store import BuilderFilterUnavailable, CheckoutEvidenceUnavailable, EventLeaderboardStore
+from .query_retention import SnapshotExpired
 
 SORT_FIELDS = {"rank", "draw_count", "wallet", "username", "paid_amount"}
 
@@ -126,6 +127,8 @@ class EventLeaderboardHTTP:
                 "offset": next_offset, "q": q.casefold(), "builder": builder})
             return 200, {**metadata, **health, "sort": sort, "order": order, "rows": selected,
                          "total_matches": len(rows), "next_cursor": next_cursor}
+        except SnapshotExpired as exc:
+            return 409, {"error": "snapshot_unavailable", "message": str(exc), "event_id": event_id}
         except BuilderFilterUnavailable as exc:
             return 409, {"error": "builder_filter_unavailable", "message": str(exc),
                          "event_id": event_id, "snapshot_id": snapshot_id, "builder": builder}
@@ -175,6 +178,8 @@ class EventLeaderboardHTTP:
                     {key: row[key] for key in ("wallet", "aliases", "username")} for row in global_rows]}
             return 200, {**metadata, **health, **identities, "evidence_type": "confirmed_paid_checkout",
                          "rows": selected, "total_checkouts": len(rows), "next_cursor": cursor}
+        except SnapshotExpired as exc:
+            return 409, {"error": "snapshot_unavailable", "message": str(exc), "event_id": event_id}
         except (BuilderFilterUnavailable, CheckoutEvidenceUnavailable) as exc:
             return 409, {"error": "checkout_evidence_unavailable", "message": str(exc),
                          "event_id": event_id, "snapshot_id": snapshot_id, "builder": builder}
