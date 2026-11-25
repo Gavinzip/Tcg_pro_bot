@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import sqlite3
+from contextlib import closing
 import unittest
 import uuid
 
@@ -192,7 +193,7 @@ class ReplayTests(unittest.TestCase):
         self.scanner = EventLeaderboardScanner(self.store, self.p, confirmations=2)
         self.add(block=42, tx=2, wallet=OTHER)
         self.assertEqual(self.sync()['overlap'][self.source]['inserted'], 1)
-        with sqlite3.connect(self.store.path) as db:
+        with closing(sqlite3.connect(self.store.path)) as db:
             self.assertEqual(db.execute('SELECT metadata FROM snapshots WHERE snapshot_id=?', (old,)).fetchone()[0], serialized)
             db.execute('VACUUM')
         self.store = EventLeaderboardStore(self.store.path)
