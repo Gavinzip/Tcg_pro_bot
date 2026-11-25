@@ -7,9 +7,11 @@ Card transfers, transaction prices and asynchronous fulfillment are never inputs
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import nullcontext
 from dataclasses import replace
 from itertools import groupby
 import json
+import http.client
 import os
 import re
 import threading
@@ -21,7 +23,11 @@ import urllib.request
 from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC
 from .config import AUDITED_CHECKOUT_TOPICS, source_key, builder_code
 from .provider_errors import classify_failure, safe_diagnostic
+from .diagnostics import CURRENT, ScanDiagnostics, phase, record_request
+from .boundary import first_block_at_timestamp
 from .replay import ReplayIncomplete, replay_confirmed_window
+from .verification import ReceiptPrefetch
+from .transport import PooledJSONHTTP
 
 USDT = "0x55d398326f99059ff775485246999027b3197955"
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -109,6 +115,9 @@ class EtherscanProvider:
         self._next = 0.
         self._lock = threading.Lock()
         self._blocks = {}
+        self._block_lock = threading.Lock()
+        self._block_guards = {}
+        self._http = PooledJSONHTTP() if env.get('EVENT_LEADERBOARD_HTTP_POOL') == '1' else None
 
     def request(self, module, action, **params):
         # All listed operations are idempotent reads. Each attempt uses the same
@@ -125,21 +134,46 @@ class EtherscanProvider:
                     error.diagnostic = dict(error.diagnostic, attempt=attempt, max_attempts=attempts)
                 if str(error) != "provider_timeout" or attempt == attempts:
                     raise
+                record_request(action, retry=True, retry_wait_ms=(2 ** attempt) * 1000)
                 time.sleep(2 ** attempt)
 
     def _request_once(self, module, action, **params):
         with self._lock:
             delay = self._next - time.monotonic()
             if delay > 0:
+                record_request(action, pacing_wait_ms=round(delay * 1000))
                 time.sleep(delay)
             self._next = time.monotonic() + self.spacing
+        started, failure = time.monotonic(), None
+        try:
+            return self._read_response(module, action, params)
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            elapsed = max(0, round((time.monotonic() - started) * 1000))
+            record_request(action, elapsed_ms=elapsed, attempted=True, error=failure is not None,
+                           timeout=isinstance(failure, SourceIncomplete) and str(failure) == 'provider_timeout',
+                           failure_code=str(failure) if isinstance(failure, SourceIncomplete) else
+                           'unclassified' if failure is not None else None)
+
+    def _read_response(self, module, action, params):
         query = dict(chainid=self.chain_id, module=module, action=action, apikey=self.api_key, **params)
         started, stage = time.monotonic(), "connect"
         try:
-            with urllib.request.urlopen(self.api_url + "?" + urllib.parse.urlencode(query), timeout=self.timeout) as response:
-                stage = "read_json"
-                data = json.load(response)
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+            url = self.api_url + "?" + urllib.parse.urlencode(query)
+            if self._http is not None:
+                # The session disables internal retries. The provider owns the
+                # shared pacing gate and bounded same-source timeout recovery.
+                def reading_response():
+                    nonlocal stage
+                    stage = "read_json"
+                data = self._http.read_json(url, self.timeout, on_response=reading_response)
+            else:
+                with urllib.request.urlopen(url, timeout=self.timeout) as response:
+                    stage = "read_json"
+                    data = json.load(response)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, http.client.HTTPException) as error:
             raise SourceIncomplete(classify_failure(error, stage=stage), diagnostic=safe_diagnostic(
                 module, action, params, (time.monotonic() - started) * 1000, error, stage=stage)) from None
         if not isinstance(data, dict) or data.get("error"):
@@ -156,28 +190,39 @@ class EtherscanProvider:
             raise SourceIncomplete("provider_missing_result")
         return result
 
+    def close(self):
+        if self._http is not None:
+            self._http.close()
+
     def head(self):
         self._blocks.clear()
+        self._block_guards.clear()
         return number(self.request("proxy", "eth_blockNumber"))
 
     def block(self, height):
-        if height not in self._blocks:
-            row = self.request("proxy", "eth_getBlockByNumber", tag=hex(height), boolean="false")
-            if not isinstance(row, dict) or number(row.get("number")) != height:
-                raise SourceIncomplete("invalid_block")
-            self._blocks[height] = {"number": height, "hash": hash32(row.get("hash")), "timestamp": number(row.get("timestamp"))}
-        return self._blocks[height]
+        with self._block_lock:
+            guard = self._block_guards.setdefault(height, threading.Lock())
+        with guard:
+            if height not in self._blocks:
+                row = self.request("proxy", "eth_getBlockByNumber", tag=hex(height), boolean="false")
+                if not isinstance(row, dict) or number(row.get("number")) != height:
+                    raise SourceIncomplete("invalid_block")
+                self._blocks[height] = {"number": height, "hash": hash32(row.get("hash")), "timestamp": number(row.get("timestamp"))}
+            return self._blocks[height]
 
     def first_block_at(self, timestamp, head):
         """Resolve seconds boundary, including chains with several blocks per second."""
-        height = number(self.request("block", "getblocknobytime", timestamp=timestamp, closest="before"))
-        if height > head:
-            raise SourceIncomplete("boundary_above_head")
-        while height > 0 and self.block(height - 1)["timestamp"] >= timestamp:
-            height -= 1
-        while height <= head and self.block(height)["timestamp"] < timestamp:
-            height += 1
-        return height
+        with phase('boundary', head_block=head) as details:
+            height = number(self.request("block", "getblocknobytime", timestamp=timestamp, closest="before"))
+            details['hint_block'] = height
+            if height > head:
+                raise SourceIncomplete("boundary_above_head")
+            cached_before = len(self._blocks)
+            height = first_block_at_timestamp(self.block, timestamp, head, height,
+                                              anchors=tuple(self._blocks.values()))
+            details['resolved_block'] = height
+            details['block_reads'] = len(self._blocks) - cached_before
+            return height
 
     def logs_page(self, contract, topic, start, end, page, *, builder=None):
         filters = {} if builder is None else {"topic3": builder_code(builder), "topic0_3_opr": "and"}
@@ -354,15 +399,26 @@ def verified_receipt_checkouts(provider, tx_hash, schemas):
 
 class EventLeaderboardScanner:
     def __init__(self, store, provider=None, *, confirmations=64, chunk_blocks=2000, max_chunks=100, schemas=None,
-                 replay_seconds=300):
+                 replay_seconds=300, verification_workers=1):
         self.store = store
         self.provider = provider or EtherscanProvider()
         self.confirmations = int(confirmations)
         self.chunk_blocks, self.max_chunks = int(chunk_blocks), int(max_chunks)
         self.schemas = dict(SCHEMAS if schemas is None else schemas)
         self.replay_seconds = int(replay_seconds)
+        self.verification_workers = int(verification_workers)
         if self.confirmations < 1 or self.chunk_blocks < 1 or self.max_chunks < 1 or self.replay_seconds < 0:
             raise ValueError("invalid scanner limits")
+        if not 1 <= self.verification_workers <= 8:
+            raise ValueError("invalid verification worker limit")
+
+    def _prefetch(self, logs, receipts, schemas, known=None):
+        if self.verification_workers == 1:
+            return nullcontext(None)
+        transactions = [identity(log)[0] for log in logs if known is None or identity(log) not in known]
+        return ReceiptPrefetch(transactions, receipts,
+                               lambda tx: verified_receipt_checkouts(self.provider, tx, schemas),
+                               self.verification_workers)
 
     def _verified_log(self, definition, schemas, schema, log, receipts, known=None):
         tx_hash, index = identity(log)
@@ -371,7 +427,8 @@ class EventLeaderboardScanner:
         row = known.get((tx_hash, index)) if known is not None else None
         if row is None:
             if tx_hash not in receipts:
-                receipts[tx_hash] = verified_receipt_checkouts(self.provider, tx_hash, schemas)
+                with phase('receipt'):
+                    receipts[tx_hash] = verified_receipt_checkouts(self.provider, tx_hash, schemas)
             row = receipts[tx_hash].get((tx_hash, index))
         candidate = decode_checkout(log, schema)
         if (row is None or candidate["paid_amount_raw"] != int(row.get("checkout_event_amount_raw", row["paid_amount_raw"]))
@@ -386,40 +443,61 @@ class EventLeaderboardScanner:
     def _overlap_rows(self, definition, schemas, contract, start, end, receipts, known):
         schema = schemas[contract]
         logs = complete_logs(self.provider, contract, TOPICS[schema], start, end, builder=definition.builder)
-        return [row for log in logs
-                if (row := self._verified_log(definition, schemas, schema, log, receipts, known)) is not None]
+        rows = []
+        with self._prefetch(logs, receipts, schemas, known) as pending:
+            for log in logs:
+                if pending is not None:
+                    pending.resolve(identity(log)[0])
+                row = self._verified_log(definition, schemas, schema, log, receipts, known)
+                if row is not None:
+                    rows.append(row)
+        return rows
 
     def sync(self, event_id, *, now=None, usernames=None):
-        now = int(time.time()) if now is None else int(now)
-        definition = self.store.get_event(event_id)
-        if definition.checkout_schema_version < 2:
-            definition = self.store.register_event(replace(definition, checkout_schema_version=2))
-        schemas = {**self.schemas, **definition.contract_schemas}
-        progress = {"event_id": event_id, "revision": definition.revision, "state": "scanning", "sources": {}}
+        parent = CURRENT.get()
+        with ScanDiagnostics(sink=parent.sink if parent else None,
+                             run_id=parent.run_id if parent else None, event_id=event_id) as diagnostic:
+            result = self._sync(event_id, now=now, usernames=usernames)
+            diagnostic.outcome = 'error' if result['state'] == 'stale' else 'ok'
+            return result
+
+    def _sync(self, event_id, *, now=None, usernames=None):
+        with phase('event_setup'):
+            now = int(time.time()) if now is None else int(now)
+            definition = self.store.get_event(event_id)
+            if definition.checkout_schema_version < 2:
+                definition = self.store.register_event(replace(definition, checkout_schema_version=2))
+            schemas = {**self.schemas, **definition.contract_schemas}
+            progress = {"event_id": event_id, "revision": definition.revision, "state": "scanning", "sources": {}}
         try:
-            snapshot, _, _ = self.store.read_snapshot(event_id)
+            with phase('event_setup'):
+                snapshot, _, _ = self.store.read_snapshot(event_id)
             if snapshot and snapshot.get("status") == "final":
                 if not snapshot.get('checkout_evidence_supported'):
                     # Add the new immutable evidence format from the already
                     # complete, anchored ledger; never rescan a finalized event.
-                    snapshot = self.store.publish_snapshot(event_id,snapshot['through_block'],
-                        snapshot['data_through_at'],finalized=True,usernames=usernames,expected_revision=definition.revision)
+                    with phase('publish'):
+                        snapshot = self.store.publish_snapshot(event_id,snapshot['through_block'],
+                            snapshot['data_through_at'],finalized=True,usernames=usernames,expected_revision=definition.revision)
                 return dict(progress, state="finalized", snapshot=snapshot)
             if definition.chain_id != 56 or definition.token_decimals != 18:
                 raise SourceIncomplete("unsupported_chain_or_decimals")
             if now < definition.start_ts:
                 progress["state"] = "scheduled"
-                self.store.set_progress(event_id, progress)
+                with phase('commit'):
+                    self.store.set_progress(event_id, progress)
                 return progress
             for contract in definition.contracts:
                 if contract in self.schemas and self.schemas[contract] != definition.contract_schemas[contract]:
                     raise SourceIncomplete("audited_schema_configuration_mismatch")
                 if contract not in schemas or schemas[contract] not in TOPICS:
                     raise SourceIncomplete("unaudited_pack_contract")
-            checkpoints = {contract: self.store.get_checkpoint(event_id, source_key(definition, contract))
-                           for contract in definition.contracts}
-            head = self.provider.head()
-            bound = head - self.confirmations
+            with phase('checkpoint'):
+                checkpoints = {contract: self.store.get_checkpoint(event_id, source_key(definition, contract))
+                               for contract in definition.contracts}
+            with phase('head'):
+                head = self.provider.head()
+                bound = head - self.confirmations
             if bound < 0:
                 raise SourceIncomplete("insufficient_confirmations")
             # Each persisted source cursor already records its first unscanned
@@ -427,18 +505,21 @@ class EventLeaderboardScanner:
             # only while at least one source still needs its initial cursor.
             start = (self.provider.first_block_at(definition.start_ts, head)
                      if any(checkpoint is None for checkpoint in checkpoints.values()) else None)
-            boundary = self.provider.block(bound)
+            with phase('head'):
+                boundary = self.provider.block(bound)
             finalized = definition.end_ts is not None and boundary["timestamp"] >= definition.end_ts
             if finalized:
                 bound = self.provider.first_block_at(definition.end_ts, head) - 1
-                boundary = self.provider.block(bound)
+                with phase('head'):
+                    boundary = self.provider.block(bound)
             progress.update(through_block=bound, through_at=definition.end_ts if finalized else boundary["timestamp"], finalized=finalized)
             if start is not None and bound < start:
                 progress["state"] = "awaiting_confirmations"
-                self.store.set_progress(event_id, progress)
+                with phase('commit'):
+                    self.store.set_progress(event_id, progress)
                 return progress
             receipts, used = {}, 0
-            for contract in definition.contracts:
+            for source_index, contract in enumerate(definition.contracts):
                 schema, topic = schemas[contract], TOPICS[schemas[contract]]
                 source = source_key(definition, contract)
                 checkpoint = checkpoints[contract]
@@ -446,52 +527,69 @@ class EventLeaderboardScanner:
                 if checkpoint and not checkpoint.get("block_hash"):
                     raise SourceIncomplete("checkpoint_missing_reorg_anchor")
                 if checkpoint:
-                    if self.provider.block(next_block - 1)["hash"] != checkpoint["block_hash"]:
-                        raise SourceIncomplete("checkpoint_reorg_mismatch")
+                    with phase('checkpoint', source_index=source_index):
+                        if self.provider.block(next_block - 1)["hash"] != checkpoint["block_hash"]:
+                            raise SourceIncomplete("checkpoint_reorg_mismatch")
                     if self.replay_seconds:
-                        report = replay_confirmed_window(store=self.store, provider=self.provider, definition=definition,
-                            contract=contract, checkpoint=checkpoint, head=head, bound=bound, seconds=self.replay_seconds,
-                            read_verified=lambda start, end, known: self._overlap_rows(
-                                definition, schemas, contract, start, end, receipts, known))
-                        progress.setdefault('overlap', {})[source] = report
+                        with phase('overlap', source_index=source_index) as overlap_details:
+                            report = replay_confirmed_window(store=self.store, provider=self.provider, definition=definition,
+                                contract=contract, checkpoint=checkpoint, head=head, bound=bound, seconds=self.replay_seconds,
+                                read_verified=lambda start, end, known: self._overlap_rows(
+                                    definition, schemas, contract, start, end, receipts, known))
+                            progress.setdefault('overlap', {})[source] = report
+                            overlap_details.update({k: report[k] for k in ('from_block', 'through_block', 'inserted', 'verified_checkouts') if k in report})
                 while next_block <= bound and used < self.max_chunks:
                     end = min(bound, next_block + self.chunk_blocks - 1)
-                    logs = complete_logs(self.provider, contract, topic, next_block, end, builder=definition.builder)
+                    with phase('forward_logs', source_index=source_index, from_block=next_block, through_block=end) as log_details:
+                        logs = complete_logs(self.provider, contract, topic, next_block, end, builder=definition.builder)
+                        log_details['logs'] = len(logs)
                     # getLogs is complete for the whole range. Commit each fully
                     # verified block as an anchored prefix; a hard job deadline
                     # must not discard twenty minutes of completed receipts.
                     # Never checkpoint inside a block or before all its logs pass.
-                    for block_number, block_logs in groupby(logs, key=lambda log: number(log["blockNumber"])):
-                        checkouts = []
-                        for log in block_logs:
-                            row = self._verified_log(definition, schemas, schema, log, receipts)
-                            if row is not None:
-                                checkouts.append(row)
-                        self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
-                                                block_number + 1, checkouts, block_hash=self.provider.block(block_number)["hash"], expected_revision=definition.revision)
-                        checkpoint = {"next_block": block_number + 1}
-                        progress["sources"][source] = {"next_block": block_number + 1, "complete": block_number >= bound}
-                        self.store.set_progress(event_id, progress)
+                    with self._prefetch(logs, receipts, schemas) as pending:
+                        for block_number, block_logs in groupby(logs, key=lambda log: number(log["blockNumber"])):
+                            checkouts = []
+                            for log in block_logs:
+                                with phase('forward_verify'):
+                                    if pending is not None:
+                                        pending.resolve(identity(log)[0])
+                                    row = self._verified_log(definition, schemas, schema, log, receipts)
+                                    if row is not None:
+                                        checkouts.append(row)
+                            with phase('commit', new_checkouts=len(checkouts)):
+                                self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
+                                                        block_number + 1, checkouts, block_hash=self.provider.block(block_number)["hash"], expected_revision=definition.revision)
+                            checkpoint = {"next_block": block_number + 1}
+                            progress["sources"][source] = {"next_block": block_number + 1, "complete": block_number >= bound}
+                            with phase('commit'):
+                                self.store.set_progress(event_id, progress)
                     if checkpoint is None or checkpoint["next_block"] <= end:
-                        self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
-                                                end + 1, [], block_hash=self.provider.block(end)["hash"], expected_revision=definition.revision)
+                        with phase('commit'):
+                            self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
+                                                    end + 1, [], block_hash=self.provider.block(end)["hash"], expected_revision=definition.revision)
                         checkpoint = {"next_block": end + 1}
                     next_block, used = end + 1, used + 1
                     if definition.end_ts is None and len(definition.contracts) == 1 and end < bound:
                         # A fully verified single-source prefix is complete as
                         # of its own watermark, even while catching up to head.
-                        progress['snapshot'] = self.store.publish_snapshot(event_id,end,
-                            self.provider.block(end)['timestamp'],usernames=usernames,expected_revision=definition.revision)
+                        with phase('publish'):
+                            progress['snapshot'] = self.store.publish_snapshot(event_id,end,
+                                self.provider.block(end)['timestamp'],usernames=usernames,expected_revision=definition.revision)
                 progress["sources"][source] = {"next_block": next_block, "complete": next_block > bound}
-                self.store.set_progress(event_id, progress)
+                with phase('commit'):
+                    self.store.set_progress(event_id, progress)
             complete = all(x["complete"] for x in progress["sources"].values())
             progress["state"] = "finalized" if complete and finalized else "active" if complete else "catching_up"
-            self.store.set_progress(event_id, progress)
+            with phase('commit'):
+                self.store.set_progress(event_id, progress)
             if complete:
                 # Every configured contract has reached the identical confirmed bound.
-                progress["snapshot"] = self.store.publish_snapshot(event_id, bound,
-                    definition.end_ts if finalized else boundary["timestamp"], finalized=finalized, usernames=usernames, expected_revision=definition.revision)
-                self.store.set_progress(event_id, progress)
+                with phase('publish'):
+                    progress["snapshot"] = self.store.publish_snapshot(event_id, bound,
+                        definition.end_ts if finalized else boundary["timestamp"], finalized=finalized, usernames=usernames, expected_revision=definition.revision)
+                with phase('commit'):
+                    self.store.set_progress(event_id, progress)
             return progress
         except Exception as error:
             # Error class/code only: provider URLs and credentials cannot leak to API/logs.
@@ -499,5 +597,6 @@ class EventLeaderboardScanner:
             progress.update(state="stale", error=code)
             if isinstance(error, SourceIncomplete) and error.diagnostic:
                 progress["error_details"] = error.diagnostic
-            self.store.record_failure(event_id, code, progress=progress)
+            with phase('commit'):
+                self.store.record_failure(event_id, code, progress=progress)
             return progress

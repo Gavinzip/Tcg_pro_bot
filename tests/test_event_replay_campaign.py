@@ -30,10 +30,12 @@ const {CampaignStore}=await moduleAt('store');
 const {createRewards}=await moduleAt('rewards');
 const {createLeaderboard}=await moduleAt('leaderboard');
 const {createCampaignRanking}=await moduleAt('campaign-ranking');
+const {lockedBinding}=await import(pathToFileURL(input.campaign+'/server/tests/binding-fixture.mjs').href);
 const store=new CampaignStore(input.database);
 try {
  const rewards=createRewards(store);
  rewards.grant({event:'ongoing',wallet:input.wallet,kind:'cross-platform',subject:'synthetic-sol',
+   bindingId:lockedBinding(store,input.wallet,'synthetic-sol'),
    proof:'same-verified-claim',tickets:20,shares:1,earnedAt:'1970-01-01T00:02:00Z',evidence:{test:true}});
  const config={eventId:'ongoing',builder:input.builder,tcgBase:input.origin,tcgToken:'local-test-token',
    campaignRules:{eventId:'ongoing',from:100000,until:null,
@@ -90,7 +92,8 @@ class ReplayCampaignTests(unittest.TestCase):
                         'packs': packs, 'tickets': tickets, 'oldSnapshot': old}
                     result = subprocess.run(['node', '--input-type=module', '-e', NODE_CHECK],
                         env={**os.environ, 'REPLAY_TEST_INPUT': json.dumps(payload)}, capture_output=True,
-                        text=True, timeout=30, check=True)
+                        text=True, timeout=30, check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
                     return json.loads(result.stdout)
                 before = check(29)  # 2x1 + 1x2 + 1x5 +20
                 late = checkout(block=42, tx=3, index=3, count=2, amount=176*10**18, pack=packs[2])

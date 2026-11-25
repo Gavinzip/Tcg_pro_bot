@@ -67,6 +67,9 @@ class Provider:
     def head(self):
         return self.height
 
+    def close(self):
+        pass
+
     def block(self, height):
         self.block_calls.append(height)
         return {"number": height, "hash": self.changed.get(height, h(height)), "timestamp": height * 10}

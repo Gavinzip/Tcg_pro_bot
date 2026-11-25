@@ -1,0 +1,39 @@
+{
+  "before": {
+    "snapshotId": "9993ef3b6a6f77eee98ceee5df543291f7b8f4081d06758ff9b203b357ab47c0",
+    "tickets": 29,
+    "sourceSnapshotId": "82f04d823977449a81270a0eca7d8a50",
+    "bonusGrants": 1,
+    "oldTickets": null,
+    "summary": {
+      "totalDraws": 4,
+      "totalTickets": 29
+    }
+  },
+  "lateRepair": {
+    "snapshotId": "5b4114cb0e787c441d4bbe45468ae7163f4ebe68aaedf2836fa5f82ce2dba5b5",
+    "tickets": 39,
+    "sourceSnapshotId": "d7c4400a80414f7eb9f23bae8e493fcd",
+    "bonusGrants": 1,
+    "oldTickets": 29,
+    "summary": {
+      "totalDraws": 6,
+      "totalTickets": 39
+    }
+  },
+  "afterThreeReplaysAndRestart": {
+    "snapshotId": "ea0629cfd3c99d96ac6b4e8d5bbc601afb6c5a43a512185ec908643d5e318be1",
+    "tickets": 39,
+    "sourceSnapshotId": "599d0ee2dce24d6e9db70a514ada6c98",
+    "bonusGrants": 1,
+    "oldTickets": 29,
+    "summary": {
+      "totalDraws": 6,
+      "totalTickets": 39
+    }
+  },
+  "chainInput": "synthetic delayed-index fixture",
+  "realModules": "/Users/gavin/.codex/worktrees/bnb-api-scan-cadence/b-w",
+  "providerRequests": 0,
+  "productionWrites": 0
+}

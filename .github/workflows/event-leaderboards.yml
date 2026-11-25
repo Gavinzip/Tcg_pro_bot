@@ -29,6 +29,10 @@ jobs:
           tests.test_event_checkout_evidence
           tests.test_event_provider_errors
           tests.test_event_provider_retries
+          tests.test_event_scan_diagnostics
+          tests.test_event_boundary_search
+          tests.test_event_verification_concurrency
+          tests.test_event_http_pool
           tests.test_profile_api_auth
           tests.test_profile_activity_routes
           tests.test_production_jobs

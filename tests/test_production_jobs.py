@@ -74,10 +74,26 @@ class ProductionJobScheduleTests(unittest.IsolatedAsyncioTestCase):
              patch.object(production_jobs.asyncio, 'sleep', side_effect=sleep), \
              patch.object(production_jobs, 'run_command', side_effect=run):
             with self.assertRaises(asyncio.CancelledError):
-                await production_jobs.periodic('event-leaderboards', 'sync_event_leaderboards.py', [], 600, 540)
+                await production_jobs.periodic('event-leaderboards', 'sync_event_leaderboards.py', [], 60, 540)
         read.assert_not_called()
-        self.assertEqual(runs, [200000, 200600])
-        self.assertEqual(sleeps, [600])
+        self.assertEqual(runs, [200000, 200060])
+        self.assertEqual(sleeps, [60])
+
+    async def test_one_minute_wait_still_follows_completion_even_for_a_slow_scan(self):
+        clock, starts = [0.], []
+        async def run(*args):
+            starts.append(clock[0])
+            if len(starts) == 2:
+                raise asyncio.CancelledError()
+            clock[0] += 605
+        async def sleep(delay):
+            self.assertEqual(delay, 60)
+            clock[0] += delay
+        with patch.object(production_jobs, 'run_command', side_effect=run), \
+             patch.object(production_jobs.asyncio, 'sleep', side_effect=sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await production_jobs.periodic('event-leaderboards', 'unused.py', [], 60, 1800)
+        self.assertEqual(starts, [0., 665.])
 
     def test_status_without_valid_success_remains_due(self):
         for raw in ['{}', '[]', '{bad', '{"phase":"complete","updatedAt":"NaN"}']:
