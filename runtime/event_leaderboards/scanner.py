@@ -194,7 +194,8 @@ class EtherscanProvider:
             if height > head:
                 raise SourceIncomplete("boundary_above_head")
             cached_before = len(self._blocks)
-            height = first_block_at_timestamp(self.block, timestamp, head, height)
+            height = first_block_at_timestamp(self.block, timestamp, head, height,
+                                              anchors=tuple(self._blocks.values()))
             details['resolved_block'] = height
             details['block_reads'] = len(self._blocks) - cached_before
             return height

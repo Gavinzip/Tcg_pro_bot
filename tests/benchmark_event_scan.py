@@ -14,7 +14,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from runtime.event_leaderboards.config import EventDefinition
-from runtime.event_leaderboards.diagnostics import ScanDiagnostics
+from runtime.event_leaderboards.diagnostics import ScanDiagnostics, phase
 from runtime.event_leaderboards.scanner import EtherscanProvider, EventLeaderboardScanner, number, SourceIncomplete
 from runtime.event_leaderboards.store import EventLeaderboardStore
 from tests.test_event_leaderboard_scanner import checkout, payment, h, VRF_V3_CONTRACT
@@ -24,19 +24,25 @@ from tests.test_event_boundary_search import measure_boundary
 BASELINE = '169e5f89d85585fd3df4cd05a9b871e513654a76'
 
 
-def baseline_method():
-    source = subprocess.check_output(['git', 'show', BASELINE + ':runtime/event_leaderboards/scanner.py'], text=True)
+def baseline_method(commit=BASELINE):
+    source = subprocess.check_output(['git', 'show', commit + ':runtime/event_leaderboards/scanner.py'], text=True)
     tree = ast.parse(source)
     provider = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'EtherscanProvider')
     method = next(node for node in provider.body if isinstance(node, ast.FunctionDef) and node.name == 'first_block_at')
-    namespace = {'number': number, 'SourceIncomplete': SourceIncomplete}
+    namespace = {'number': number, 'SourceIncomplete': SourceIncomplete, 'phase': phase}
+    if commit != BASELINE:
+        boundary_source = subprocess.check_output(['git', 'show', commit + ':runtime/event_leaderboards/boundary.py'], text=True)
+        exec(compile(boundary_source, '<committed-search-baseline>', 'exec'), namespace)
     exec(compile(ast.Module(body=[method], type_ignores=[]), '<committed-boundary-baseline>', 'exec'), namespace)
     return namespace['first_block_at']
 
 
-def full_scan(path, method=None):
+def full_scan(path, method=None, *, new_transactions=2, response_seconds=.65, timeout_once=False):
+    assert 0 <= new_transactions <= 20
     clock, heights, actions, lines = [0.], [2200], [], []
-    rows = [checkout(block=b, tx=b) for b in (470, 480, 2200, 2210)]
+    new_blocks = [2200, 2210] + [b for b in range(2202, 2240, 2) if b != 2210]
+    rows = [checkout(block=b, tx=b) for b in [470, 480, *new_blocks[:new_transactions]]]
+    injected, warmup = [False], [True]
     for row in rows:
         row['topics'][3] = h(7)
     receipts = {r['transactionHash']: {'transactionHash': r['transactionHash'], 'status': '0x1',
@@ -48,7 +54,11 @@ def full_scan(path, method=None):
         query = parse_qs(urlsplit(url).query)
         action = query['action'][0]
         actions.append(action)
-        clock[0] += .65
+        if timeout_once and not warmup[0] and not injected[0] and action == 'getLogs':
+            injected[0] = True
+            clock[0] += 15
+            raise TimeoutError('synthetic-timeout-without-real-provider-traffic')
+        clock[0] += response_seconds
         if action == 'eth_blockNumber':
             value = hex(heights[0])
         elif action == 'getblocknobytime':
@@ -75,6 +85,7 @@ def full_scan(path, method=None):
         assert warm['state'] == 'active', warm
         # Each production round starts a new process/provider; retain the ledger.
         heights[0], clock[0] = 2320, 0.
+        warmup[0] = False
         actions.clear()
         provider = EtherscanProvider(env)
         if method is not None:
@@ -93,6 +104,7 @@ def full_scan(path, method=None):
         pinned = store.read_checkout_snapshot('benchmark', first_snapshot)[1]
         identities = lambda values: sorted((r['tx_hash'], r['log_index']) for r in values)
         assert identities(count_before) == identities(count_after) == identities(pinned)
+        assert len(count_before) == 2 + new_transactions
         assert again['state'] == 'active'
     return {'requests': report['totals']['attempts'], 'modeled_elapsed_seconds': elapsed,
             'checkouts': len(count_before), 'draws': sum(r['draw_count'] for r in count_before),
@@ -110,14 +122,29 @@ def main():
     baseline = baseline_method()
     report = {'evidence': 'OFFLINE_SYNTHETIC_NOT_HISTORICAL_REPLAY', 'baseline_commit': BASELINE,
               'response_seconds': .65, 'requests_per_second': .5,
-              'boundary_only': {'before': measure_boundary(baseline), 'after': measure_boundary()},
+              'boundary_only': {'before': measure_boundary(baseline),
+                                'first_optimization': measure_boundary(baseline_method('b101c54')),
+                                'after': measure_boundary(),
+                                'after_with_verified_anchor': measure_boundary(cached_heights=(2800,))},
               'full_scan': {'before': full_scan(root / 'before.sqlite3', baseline),
+                            'first_optimization': full_scan(root / 'first.sqlite3', baseline_method('b101c54')),
                             'after': full_scan(root / 'after.sqlite3')}}
     assert report['full_scan']['before']['checkouts'] == report['full_scan']['after']['checkouts']
     assert report['full_scan']['before']['draws'] == report['full_scan']['after']['draws']
+    scenarios = []
+    for response_seconds in (.65, 3.):
+        for transactions in (0, 2, 5, 10, 20):
+            case = full_scan(root / f'load-{response_seconds}-{transactions}.sqlite3',
+                             new_transactions=transactions, response_seconds=response_seconds)
+            scenarios.append({'new_transactions': transactions, 'response_seconds': response_seconds,
+                              'requests': case['requests'], 'modeled_elapsed_seconds': case['modeled_elapsed_seconds']})
+    timeout = full_scan(root / 'one-timeout.sqlite3', timeout_once=True)
+    report['load_scenarios'] = scenarios
+    report['one_timeout'] = {k: timeout[k] for k in ('requests', 'modeled_elapsed_seconds', 'diagnostics')}
     Path(args.output).write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
     print(json.dumps({k: {version: {field: value for field, value in result.items() if field != 'diagnostics'}
                          for version, result in report[k].items()} for k in ('boundary_only', 'full_scan')}, indent=2))
+    print(json.dumps({'load_scenarios': scenarios, 'one_timeout_seconds': timeout['modeled_elapsed_seconds']}, indent=2))
 
 
 if __name__ == '__main__':

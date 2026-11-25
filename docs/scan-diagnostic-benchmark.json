@@ -46,7 +46,7 @@
         "failures": {}
       }
     },
-    "after": {
+    "first_optimization": {
       "block": 1280,
       "requests": 20,
       "elapsed_seconds": 38.65,
@@ -101,6 +101,126 @@
           "boundary": {
             "getblocknobytime": 1,
             "eth_getBlockByNumber": 19
+          }
+        },
+        "failures": {}
+      }
+    },
+    "after": {
+      "block": 1280,
+      "requests": 14,
+      "elapsed_seconds": 26.65,
+      "diagnostics": {
+        "totals": {
+          "attempts": 14,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 9100,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 17550,
+          "retry_wait_ms": 0
+        },
+        "actions": {
+          "getblocknobytime": {
+            "attempts": 1,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 650,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 0,
+            "retry_wait_ms": 0
+          },
+          "eth_getBlockByNumber": {
+            "attempts": 13,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 8450,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 17550,
+            "retry_wait_ms": 0
+          }
+        },
+        "phases": {
+          "boundary": {
+            "attempts": 14,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 9100,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 17550,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 26650,
+            "calls": 1
+          }
+        },
+        "phase_actions": {
+          "boundary": {
+            "getblocknobytime": 1,
+            "eth_getBlockByNumber": 13
+          }
+        },
+        "failures": {}
+      }
+    },
+    "after_with_verified_anchor": {
+      "block": 1280,
+      "requests": 4,
+      "elapsed_seconds": 6.65,
+      "diagnostics": {
+        "totals": {
+          "attempts": 4,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 2600,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 4050,
+          "retry_wait_ms": 0
+        },
+        "actions": {
+          "getblocknobytime": {
+            "attempts": 1,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 650,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 0,
+            "retry_wait_ms": 0
+          },
+          "eth_getBlockByNumber": {
+            "attempts": 3,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 1950,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 4050,
+            "retry_wait_ms": 0
+          }
+        },
+        "phases": {
+          "boundary": {
+            "attempts": 4,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 2600,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 4050,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 6650,
+            "calls": 1
+          }
+        },
+        "phase_actions": {
+          "boundary": {
+            "getblocknobytime": 1,
+            "eth_getBlockByNumber": 3
           }
         },
         "failures": {}
@@ -313,7 +433,7 @@
       },
       "diagnostic_records": 42
     },
-    "after": {
+    "first_optimization": {
       "requests": 29,
       "modeled_elapsed_seconds": 56.65,
       "checkouts": 4,
@@ -531,6 +651,503 @@
         "failures": {}
       },
       "diagnostic_records": 25
+    },
+    "after": {
+      "requests": 13,
+      "modeled_elapsed_seconds": 24.65,
+      "checkouts": 4,
+      "draws": 12,
+      "no_duplicates_after_replay": true,
+      "pinned_snapshot_unchanged": true,
+      "diagnostics": {
+        "totals": {
+          "attempts": 13,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 8450,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 16200,
+          "retry_wait_ms": 0
+        },
+        "actions": {
+          "eth_blockNumber": {
+            "attempts": 1,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 650,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 0,
+            "retry_wait_ms": 0
+          },
+          "eth_getBlockByNumber": {
+            "attempts": 7,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 4550,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 9450,
+            "retry_wait_ms": 0
+          },
+          "getblocknobytime": {
+            "attempts": 1,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 650,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 1350,
+            "retry_wait_ms": 0
+          },
+          "getLogs": {
+            "attempts": 2,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 1300,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 2700,
+            "retry_wait_ms": 0
+          },
+          "eth_getTransactionReceipt": {
+            "attempts": 2,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 1300,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 2700,
+            "retry_wait_ms": 0
+          }
+        },
+        "phases": {
+          "event_setup": {
+            "attempts": 0,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 0,
+            "max_request_ms": 0,
+            "pacing_wait_ms": 0,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 0,
+            "calls": 2
+          },
+          "checkpoint": {
+            "attempts": 1,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 650,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 1350,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 2000,
+            "calls": 2
+          },
+          "head": {
+            "attempts": 2,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 1300,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 1350,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 2650,
+            "calls": 2
+          },
+          "overlap": {
+            "attempts": 1,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 650,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 1350,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 10000,
+            "calls": 1
+          },
+          "boundary": {
+            "attempts": 4,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 2600,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 5400,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 8000,
+            "calls": 1
+          },
+          "forward_logs": {
+            "attempts": 1,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 650,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 1350,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 2000,
+            "calls": 1
+          },
+          "forward_verify": {
+            "attempts": 0,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 0,
+            "max_request_ms": 0,
+            "pacing_wait_ms": 0,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 8000,
+            "calls": 2
+          },
+          "receipt": {
+            "attempts": 4,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 2600,
+            "max_request_ms": 650,
+            "pacing_wait_ms": 5400,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 8000,
+            "calls": 2
+          },
+          "commit": {
+            "attempts": 0,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 0,
+            "max_request_ms": 0,
+            "pacing_wait_ms": 0,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 0,
+            "calls": 8
+          },
+          "publish": {
+            "attempts": 0,
+            "retries": 0,
+            "timeouts": 0,
+            "errors": 0,
+            "request_ms": 0,
+            "max_request_ms": 0,
+            "pacing_wait_ms": 0,
+            "retry_wait_ms": 0,
+            "elapsed_ms": 0,
+            "calls": 1
+          }
+        },
+        "phase_actions": {
+          "head": {
+            "eth_blockNumber": 1,
+            "eth_getBlockByNumber": 1
+          },
+          "checkpoint": {
+            "eth_getBlockByNumber": 1
+          },
+          "boundary": {
+            "getblocknobytime": 1,
+            "eth_getBlockByNumber": 3
+          },
+          "overlap": {
+            "getLogs": 1
+          },
+          "forward_logs": {
+            "getLogs": 1
+          },
+          "receipt": {
+            "eth_getTransactionReceipt": 2,
+            "eth_getBlockByNumber": 2
+          }
+        },
+        "failures": {}
+      },
+      "diagnostic_records": 24
+    }
+  },
+  "load_scenarios": [
+    {
+      "new_transactions": 0,
+      "response_seconds": 0.65,
+      "requests": 9,
+      "modeled_elapsed_seconds": 16.65
+    },
+    {
+      "new_transactions": 2,
+      "response_seconds": 0.65,
+      "requests": 13,
+      "modeled_elapsed_seconds": 24.65
+    },
+    {
+      "new_transactions": 5,
+      "response_seconds": 0.65,
+      "requests": 19,
+      "modeled_elapsed_seconds": 36.65
+    },
+    {
+      "new_transactions": 10,
+      "response_seconds": 0.65,
+      "requests": 29,
+      "modeled_elapsed_seconds": 56.65
+    },
+    {
+      "new_transactions": 20,
+      "response_seconds": 0.65,
+      "requests": 49,
+      "modeled_elapsed_seconds": 96.65
+    },
+    {
+      "new_transactions": 0,
+      "response_seconds": 3.0,
+      "requests": 9,
+      "modeled_elapsed_seconds": 27.0
+    },
+    {
+      "new_transactions": 2,
+      "response_seconds": 3.0,
+      "requests": 13,
+      "modeled_elapsed_seconds": 39.0
+    },
+    {
+      "new_transactions": 5,
+      "response_seconds": 3.0,
+      "requests": 19,
+      "modeled_elapsed_seconds": 57.0
+    },
+    {
+      "new_transactions": 10,
+      "response_seconds": 3.0,
+      "requests": 29,
+      "modeled_elapsed_seconds": 87.0
+    },
+    {
+      "new_transactions": 20,
+      "response_seconds": 3.0,
+      "requests": 49,
+      "modeled_elapsed_seconds": 147.0
+    }
+  ],
+  "one_timeout": {
+    "requests": 14,
+    "modeled_elapsed_seconds": 41.65,
+    "diagnostics": {
+      "totals": {
+        "attempts": 14,
+        "retries": 1,
+        "timeouts": 1,
+        "errors": 1,
+        "request_ms": 23450,
+        "max_request_ms": 15000,
+        "pacing_wait_ms": 16200,
+        "retry_wait_ms": 2000
+      },
+      "actions": {
+        "eth_blockNumber": {
+          "attempts": 1,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 650,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 0,
+          "retry_wait_ms": 0
+        },
+        "eth_getBlockByNumber": {
+          "attempts": 7,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 4550,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 9450,
+          "retry_wait_ms": 0
+        },
+        "getblocknobytime": {
+          "attempts": 1,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 650,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 1350,
+          "retry_wait_ms": 0
+        },
+        "getLogs": {
+          "attempts": 3,
+          "retries": 1,
+          "timeouts": 1,
+          "errors": 1,
+          "request_ms": 16300,
+          "max_request_ms": 15000,
+          "pacing_wait_ms": 2700,
+          "retry_wait_ms": 2000
+        },
+        "eth_getTransactionReceipt": {
+          "attempts": 2,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 1300,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 2700,
+          "retry_wait_ms": 0
+        }
+      },
+      "phases": {
+        "event_setup": {
+          "attempts": 0,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 0,
+          "max_request_ms": 0,
+          "pacing_wait_ms": 0,
+          "retry_wait_ms": 0,
+          "elapsed_ms": 0,
+          "calls": 2
+        },
+        "checkpoint": {
+          "attempts": 1,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 650,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 1350,
+          "retry_wait_ms": 0,
+          "elapsed_ms": 2000,
+          "calls": 2
+        },
+        "head": {
+          "attempts": 2,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 1300,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 1350,
+          "retry_wait_ms": 0,
+          "elapsed_ms": 2650,
+          "calls": 2
+        },
+        "overlap": {
+          "attempts": 2,
+          "retries": 1,
+          "timeouts": 1,
+          "errors": 1,
+          "request_ms": 15650,
+          "max_request_ms": 15000,
+          "pacing_wait_ms": 1350,
+          "retry_wait_ms": 2000,
+          "elapsed_ms": 27000,
+          "calls": 1
+        },
+        "boundary": {
+          "attempts": 4,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 2600,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 5400,
+          "retry_wait_ms": 0,
+          "elapsed_ms": 8000,
+          "calls": 1
+        },
+        "forward_logs": {
+          "attempts": 1,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 650,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 1350,
+          "retry_wait_ms": 0,
+          "elapsed_ms": 2000,
+          "calls": 1
+        },
+        "forward_verify": {
+          "attempts": 0,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 0,
+          "max_request_ms": 0,
+          "pacing_wait_ms": 0,
+          "retry_wait_ms": 0,
+          "elapsed_ms": 8000,
+          "calls": 2
+        },
+        "receipt": {
+          "attempts": 4,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 2600,
+          "max_request_ms": 650,
+          "pacing_wait_ms": 5400,
+          "retry_wait_ms": 0,
+          "elapsed_ms": 8000,
+          "calls": 2
+        },
+        "commit": {
+          "attempts": 0,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 0,
+          "max_request_ms": 0,
+          "pacing_wait_ms": 0,
+          "retry_wait_ms": 0,
+          "elapsed_ms": 0,
+          "calls": 8
+        },
+        "publish": {
+          "attempts": 0,
+          "retries": 0,
+          "timeouts": 0,
+          "errors": 0,
+          "request_ms": 0,
+          "max_request_ms": 0,
+          "pacing_wait_ms": 0,
+          "retry_wait_ms": 0,
+          "elapsed_ms": 0,
+          "calls": 1
+        }
+      },
+      "phase_actions": {
+        "head": {
+          "eth_blockNumber": 1,
+          "eth_getBlockByNumber": 1
+        },
+        "checkpoint": {
+          "eth_getBlockByNumber": 1
+        },
+        "boundary": {
+          "getblocknobytime": 1,
+          "eth_getBlockByNumber": 3
+        },
+        "overlap": {
+          "getLogs": 2
+        },
+        "forward_logs": {
+          "getLogs": 1
+        },
+        "receipt": {
+          "eth_getTransactionReceipt": 2,
+          "eth_getBlockByNumber": 2
+        }
+      },
+      "failures": {
+        "provider_timeout": 1
+      }
     }
   }
 }

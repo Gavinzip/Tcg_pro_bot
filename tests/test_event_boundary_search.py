@@ -12,7 +12,7 @@ from runtime.event_leaderboards.diagnostics import ScanDiagnostics
 from runtime.event_leaderboards.boundary import first_block_at_timestamp
 
 
-def measure_boundary(method=None, *, hint=980, target=320, head=3000, plateau=4):
+def measure_boundary(method=None, *, hint=980, target=320, head=3000, plateau=4, cached_heights=()):
     clock, calls = [0.], []
     def sleep(delay):
         clock[0] += delay
@@ -36,6 +36,9 @@ def measure_boundary(method=None, *, hint=980, target=320, head=3000, plateau=4)
                                  'EVENT_LEADERBOARD_REQUESTS_PER_SECOND': '0.5'})
     with patch('time.monotonic', side_effect=lambda: clock[0]), patch('time.sleep', side_effect=sleep), \
          patch('urllib.request.urlopen', side_effect=respond), ScanDiagnostics(sink=None) as diagnostic:
+        # These blocks were already read and verified earlier in this scan.
+        for height in cached_heights:
+            provider._blocks[height] = {'number': height, 'hash': '0x' + f'{height:064x}', 'timestamp': height // plateau}
         resolved = provider.first_block_at(target, head) if method is None else method(provider, target, head)
         report = diagnostic.summary()
     return {'block': resolved, 'requests': len(calls), 'elapsed_seconds': round(clock[0], 3),
@@ -77,6 +80,40 @@ class BoundaryCostTests(unittest.TestCase):
         from runtime.event_leaderboards.scanner import SourceIncomplete
         with self.assertRaisesRegex(SourceIncomplete, 'boundary_above_head'):
             measure_boundary(hint=3001)
+
+    def test_verified_current_scan_anchor_leaves_margin_below_one_minute(self):
+        result = measure_boundary(cached_heights=(2800,))
+        self.assertEqual(result['block'], 1280)
+        self.assertLessEqual(result['requests'], 6)
+        self.assertLess(result['elapsed_seconds'], 12)
+
+    def test_irregular_timestamps_and_cached_anchors_preserve_exact_boundaries(self):
+        randomizer = random.Random(20261125)
+        for _ in range(1000):
+            size = randomizer.randint(2, 4000)
+            stamps, value = [], 0
+            for i in range(size):
+                value += randomizer.choice([0, 0, 0, 1, 1, 10000])
+                stamps.append(value)
+            target = randomizer.randint(0, value + 10)
+            hint = randomizer.randrange(size)
+            anchors = [{'number': i, 'timestamp': stamps[i]}
+                       for i in randomizer.sample(range(size), min(size, 6))]
+            reads = []
+            def block_at(height):
+                self.assertTrue(0 <= height < size)
+                reads.append(height)
+                return {'timestamp': stamps[height]}
+            self.assertEqual(first_block_at_timestamp(block_at, target, size - 1, hint, anchors=anchors),
+                             bisect_left(stamps, target))
+            self.assertLessEqual(len(reads), 2 * size.bit_length() + 6)
+
+    def test_head_invalidates_every_previous_scan_block_anchor(self):
+        provider = EtherscanProvider({'EVENT_LEADERBOARD_API_KEY': 'test-only-not-a-real-key'})
+        provider._blocks[10] = {'number': 10, 'timestamp': 999999, 'hash': 'stale-anchor'}
+        with patch.object(provider, 'request', return_value='0x20'):
+            self.assertEqual(provider.head(), 32)
+        self.assertEqual(provider._blocks, {})
 
 
 if __name__ == '__main__':
