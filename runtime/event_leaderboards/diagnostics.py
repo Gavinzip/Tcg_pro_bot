@@ -19,7 +19,7 @@ PHASES = frozenset({'startup', 'event_setup', 'head', 'boundary', 'checkpoint', 
                     'forward_logs', 'forward_verify', 'receipt', 'commit', 'publish'})
 ACTIONS = frozenset({'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getTransactionReceipt',
                      'getblocknobytime', 'getLogs', 'unknown'})
-FAILURES = frozenset({'provider_timeout', 'provider_tls_verification_failure', 'provider_tls_failure',
+FAILURES = frozenset({'provider_timeout', 'provider_stale_connection', 'provider_tls_verification_failure', 'provider_tls_failure',
                       'provider_dns_failure', 'provider_invalid_json', 'provider_invalid_request',
                       'provider_connection_failure', 'provider_invalid_response', 'provider_query_limit',
                       'provider_rejected_request', 'provider_missing_result', 'provider_http_error', 'unclassified'})

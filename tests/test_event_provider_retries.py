@@ -2,10 +2,14 @@
 import io
 import json
 import unittest
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 import urllib.error
 
 from runtime.event_leaderboards.scanner import EtherscanProvider, SourceIncomplete
+from runtime.event_leaderboards.transport import ReusedConnectionClosed
 
 class Clock:
     def __init__(self):
@@ -18,10 +22,10 @@ class Clock:
         self.now += delay
 
 class ProviderRetryTests(unittest.TestCase):
-    def run_requests(self, outcomes, *, count=1, action="getLogs"):
+    def run_requests(self, outcomes, *, count=1, action="getLogs", rps="0.5"):
         clock, starts, urls, timeouts = Clock(), [], [], []
         provider = EtherscanProvider({"EVENT_LEADERBOARD_API_KEY": "private-test-key",
-                                     "EVENT_LEADERBOARD_REQUESTS_PER_SECOND": "0.5"})
+                                     "EVENT_LEADERBOARD_REQUESTS_PER_SECOND": rps})
         def open_request(url, timeout):
             starts.append(clock.now); urls.append(url); timeouts.append(timeout)
             outcome = outcomes[len(starts) - 1]
@@ -83,3 +87,52 @@ class ProviderRetryTests(unittest.TestCase):
         self.assertEqual(len(starts), 1)
         self.assertEqual(clock.delays, [])
         self.assertEqual(error.diagnostic["max_attempts"], 1)
+
+    def test_stale_socket_recovery_keeps_the_identical_request_and_shared_pacing(self):
+        clock, starts, urls, timeouts, error = self.run_requests([ReusedConnectionClosed(), None])
+        self.assertIsNone(error)
+        self.assertEqual(starts, [100., 102.])
+        self.assertEqual(clock.delays, [2])
+        self.assertEqual(urls[0], urls[1])
+        self.assertEqual(timeouts, [15., 15.])
+
+    def test_stale_socket_recovery_is_limited_to_one_retry(self):
+        clock, starts, _, _, error = self.run_requests([ReusedConnectionClosed()] * 3)
+        self.assertEqual(starts, [100., 102.])
+        self.assertEqual(str(error), 'provider_stale_connection')
+        self.assertEqual(error.diagnostic['attempt'], 2)
+
+    def test_unlisted_action_does_not_retry_stale_socket(self):
+        clock, starts, _, _, error = self.run_requests([ReusedConnectionClosed()], action='unknown-action')
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(clock.delays, [])
+        self.assertEqual(str(error), 'provider_stale_connection')
+
+    def test_four_rps_is_not_silently_capped_at_two(self):
+        clock, starts, _, _, error = self.run_requests([None] * 5, count=5, rps='4')
+        self.assertIsNone(error)
+        self.assertEqual(starts, [100., 100.25, 100.5, 100.75, 101.])
+        self.assertEqual(clock.delays, [.25] * 4)
+
+    def test_invalid_or_over_four_rps_is_rejected_explicitly(self):
+        for rate in ('0', '-1', '.01', '5', 'nan', 'inf', 'bad-value', ''):
+            with self.subTest(rate=rate), self.assertRaisesRegex(SourceIncomplete, 'invalid_chain_request_rate'):
+                EtherscanProvider({'EVENT_LEADERBOARD_API_KEY': 'fixture',
+                                   'EVENT_LEADERBOARD_REQUESTS_PER_SECOND': rate})
+
+    def test_workers_share_one_four_rps_gate(self):
+        provider = EtherscanProvider({'EVENT_LEADERBOARD_API_KEY': 'fixture',
+                                     'EVENT_LEADERBOARD_REQUESTS_PER_SECOND': '4'})
+        self.assertEqual(provider.spacing, .25)
+        starts, guard = [], threading.Lock()
+        def read(*args):
+            with guard:
+                starts.append(time.monotonic())
+            return []
+        provider._read_response = read
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(provider.request, 'logs', 'getLogs') for _ in range(6)]
+            for future in futures:
+                self.assertEqual(future.result(), [])
+        self.assertEqual(len(starts), 6)
+        self.assertTrue(all(b - a >= .23 for a, b in zip(starts, starts[1:])), starts)

@@ -12,6 +12,7 @@ from dataclasses import replace
 from itertools import groupby
 import json
 import http.client
+import math
 import os
 import re
 import threading
@@ -110,8 +111,15 @@ class EtherscanProvider:
         self.api_url = env.get("BSCSCAN_API_URL") or "https://api.etherscan.io/v2/api"
         self.chain_id = 56
         self.timeout = float(env.get("EVENT_LEADERBOARD_REQUEST_TIMEOUT", "15"))
-        # A dedicated scanner leaves headroom for the existing production Bot.
-        self.spacing = max(.5, 1 / max(.1, float(env.get("EVENT_LEADERBOARD_REQUESTS_PER_SECOND", "2"))))
+        # One shared gate, including explicit retries, leaves quota headroom.
+        # Reject invalid settings rather than silently running at another rate.
+        try:
+            request_rate = float(env.get("EVENT_LEADERBOARD_REQUESTS_PER_SECOND", "2"))
+        except (TypeError, ValueError):
+            raise SourceIncomplete('invalid_chain_request_rate') from None
+        if not math.isfinite(request_rate) or not .1 <= request_rate <= 4:
+            raise SourceIncomplete('invalid_chain_request_rate')
+        self.spacing = 1 / request_rate
         self._next = 0.
         self._lock = threading.Lock()
         self._blocks = {}
@@ -126,13 +134,22 @@ class EtherscanProvider:
                  ("proxy", "eth_getBlockByNumber"), ("proxy", "eth_getTransactionReceipt"),
                  ("block", "getblocknobytime")}
         attempts = 3 if (module, action) in reads else 1
+        stale_retries = 0
+        fresh_connection = False
         for attempt in range(1, attempts + 1):
             try:
-                return self._request_once(module, action, **params)
+                connection_scope = self._http.fresh_connection() if fresh_connection and self._http is not None else nullcontext()
+                with connection_scope:
+                    return self._request_once(module, action, **params)
             except SourceIncomplete as error:
                 if error.diagnostic is not None:
                     error.diagnostic = dict(error.diagnostic, attempt=attempt, max_attempts=attempts)
-                if str(error) != "provider_timeout" or attempt == attempts:
+                retryable = str(error) == "provider_timeout"
+                if str(error) == 'provider_stale_connection' and stale_retries == 0:
+                    retryable = True
+                    stale_retries += 1
+                    fresh_connection = True
+                if not retryable or attempt == attempts:
                     raise
                 record_request(action, retry=True, retry_wait_ms=(2 ** attempt) * 1000)
                 time.sleep(2 ** attempt)
@@ -164,7 +181,7 @@ class EtherscanProvider:
             url = self.api_url + "?" + urllib.parse.urlencode(query)
             if self._http is not None:
                 # The session disables internal retries. The provider owns the
-                # shared pacing gate and bounded same-source timeout recovery.
+                # shared pacing gate and bounded same-source read recovery.
                 def reading_response():
                     nonlocal stage
                     stage = "read_json"
