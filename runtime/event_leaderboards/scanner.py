@@ -7,9 +7,11 @@ Card transfers, transaction prices and asynchronous fulfillment are never inputs
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import nullcontext
 from dataclasses import replace
 from itertools import groupby
 import json
+import http.client
 import os
 import re
 import threading
@@ -24,6 +26,8 @@ from .provider_errors import classify_failure, safe_diagnostic
 from .diagnostics import CURRENT, ScanDiagnostics, phase, record_request
 from .boundary import first_block_at_timestamp
 from .replay import ReplayIncomplete, replay_confirmed_window
+from .verification import ReceiptPrefetch
+from .transport import PooledJSONHTTP
 
 USDT = "0x55d398326f99059ff775485246999027b3197955"
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -111,6 +115,9 @@ class EtherscanProvider:
         self._next = 0.
         self._lock = threading.Lock()
         self._blocks = {}
+        self._block_lock = threading.Lock()
+        self._block_guards = {}
+        self._http = PooledJSONHTTP() if env.get('EVENT_LEADERBOARD_HTTP_POOL') == '1' else None
 
     def request(self, module, action, **params):
         # All listed operations are idempotent reads. Each attempt uses the same
@@ -154,10 +161,19 @@ class EtherscanProvider:
         query = dict(chainid=self.chain_id, module=module, action=action, apikey=self.api_key, **params)
         started, stage = time.monotonic(), "connect"
         try:
-            with urllib.request.urlopen(self.api_url + "?" + urllib.parse.urlencode(query), timeout=self.timeout) as response:
-                stage = "read_json"
-                data = json.load(response)
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+            url = self.api_url + "?" + urllib.parse.urlencode(query)
+            if self._http is not None:
+                # The session disables internal retries. The provider owns the
+                # shared pacing gate and bounded same-source timeout recovery.
+                def reading_response():
+                    nonlocal stage
+                    stage = "read_json"
+                data = self._http.read_json(url, self.timeout, on_response=reading_response)
+            else:
+                with urllib.request.urlopen(url, timeout=self.timeout) as response:
+                    stage = "read_json"
+                    data = json.load(response)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, http.client.HTTPException) as error:
             raise SourceIncomplete(classify_failure(error, stage=stage), diagnostic=safe_diagnostic(
                 module, action, params, (time.monotonic() - started) * 1000, error, stage=stage)) from None
         if not isinstance(data, dict) or data.get("error"):
@@ -174,17 +190,25 @@ class EtherscanProvider:
             raise SourceIncomplete("provider_missing_result")
         return result
 
+    def close(self):
+        if self._http is not None:
+            self._http.close()
+
     def head(self):
         self._blocks.clear()
+        self._block_guards.clear()
         return number(self.request("proxy", "eth_blockNumber"))
 
     def block(self, height):
-        if height not in self._blocks:
-            row = self.request("proxy", "eth_getBlockByNumber", tag=hex(height), boolean="false")
-            if not isinstance(row, dict) or number(row.get("number")) != height:
-                raise SourceIncomplete("invalid_block")
-            self._blocks[height] = {"number": height, "hash": hash32(row.get("hash")), "timestamp": number(row.get("timestamp"))}
-        return self._blocks[height]
+        with self._block_lock:
+            guard = self._block_guards.setdefault(height, threading.Lock())
+        with guard:
+            if height not in self._blocks:
+                row = self.request("proxy", "eth_getBlockByNumber", tag=hex(height), boolean="false")
+                if not isinstance(row, dict) or number(row.get("number")) != height:
+                    raise SourceIncomplete("invalid_block")
+                self._blocks[height] = {"number": height, "hash": hash32(row.get("hash")), "timestamp": number(row.get("timestamp"))}
+            return self._blocks[height]
 
     def first_block_at(self, timestamp, head):
         """Resolve seconds boundary, including chains with several blocks per second."""
@@ -375,15 +399,26 @@ def verified_receipt_checkouts(provider, tx_hash, schemas):
 
 class EventLeaderboardScanner:
     def __init__(self, store, provider=None, *, confirmations=64, chunk_blocks=2000, max_chunks=100, schemas=None,
-                 replay_seconds=300):
+                 replay_seconds=300, verification_workers=1):
         self.store = store
         self.provider = provider or EtherscanProvider()
         self.confirmations = int(confirmations)
         self.chunk_blocks, self.max_chunks = int(chunk_blocks), int(max_chunks)
         self.schemas = dict(SCHEMAS if schemas is None else schemas)
         self.replay_seconds = int(replay_seconds)
+        self.verification_workers = int(verification_workers)
         if self.confirmations < 1 or self.chunk_blocks < 1 or self.max_chunks < 1 or self.replay_seconds < 0:
             raise ValueError("invalid scanner limits")
+        if not 1 <= self.verification_workers <= 8:
+            raise ValueError("invalid verification worker limit")
+
+    def _prefetch(self, logs, receipts, schemas, known=None):
+        if self.verification_workers == 1:
+            return nullcontext(None)
+        transactions = [identity(log)[0] for log in logs if known is None or identity(log) not in known]
+        return ReceiptPrefetch(transactions, receipts,
+                               lambda tx: verified_receipt_checkouts(self.provider, tx, schemas),
+                               self.verification_workers)
 
     def _verified_log(self, definition, schemas, schema, log, receipts, known=None):
         tx_hash, index = identity(log)
@@ -408,8 +443,15 @@ class EventLeaderboardScanner:
     def _overlap_rows(self, definition, schemas, contract, start, end, receipts, known):
         schema = schemas[contract]
         logs = complete_logs(self.provider, contract, TOPICS[schema], start, end, builder=definition.builder)
-        return [row for log in logs
-                if (row := self._verified_log(definition, schemas, schema, log, receipts, known)) is not None]
+        rows = []
+        with self._prefetch(logs, receipts, schemas, known) as pending:
+            for log in logs:
+                if pending is not None:
+                    pending.resolve(identity(log)[0])
+                row = self._verified_log(definition, schemas, schema, log, receipts, known)
+                if row is not None:
+                    rows.append(row)
+        return rows
 
     def sync(self, event_id, *, now=None, usernames=None):
         parent = CURRENT.get()
@@ -505,20 +547,23 @@ class EventLeaderboardScanner:
                     # verified block as an anchored prefix; a hard job deadline
                     # must not discard twenty minutes of completed receipts.
                     # Never checkpoint inside a block or before all its logs pass.
-                    for block_number, block_logs in groupby(logs, key=lambda log: number(log["blockNumber"])):
-                        checkouts = []
-                        for log in block_logs:
-                            with phase('forward_verify'):
-                                row = self._verified_log(definition, schemas, schema, log, receipts)
-                                if row is not None:
-                                    checkouts.append(row)
-                        with phase('commit', new_checkouts=len(checkouts)):
-                            self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
-                                                    block_number + 1, checkouts, block_hash=self.provider.block(block_number)["hash"], expected_revision=definition.revision)
-                        checkpoint = {"next_block": block_number + 1}
-                        progress["sources"][source] = {"next_block": block_number + 1, "complete": block_number >= bound}
-                        with phase('commit'):
-                            self.store.set_progress(event_id, progress)
+                    with self._prefetch(logs, receipts, schemas) as pending:
+                        for block_number, block_logs in groupby(logs, key=lambda log: number(log["blockNumber"])):
+                            checkouts = []
+                            for log in block_logs:
+                                with phase('forward_verify'):
+                                    if pending is not None:
+                                        pending.resolve(identity(log)[0])
+                                    row = self._verified_log(definition, schemas, schema, log, receipts)
+                                    if row is not None:
+                                        checkouts.append(row)
+                            with phase('commit', new_checkouts=len(checkouts)):
+                                self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
+                                                        block_number + 1, checkouts, block_hash=self.provider.block(block_number)["hash"], expected_revision=definition.revision)
+                            checkpoint = {"next_block": block_number + 1}
+                            progress["sources"][source] = {"next_block": block_number + 1, "complete": block_number >= bound}
+                            with phase('commit'):
+                                self.store.set_progress(event_id, progress)
                     if checkpoint is None or checkpoint["next_block"] <= end:
                         with phase('commit'):
                             self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,

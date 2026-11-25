@@ -74,9 +74,13 @@ def _main(argv=None):
     parser.add_argument("--max-chunks", type=int, default=int(os.getenv("EVENT_LEADERBOARD_MAX_CHUNKS", "100")))
     parser.add_argument("--replay-seconds", type=int, default=int(os.getenv("EVENT_LEADERBOARD_REPLAY_SECONDS", "300")),
                         help="Recheck this many seconds before each persisted confirmed cursor (default: 300)")
+    parser.add_argument("--verification-workers", type=int,
+                        default=int(os.getenv("EVENT_LEADERBOARD_VERIFICATION_WORKERS", "1")),
+                        help="Bounded parallel receipt readers; shared request pacing still applies (default: 1)")
     args = parser.parse_args(argv)
     store = None
     selected = []
+    provider = None
     try:
         if args.chain_env:
             with open(args.chain_env, encoding="utf-8") as stream:
@@ -106,8 +110,10 @@ def _main(argv=None):
             names = load_wallet_username_map()
             for event in selected:
                 store.set_aliases(event.event_id, aliases)
-            scanner = EventLeaderboardScanner(store, EtherscanProvider(), confirmations=args.confirmations,
-                chunk_blocks=args.chunk_blocks, max_chunks=args.max_chunks, replay_seconds=args.replay_seconds)
+            provider = EtherscanProvider()
+            scanner = EventLeaderboardScanner(store, provider, confirmations=args.confirmations,
+                chunk_blocks=args.chunk_blocks, max_chunks=args.max_chunks, replay_seconds=args.replay_seconds,
+                verification_workers=args.verification_workers)
         results = [scanner.sync(event.event_id, usernames=names) for event in selected]
         print(json.dumps({"events": results, "identity_sources": {"username_entries": len(names),
             "verified_migration_pairs": len(aliases)}}, sort_keys=True))
@@ -121,6 +127,9 @@ def _main(argv=None):
                 store.record_failure(event.event_id, code, progress={"state": "stale", "error": code})
         print(json.dumps({"error": code}), file=sys.stderr)
         return 1
+    finally:
+        if provider is not None:
+            provider.close()
 
 
 def main(argv=None):

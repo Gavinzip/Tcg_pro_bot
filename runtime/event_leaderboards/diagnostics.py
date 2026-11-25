@@ -3,10 +3,12 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 import hashlib
+from functools import wraps
 import json
 import math
 import re
 import sys
+import threading
 import time
 import uuid
 
@@ -97,10 +99,19 @@ def emit_stderr(line):
     print(line, file=sys.stderr, flush=True)
 
 
+def synchronized(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self.lock:
+            return method(self, *args, **kwargs)
+    return locked
+
+
 class ScanDiagnostics:
     """One event/job scope. Phase durations include children; counters do not."""
     def __init__(self, *, sink=emit_stderr, run_id=None, event_id=None):
         self.sink = sink
+        self.lock = threading.RLock()
         self.run_id = run_id or uuid.uuid4().hex
         self.event_ref = hashlib.sha256(event_id.encode()).hexdigest()[:16] if event_id is not None else None
         self.started = time.monotonic()
@@ -123,19 +134,24 @@ class ScanDiagnostics:
         finally:
             CURRENT.reset(self.token)
             if self.parent is not None:
-                for target, source in [(self.parent.totals, self.totals),
-                                       *((self.parent.actions.setdefault(k, _metrics()), v) for k, v in self.actions.items()),
-                                       *((self.parent.phases.setdefault(k, {**_metrics(), 'elapsed_ms': 0, 'calls': 0}), v)
-                                         for k, v in self.phases.items())]:
-                    for key, value in source.items():
-                        target[key] = max(target[key], value) if key == 'max_request_ms' else target[key] + value
-                for name, actions in self.phase_actions.items():
-                    target = self.parent.phase_actions.setdefault(name, {})
-                    for action, count in actions.items():
-                        target[action] = target.get(action, 0) + count
-                for code, count in self.failures.items():
-                    self.parent.failures[code] = self.parent.failures.get(code, 0) + count
+                self.parent.merge(self)
 
+    @synchronized
+    def merge(self, child):
+        for target, source in [(self.totals, child.totals),
+                               *((self.actions.setdefault(k, _metrics()), v) for k, v in child.actions.items()),
+                               *((self.phases.setdefault(k, {**_metrics(), 'elapsed_ms': 0, 'calls': 0}), v)
+                                 for k, v in child.phases.items())]:
+            for key, value in source.items():
+                target[key] = max(target[key], value) if key == 'max_request_ms' else target[key] + value
+        for name, actions in child.phase_actions.items():
+            target = self.phase_actions.setdefault(name, {})
+            for action, count in actions.items():
+                target[action] = target.get(action, 0) + count
+        for code, count in child.failures.items():
+            self.failures[code] = self.failures.get(code, 0) + count
+
+    @synchronized
     def emit(self, kind, **values):
         record = {'version': 1, 'kind': kind, 'run_id': self.run_id,
                   'at': datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
@@ -149,11 +165,13 @@ class ScanDiagnostics:
             self.sink(line)
         self.last_emit = time.monotonic()
 
+    @synchronized
     def summary(self):
         return {'totals': dict(self.totals), 'actions': {k: dict(v) for k, v in self.actions.items()},
                 'phases': {k: dict(v) for k, v in self.phases.items()},
                 'phase_actions': {k: dict(v) for k, v in self.phase_actions.items()}, 'failures': dict(self.failures)}
 
+    @synchronized
     def add(self, action, **metrics):
         action = action if action in ACTIONS else 'unknown'
         phase = self.current_phase
@@ -213,9 +231,10 @@ def record_request(action, *, elapsed_ms=0, error=False, timeout=False, retry=Fa
                    pacing_wait_ms=0, retry_wait_ms=0, attempted=False, failure_code=None):
     diagnostic = CURRENT.get()
     if diagnostic is not None:
-        if failure_code is not None:
-            code = failure_code if _failure_allowed(failure_code) else 'unclassified'
-            diagnostic.failures[code] = diagnostic.failures.get(code, 0) + 1
-        diagnostic.add(action, attempts=int(attempted), errors=int(error), timeouts=int(timeout),
-                       retries=int(retry), request_ms=elapsed_ms, max_request_ms=elapsed_ms,
-                       pacing_wait_ms=pacing_wait_ms, retry_wait_ms=retry_wait_ms)
+        with diagnostic.lock:
+            if failure_code is not None:
+                code = failure_code if _failure_allowed(failure_code) else 'unclassified'
+                diagnostic.failures[code] = diagnostic.failures.get(code, 0) + 1
+            diagnostic.add(action, attempts=int(attempted), errors=int(error), timeouts=int(timeout),
+                           retries=int(retry), request_ms=elapsed_ms, max_request_ms=elapsed_ms,
+                           pacing_wait_ms=pacing_wait_ms, retry_wait_ms=retry_wait_ms)
