@@ -22,7 +22,8 @@ ACTIONS = frozenset({'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getTransact
 FAILURES = frozenset({'provider_timeout', 'provider_stale_connection', 'provider_tls_verification_failure', 'provider_tls_failure',
                       'provider_dns_failure', 'provider_invalid_json', 'provider_invalid_request',
                       'provider_connection_failure', 'provider_invalid_response', 'provider_query_limit',
-                      'provider_rejected_request', 'provider_missing_result', 'provider_http_error', 'unclassified'})
+                      'provider_rejected_request', 'provider_rate_limit', 'provider_quota_exhausted',
+                      'provider_missing_result', 'receipt_unavailable', 'provider_http_error', 'unclassified'})
 METRICS = ('attempts', 'retries', 'timeouts', 'errors', 'request_ms', 'max_request_ms',
            'pacing_wait_ms', 'retry_wait_ms')
 DETAILS = frozenset({'from_block', 'through_block', 'hint_block', 'resolved_block', 'head_block',

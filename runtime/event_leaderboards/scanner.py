@@ -23,12 +23,13 @@ import urllib.request
 
 from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC
 from .config import AUDITED_CHECKOUT_TOPICS, source_key, builder_code
-from .provider_errors import classify_failure, safe_diagnostic
+from .provider_errors import classify_failure, classify_rejected_payload, safe_diagnostic
 from .diagnostics import CURRENT, ScanDiagnostics, phase, record_request
 from .boundary import first_block_at_timestamp
 from .replay import ReplayIncomplete, replay_confirmed_window
 from .verification import ReceiptPrefetch
 from .transport import PooledJSONHTTP
+from .request_safety import RateLimitRecovery
 
 USDT = "0x55d398326f99059ff775485246999027b3197955"
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -122,6 +123,7 @@ class EtherscanProvider:
         self.spacing = 1 / request_rate
         self._next = 0.
         self._lock = threading.Lock()
+        self._rate_recovery = RateLimitRecovery()
         self._blocks = {}
         self._block_lock = threading.Lock()
         self._block_guards = {}
@@ -135,6 +137,7 @@ class EtherscanProvider:
                  ("block", "getblocknobytime")}
         attempts = 3 if (module, action) in reads else 1
         stale_retries = 0
+        rate_retries = 0
         fresh_connection = False
         for attempt in range(1, attempts + 1):
             try:
@@ -144,6 +147,14 @@ class EtherscanProvider:
             except SourceIncomplete as error:
                 if error.diagnostic is not None:
                     error.diagnostic = dict(error.diagnostic, attempt=attempt, max_attempts=attempts)
+                if str(error) == 'provider_rate_limit' and (module, action) in reads:
+                    if not self._rate_recovery.on_refusal(can_retry=rate_retries == 0 and attempt < attempts):
+                        raise
+                    rate_retries += 1
+                    # Waiting happens in the shared pacing gate, so every
+                    # worker pauses. Its duration is counted as pacing wait.
+                    record_request(action, retry=True)
+                    continue
                 retryable = str(error) == "provider_timeout"
                 if str(error) == 'provider_stale_connection' and stale_retries == 0:
                     retryable = True
@@ -156,8 +167,14 @@ class EtherscanProvider:
 
     def _request_once(self, module, action, **params):
         with self._lock:
-            delay = self._next - time.monotonic()
-            if delay > 0:
+            while True:
+                cooldown = self._rate_recovery.deadline()
+                if cooldown is None:
+                    # No network attempt is counted for work stopped locally.
+                    raise SourceIncomplete('provider_rate_limit')
+                delay = max(self._next, cooldown) - time.monotonic()
+                if delay <= 0:
+                    break
                 record_request(action, pacing_wait_ms=round(delay * 1000))
                 time.sleep(delay)
             self._next = time.monotonic() + self.spacing
@@ -198,13 +215,15 @@ class EtherscanProvider:
         result = data.get("result")
         if module == "logs" and data.get("status") == "0" and str(data.get("message", "")).lower() == "no records found" and result == []:
             return []
-        if module != "proxy" and data.get("status") != "1":
-            message = str(result).lower()
-            if "query timeout" in message or "result window" in message or "more than" in message:
-                raise SourceIncomplete("provider_query_limit")
-            raise SourceIncomplete("provider_rejected_request")
+        # Proxy successes normally use a JSON-RPC envelope with no status field,
+        # but gateway failures use status=0/NOTOK even when HTTP is 200.
+        if (module != "proxy" or 'status' in data) and data.get("status") != "1":
+            raise SourceIncomplete(classify_rejected_payload(result))
         if result is None:
             raise SourceIncomplete("provider_missing_result")
+        if module == 'proxy' and action == 'eth_getTransactionReceipt' and not isinstance(result, dict):
+            # Validate within the measured request, before it is counted as OK.
+            raise SourceIncomplete('receipt_unavailable')
         return result
 
     def close(self):
@@ -250,10 +269,7 @@ class EtherscanProvider:
         return rows
 
     def receipt(self, tx_hash):
-        result = self.request("proxy", "eth_getTransactionReceipt", txhash=tx_hash)
-        if not isinstance(result, dict):
-            raise SourceIncomplete("receipt_unavailable")
-        return result
+        return self.request("proxy", "eth_getTransactionReceipt", txhash=tx_hash)
 
 
 def complete_logs(provider, contract, topic, start, end, *, builder=None):
