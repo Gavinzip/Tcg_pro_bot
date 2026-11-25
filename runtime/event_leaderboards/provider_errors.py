@@ -3,9 +3,12 @@ import re
 import socket
 import ssl
 import urllib.error
+from .transport import ReusedConnectionClosed
 
 
 def classify_failure(error, *, stage):
+    if isinstance(error, ReusedConnectionClosed):
+        return 'provider_stale_connection'
     if isinstance(error, urllib.error.HTTPError):
         status = error.code
         return f"provider_http_{status}" if type(status) is int and 100 <= status <= 599 else "provider_http_error"
