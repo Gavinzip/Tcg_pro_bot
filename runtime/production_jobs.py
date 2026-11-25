@@ -10,6 +10,8 @@ import signal
 import sys
 import time
 
+from runtime.event_leaderboards.diagnostics import MAX_LINE_BYTES, validated_line
+
 _TASKS: dict[str, asyncio.Task] = {}
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,15 +39,46 @@ def backup_due(interval):
     return backup_remaining(interval) == 0
 
 
+async def _discard_output(stream):
+    while await stream.read(8192):
+        pass
+
+
+async def _forward_diagnostics(stream, enabled):
+    pending, oversized = bytearray(), False
+    while True:
+        chunk = await stream.read(8192)
+        if not chunk:
+            break
+        for piece in chunk.splitlines(keepends=True):
+            complete = piece.endswith(b'\n')
+            if not oversized:
+                pending.extend(piece)
+                if len(pending) > MAX_LINE_BYTES:
+                    pending.clear()
+                    oversized = True
+            if complete:
+                if enabled and not oversized:
+                    line = validated_line(pending.decode('utf-8', errors='replace').rstrip('\r\n'))
+                    if line is not None:
+                        print(line, flush=True)
+                pending.clear()
+                oversized = False
+
+
 async def run_command(name, script, args, timeout):
+    started = time.monotonic()
+    print(f'[production-job] {name} started', flush=True)
     child = await asyncio.create_subprocess_exec(
         sys.executable, str(ROOT / 'scripts' / script), *args,
         cwd=ROOT, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
+    readers = [asyncio.create_task(_discard_output(child.stdout)),
+               asyncio.create_task(_forward_diagnostics(child.stderr, name == 'event-leaderboards'))]
     try:
-        await asyncio.wait_for(child.communicate(), timeout=timeout)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
+        await asyncio.wait_for(asyncio.gather(child.wait(), *readers), timeout=timeout)
+    except (asyncio.TimeoutError, asyncio.CancelledError) as error:
         if child.returncode is None:
             os.killpg(child.pid, signal.SIGTERM)
             try:
@@ -53,8 +86,15 @@ async def run_command(name, script, args, timeout):
             except asyncio.TimeoutError:
                 os.killpg(child.pid, signal.SIGKILL)
                 await child.wait()
+        reason = 'cancelled' if isinstance(error, asyncio.CancelledError) else 'timeout'
+        print(f'[production-job] {name} stopped reason={reason} duration_seconds={time.monotonic() - started:.3f}', flush=True)
         raise
-    print(f'[production-job] {name} finished returncode={child.returncode}', flush=True)
+    finally:
+        for reader in readers:
+            reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+    elapsed = time.monotonic() - started
+    print(f'[production-job] {name} finished returncode={child.returncode} duration_seconds={elapsed:.3f}', flush=True)
     return child.returncode
 
 
