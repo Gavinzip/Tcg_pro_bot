@@ -52,4 +52,8 @@
 
 準備歷史終點另花 5 次請求，該組合計 654 次；整個本輪測試至此 1,058 次（包括先前兩個 quota 查詢），低於已告知的 1,200 次上限。前一輪 300 次已用 286.4578 秒保存的 154 筆仍原樣保留；不能把不同 key／傳輸設定且跨中斷的兩段相加，當成同設定冷掃 SLA。
 
-正式 0.5 RPS 的額外 live 對照正在既有上限內執行；上方 matrix 僅是 2 RPS。所有本機資料、程序預算與完整結果保留。143 項回歸與固定 matrix 已驗證正確性，正式環境的延遲及環境開關仍須另外驗收。
+Final **0.5 RPS** live comparison (same 5-TX window, pool + 3 workers): **27.30606s / 14 requests** for new transactions, **14.07589s / 7 requests** for the next no-new-TX round. Evidence checksum matches the 2-RPS case. Production settings remain unchanged.
+
+Final own usage: **1,081 actual API requests** within the 1,200 cap, including 1 initial quota read on the activity key and **1,080 on the user-selected alternate key**. The earlier 300-request attempt is recorded separately. Final quota: used **1,598**, available **98,402**, daily limit 100,000; account usage can include other processes and is not used as our test counter. No more live audit calls remain running; RAM credential references were cleared.
+
+All 143 local tests and GitHub CI for code commit `c6075615a1b310f44a0cd9ec9522ea6ce29661e3` passed. The subsequent commit updates measurement reports only. Production latency and environment switches still require coordinated release acceptance.

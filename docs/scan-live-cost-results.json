@@ -4250,15 +4250,449 @@
   },
   "live_budget": {
     "maximum": 1200,
-    "requests": 1058,
+    "requests": 1081,
     "actions": {
-      "quota": 2,
-      "eth_getBlockByNumber": 519,
-      "eth_blockNumber": 33,
-      "getblocknobytime": 33,
-      "getLogs": 37,
-      "eth_getTransactionReceipt": 434
+      "quota": 3,
+      "eth_getBlockByNumber": 530,
+      "eth_blockNumber": 35,
+      "getblocknobytime": 35,
+      "getLogs": 39,
+      "eth_getTransactionReceipt": 439
     }
   },
-  "cold_resume_status": "complete"
+  "cold_resume_status": "complete through fixed historical watermark 2026-11-25T14:40:00+08:00",
+  "production_pacing_05": {
+    "mode": "REAL_NETWORK_FROZEN_CONFIRMED_BOUND",
+    "label": "production-pacing-05",
+    "workers": 3,
+    "rps": 0.5,
+    "cases": [
+      {
+        "requested_transactions": 5,
+        "from_block": 135603099,
+        "through_block": 135603138,
+        "preparation_requests": 1,
+        "new_transactions": {
+          "state": "active",
+          "error": null,
+          "seconds": 27.30606,
+          "process_cpu_seconds": 0.0602,
+          "requests": 14,
+          "offline_logical_reads": 0,
+          "transactions": 5,
+          "checkouts": 5,
+          "draws": 8,
+          "checksum": "65f71e460878a61aab90831b208c714540eaefbe534ca437b20c6b48387b0316",
+          "read_encode_seconds": 0.00409,
+          "encoded_bytes": 3647,
+          "snapshot_available": true,
+          "diagnostics": {
+            "totals": {
+              "attempts": 14,
+              "retries": 0,
+              "timeouts": 0,
+              "errors": 0,
+              "request_ms": 3298,
+              "max_request_ms": 297,
+              "pacing_wait_ms": 25287,
+              "retry_wait_ms": 0
+            },
+            "actions": {
+              "eth_blockNumber": {
+                "attempts": 1,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 235,
+                "max_request_ms": 235,
+                "pacing_wait_ms": 1004,
+                "retry_wait_ms": 0
+              },
+              "eth_getBlockByNumber": {
+                "attempts": 6,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 1340,
+                "max_request_ms": 274,
+                "pacing_wait_ms": 11040,
+                "retry_wait_ms": 0
+              },
+              "getblocknobytime": {
+                "attempts": 1,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 277,
+                "max_request_ms": 277,
+                "pacing_wait_ms": 1795,
+                "retry_wait_ms": 0
+              },
+              "getLogs": {
+                "attempts": 1,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 208,
+                "max_request_ms": 208,
+                "pacing_wait_ms": 1725,
+                "retry_wait_ms": 0
+              },
+              "eth_getTransactionReceipt": {
+                "attempts": 5,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 1238,
+                "max_request_ms": 297,
+                "pacing_wait_ms": 9723,
+                "retry_wait_ms": 0
+              }
+            },
+            "phases": {
+              "event_setup": {
+                "attempts": 0,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 0,
+                "max_request_ms": 0,
+                "pacing_wait_ms": 0,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 3,
+                "calls": 2
+              },
+              "checkpoint": {
+                "attempts": 1,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 205,
+                "max_request_ms": 205,
+                "pacing_wait_ms": 1790,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 2001,
+                "calls": 2
+              },
+              "head": {
+                "attempts": 2,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 445,
+                "max_request_ms": 235,
+                "pacing_wait_ms": 2769,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 3217,
+                "calls": 2
+              },
+              "overlap": {
+                "attempts": 0,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 0,
+                "max_request_ms": 0,
+                "pacing_wait_ms": 0,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 6079,
+                "calls": 1
+              },
+              "boundary": {
+                "attempts": 3,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 789,
+                "max_request_ms": 277,
+                "pacing_wait_ms": 5280,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 6079,
+                "calls": 1
+              },
+              "forward_logs": {
+                "attempts": 1,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 208,
+                "max_request_ms": 208,
+                "pacing_wait_ms": 1725,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 1939,
+                "calls": 1
+              },
+              "forward_verify": {
+                "attempts": 0,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 0,
+                "max_request_ms": 0,
+                "pacing_wait_ms": 0,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 13721,
+                "calls": 5
+              },
+              "receipt": {
+                "attempts": 7,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 1651,
+                "max_request_ms": 297,
+                "pacing_wait_ms": 13723,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 36163,
+                "calls": 5
+              },
+              "commit": {
+                "attempts": 0,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 0,
+                "max_request_ms": 0,
+                "pacing_wait_ms": 0,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 322,
+                "calls": 11
+              },
+              "publish": {
+                "attempts": 0,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 0,
+                "max_request_ms": 0,
+                "pacing_wait_ms": 0,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 5,
+                "calls": 1
+              }
+            },
+            "phase_actions": {
+              "head": {
+                "eth_blockNumber": 1,
+                "eth_getBlockByNumber": 1
+              },
+              "checkpoint": {
+                "eth_getBlockByNumber": 1
+              },
+              "boundary": {
+                "getblocknobytime": 1,
+                "eth_getBlockByNumber": 2
+              },
+              "forward_logs": {
+                "getLogs": 1
+              },
+              "receipt": {
+                "eth_getTransactionReceipt": 5,
+                "eth_getBlockByNumber": 2
+              }
+            },
+            "failures": {}
+          }
+        },
+        "steady_no_new_transactions": {
+          "state": "active",
+          "error": null,
+          "seconds": 14.07589,
+          "process_cpu_seconds": 0.02906,
+          "requests": 7,
+          "offline_logical_reads": 0,
+          "transactions": 5,
+          "checkouts": 5,
+          "draws": 8,
+          "checksum": "65f71e460878a61aab90831b208c714540eaefbe534ca437b20c6b48387b0316",
+          "read_encode_seconds": 0.00353,
+          "encoded_bytes": 3647,
+          "snapshot_available": true,
+          "diagnostics": {
+            "totals": {
+              "attempts": 7,
+              "retries": 0,
+              "timeouts": 0,
+              "errors": 0,
+              "request_ms": 1829,
+              "max_request_ms": 336,
+              "pacing_wait_ms": 12199,
+              "retry_wait_ms": 0
+            },
+            "actions": {
+              "eth_blockNumber": {
+                "attempts": 1,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 242,
+                "max_request_ms": 242,
+                "pacing_wait_ms": 1753,
+                "retry_wait_ms": 0
+              },
+              "eth_getBlockByNumber": {
+                "attempts": 4,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 1085,
+                "max_request_ms": 336,
+                "pacing_wait_ms": 6997,
+                "retry_wait_ms": 0
+              },
+              "getblocknobytime": {
+                "attempts": 1,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 223,
+                "max_request_ms": 223,
+                "pacing_wait_ms": 1664,
+                "retry_wait_ms": 0
+              },
+              "getLogs": {
+                "attempts": 1,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 279,
+                "max_request_ms": 279,
+                "pacing_wait_ms": 1785,
+                "retry_wait_ms": 0
+              }
+            },
+            "phases": {
+              "event_setup": {
+                "attempts": 0,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 0,
+                "max_request_ms": 0,
+                "pacing_wait_ms": 0,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 2,
+                "calls": 2
+              },
+              "checkpoint": {
+                "attempts": 0,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 0,
+                "max_request_ms": 0,
+                "pacing_wait_ms": 0,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 1,
+                "calls": 2
+              },
+              "head": {
+                "attempts": 2,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 578,
+                "max_request_ms": 336,
+                "pacing_wait_ms": 3511,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 4098,
+                "calls": 2
+              },
+              "overlap": {
+                "attempts": 1,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 279,
+                "max_request_ms": 279,
+                "pacing_wait_ms": 1785,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 9961,
+                "calls": 1
+              },
+              "boundary": {
+                "attempts": 4,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 972,
+                "max_request_ms": 322,
+                "pacing_wait_ms": 6903,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 7889,
+                "calls": 1
+              },
+              "commit": {
+                "attempts": 0,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 0,
+                "max_request_ms": 0,
+                "pacing_wait_ms": 0,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 8,
+                "calls": 3
+              },
+              "publish": {
+                "attempts": 0,
+                "retries": 0,
+                "timeouts": 0,
+                "errors": 0,
+                "request_ms": 0,
+                "max_request_ms": 0,
+                "pacing_wait_ms": 0,
+                "retry_wait_ms": 0,
+                "elapsed_ms": 4,
+                "calls": 1
+              }
+            },
+            "phase_actions": {
+              "head": {
+                "eth_blockNumber": 1,
+                "eth_getBlockByNumber": 1
+              },
+              "boundary": {
+                "getblocknobytime": 1,
+                "eth_getBlockByNumber": 3
+              },
+              "overlap": {
+                "getLogs": 1
+              }
+            },
+            "failures": {}
+          }
+        }
+      }
+    ],
+    "production_writes": 0,
+    "budget": {
+      "maximum": 1200,
+      "requests": 1080,
+      "actions": {
+        "quota": 2,
+        "eth_getBlockByNumber": 530,
+        "eth_blockNumber": 35,
+        "getblocknobytime": 35,
+        "getLogs": 39,
+        "eth_getTransactionReceipt": 439
+      }
+    }
+  },
+  "final_quota": {
+    "credential": "API Keys / BSCSCAN_API_KEY",
+    "status": "1",
+    "result": {
+      "creditsUsed": 1598,
+      "creditsAvailable": 98402,
+      "creditLimit": 100000,
+      "limitInterval": "daily",
+      "intervalExpiryTimespan": "16:25:25"
+    },
+    "requests_own_total": 1081,
+    "own_activity_key_reads": 1,
+    "own_alternate_key_requests": 1080
+  },
+  "verified_code_commit": "c6075615a1b310f44a0cd9ec9522ea6ce29661e3",
+  "ci": "https://github.com/Gavinzip/Tcg_pro_bot/actions/runs/45569000962/job/139050730718"
 }
