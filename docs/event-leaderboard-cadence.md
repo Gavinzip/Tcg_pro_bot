@@ -59,4 +59,4 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m tests.benchmark_event_scan --database-root 
 
 2026-11-25 09:00–11:10 台灣時間的正式日誌：80 筆成功完成，79 個相鄰間隔扣除 60 秒等待後，估計耗時中位數 30.575 秒、P95 90.637 秒、最長 100.787 秒，15 輪超過 60 秒。這是完成時間回推，不能替代逐階段量測。該窗口未再看到 4–10 分鐘的完成間隔，不代表根因已修復。
 
-Railway 唯讀確認正式 deployment 仍為 main 的 169e5f89d85585fd3df4cd05a9b871e513654a76；本 PR 尚未部署，所以以上不是新版的正式表現。歷史兩輪最終歸因仍缺當時的 action／範圍紀錄或完整歷史來源資料；本機診斷不會補出未記錄的歷史內容。不能承諾正式每輪一分鐘內完成。網站另有 codex/api-scan-cadence 本機 cache-recovery 候選，未 push、未開 PR，本次僅發布 scanner 分支供審查。
+Railway 唯讀確認正式 deployment 仍為 main 的 169e5f89d85585fd3df4cd05a9b871e513654a76；本 PR 尚未部署，所以以上不是新版的正式表現。歷史兩輪最終歸因仍缺當時的 action／範圍紀錄或完整歷史來源資料；本機診斷不會補出未記錄的歷史內容。不能承諾正式每輪一分鐘內完成。網站 cache-recovery 修正也已 push 到獨立 checkout 的 codex/api-scan-cadence，草稿 PR：https://github.com/Gavinzip/bnb-renaiss-campaign/pull/10 。兩個 PR 都未合併或部署。
