@@ -32,6 +32,9 @@ jobs:
           tests.test_event_provider_retries
           tests.test_event_scan_diagnostics
           tests.test_event_boundary_search
+          tests.test_event_boundary_recovery
+          tests.test_event_response_evidence
+          tests.test_event_integer_contract
           tests.test_event_verification_concurrency
           tests.test_event_http_pool
           tests.test_event_rate_recovery
