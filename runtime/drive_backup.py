@@ -9,14 +9,32 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import threading
 import time
 import uuid
 
 from runtime.backup_snapshot import capture, validate_bulk, verify_restored
+from runtime.job_priority import JobPriority, communicate_with_priority
 
 
 class DriveBackupError(RuntimeError):
     pass
+
+
+@contextmanager
+def cancellation_cleanup():
+    """Let the existing finally blocks clean this job's scratch on SIGTERM."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    def cancelled(*_):
+        raise DriveBackupError('backup_cancelled')
+    signal.signal(signal.SIGTERM, cancelled)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 class DriveBackup:
@@ -46,24 +64,38 @@ class DriveBackup:
         self.env['PATH'] = str(Path(self.rclone).resolve().parent) + os.pathsep + self.env.get('PATH', '') if '/' in self.rclone else self.env.get('PATH', '')
         self.status_path = self.work / 'status.json'
         self.timeout = max(30, int(self.env.get('TCG_BACKUP_TIMEOUT_SECONDS', '3600')))
+        self.priority = JobPriority(self.root)
 
     def run(self, args):
+        with cancellation_cleanup(), self.priority.backup_chunk() as lease:
+            return self._run(args, lease)
+
+    def _run(self, args, lease):
+        child = None
         try:
             child = subprocess.Popen([self.restic, *args], env=self.env,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      text=True, start_new_session=True)
             try:
-                stdout, _stderr = child.communicate(timeout=self.timeout)
+                stdout, _stderr = communicate_with_priority(child, self.timeout, lease)
             except subprocess.TimeoutExpired as exc:
-                os.killpg(child.pid, signal.SIGTERM)
+                raise DriveBackupError('restic_execution_timeout') from exc
+        except OSError as exc:
+            raise DriveBackupError('restic_execution_failed') from exc
+        finally:
+            if child is not None and child.poll() is None:
+                # The uploader owns a separate group (including rclone). Resume
+                # a stopped group before terminating; never leave it orphaned.
+                try:
+                    os.killpg(child.pid, signal.SIGCONT)
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     child.communicate(timeout=5)
                 except subprocess.TimeoutExpired:
                     os.killpg(child.pid, signal.SIGKILL)
                     child.communicate()
-                raise DriveBackupError('restic_execution_timeout') from exc
-        except OSError as exc:
-            raise DriveBackupError('restic_execution_failed') from exc
         if child.returncode != 0:
             # stderr can contain credentials or private filenames. Never log it.
             raise DriveBackupError('restic_incomplete' if child.returncode == 3 else 'restic_failed')
@@ -105,7 +137,7 @@ class DriveBackup:
             return self.status({'phase': 'initialized'})
 
     def cache_bulk_hashes(self, manifest):
-        validate_bulk(manifest)
+        validate_bulk(manifest, priority=self.priority)
         signatures = {row['path']: row['signature'] for row in manifest['bulkSignatures']}
         cache = {row['path']: {'signature': signatures[row['path']], 'sha256': row['sha256']}
                  for row in manifest['files'] if row['kind'] == 'bulk'}
@@ -115,12 +147,12 @@ class DriveBackup:
         temporary.replace(self.work / 'bulk-hashes.json')
 
     def backup(self):
-        with self.locked():
+        with self.locked(), cancellation_cleanup():
             stage = self.work / 'staging' / uuid.uuid4().hex
             stage.mkdir(parents=True, mode=0o700)
             self.status({'phase': 'capturing'})
             try:
-                manifest = capture(self.root, stage)
+                manifest = capture(self.root, stage, priority=self.priority)
                 paths = [stage / 'manifest.json', stage / 'data']
                 paths.extend(self.root / f['path'] for f in manifest['files'] if f['kind'] == 'bulk')
                 filelist = stage / 'restic-files'
@@ -128,7 +160,7 @@ class DriveBackup:
                 self.status({'phase': 'uploading', 'files': len(manifest['files'])})
                 output = self.run(['backup', '--json', '--host', 'tcg-pro', '--tag', 'tcg-drive-v1',
                                    '--group-by', 'host,tags', '--read-concurrency', '2', '--files-from-raw', str(filelist)])
-                validate_bulk(manifest)
+                validate_bulk(manifest, priority=self.priority)
                 summaries = [json.loads(line) for line in output.splitlines() if line.strip().startswith('{')]
                 summary = next((row for row in reversed(summaries) if row.get('message_type') == 'summary'), None)
                 if not summary or not summary.get('snapshot_id'):
