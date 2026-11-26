@@ -113,6 +113,7 @@ async def _run_command(name, script, args, timeout):
 
 async def periodic(name, script, args, interval, timeout, skip_until_due=False):
     while True:
+        started = time.monotonic()
         try:
             if skip_until_due:
                 remaining = backup_remaining(interval)
@@ -126,7 +127,12 @@ async def periodic(name, script, args, interval, timeout, skip_until_due=False):
         except Exception as exc:
             # Never print raw provider URLs, env values or child stderr.
             print(f'[production-job] {name} failed type={type(exc).__name__}', flush=True)
-        await asyncio.sleep(interval)
+        # Scans are serialized above: their work and priority-lock admission
+        # count toward the start interval. An overrun yields once, then resumes
+        # without spawning parallel work or replaying missed timer ticks.
+        delay = (max(0., interval - (time.monotonic() - started))
+                 if name == 'event-leaderboards' else interval)
+        await asyncio.sleep(delay)
 
 
 def start_product_background_jobs():
