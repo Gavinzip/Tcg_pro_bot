@@ -77,6 +77,12 @@ def _main(argv=None):
     parser.add_argument("--verification-workers", type=int,
                         default=int(os.getenv("EVENT_LEADERBOARD_VERIFICATION_WORKERS", "1")),
                         help="Bounded parallel receipt readers; shared request pacing still applies (default: 1)")
+    parser.add_argument('--v3-event-proof', action='store_true',
+                        default=os.getenv('EVENT_LEADERBOARD_V3_EVENT_PROOF') == '1',
+                        help='Use version-pinned V3 payment events instead of per-transaction receipts')
+    parser.add_argument('--combine-log-queries', action='store_true',
+                        default=os.getenv('EVENT_LEADERBOARD_COMBINE_LOG_QUERIES') == '1',
+                        help='Share complete log pages between five-minute replay and the first forward chunk')
     args = parser.parse_args(argv)
     store = None
     selected = []
@@ -113,7 +119,8 @@ def _main(argv=None):
             provider = EtherscanProvider()
             scanner = EventLeaderboardScanner(store, provider, confirmations=args.confirmations,
                 chunk_blocks=args.chunk_blocks, max_chunks=args.max_chunks, replay_seconds=args.replay_seconds,
-                verification_workers=args.verification_workers)
+                verification_workers=args.verification_workers, v3_event_proof=args.v3_event_proof,
+                combine_log_queries=args.combine_log_queries)
         results = [scanner.sync(event.event_id, usernames=names) for event in selected]
         print(json.dumps({"events": results, "identity_sources": {"username_entries": len(names),
             "verified_migration_pairs": len(aliases)}}, sort_keys=True))

@@ -17,14 +17,14 @@ PREFIX = '[event-scan-diagnostic] '
 MAX_LINE_BYTES = 16384
 CURRENT = ContextVar('event_scan_diagnostic', default=None)
 PHASES = frozenset({'startup', 'event_setup', 'head', 'boundary', 'checkpoint', 'overlap',
-                    'forward_logs', 'forward_verify', 'receipt', 'commit', 'publish'})
+                    'forward_logs', 'forward_verify', 'receipt', 'canonical_block', 'commit', 'publish'})
 ACTIONS = frozenset({'eth_blockNumber', 'eth_getBlockByNumber', 'eth_getTransactionReceipt',
-                     'getblocknobytime', 'getLogs', 'unknown'})
+                     'eth_getStorageAt', 'eth_getCode', 'getblocknobytime', 'getLogs', 'unknown'})
 FAILURES = frozenset({'provider_timeout', 'provider_stale_connection', 'provider_tls_verification_failure', 'provider_tls_failure',
                       'provider_dns_failure', 'provider_invalid_json', 'provider_invalid_request',
                       'provider_connection_failure', 'provider_invalid_response', 'provider_query_limit',
                       'provider_rejected_request', 'provider_rate_limit', 'provider_quota_exhausted',
-                      'provider_missing_result', 'provider_invalid_boundary_hint', 'receipt_unavailable', 'provider_http_error', 'unclassified'})
+                      'provider_missing_result', 'provider_historical_state_unavailable', 'provider_invalid_boundary_hint', 'receipt_unavailable', 'provider_http_error', 'unclassified'})
 # Closed codes, never arbitrary exception strings or upstream payloads. Request
 # failures and terminal scan failures are separate so counters keep their meaning.
 TERMINAL_FAILURES = frozenset({
@@ -44,6 +44,27 @@ TERMINAL_FAILURES = frozenset({
     'unaudited_pack_contract', 'insufficient_confirmations',
     'checkpoint_missing_reorg_anchor', 'checkpoint_reorg_mismatch',
     'confirmed_head_below_checkpoint', 'overlap_missing_known_checkout',
+    'checkout_block_mismatch',
+    'event_outside_anchored_range',
+    'event_timestamp_outside_anchors',
+    'invalid_audited_v3_checkout',
+    'invalid_event_block_number', 'invalid_event_timestamp',
+    'event_block_anchor_mismatch', 'inconsistent_event_block',
+    'invalid_chain_request_rate',
+    'invalid_event_block_hash',
+    'missing_chain_api_key',
+    'missing_event_timestamp',
+    'missing_verified_event_block',
+    'nonmonotonic_event_timestamp',
+    'transaction_block_mismatch',
+    'unaudited_event_proof_contract',
+    'v3_implementation_code_mismatch',
+    'v3_implementation_mismatch',
+    'v3_invalid_implementation_code',
+    'v3_invalid_implementation_slot',
+    'v3_unaudited_block_range',
+    'v3_unguarded_checkout',
+    'v3_upgrade_in_scan_range',
 })
 METRICS = ('attempts', 'retries', 'timeouts', 'errors', 'request_ms', 'max_request_ms',
            'pacing_wait_ms', 'retry_wait_ms')

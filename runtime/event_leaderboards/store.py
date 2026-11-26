@@ -284,7 +284,8 @@ class EventLeaderboardStore:
         digits = str(raw).zfill(decimals + 1)
         return digits[:-decimals] + "." + digits[-decimals:]
 
-    def publish_snapshot(self, event_id, through_block, through_at, finalized=False, usernames=None, expected_revision=None):
+    def publish_snapshot(self, event_id, through_block, through_at, finalized=False, usernames=None, expected_revision=None,
+                         verification=None):
         """Publish only when every audited contract checkpoint covers this confirmed bound."""
         through_at = timestamp(through_at)
         if not isinstance(through_block, int) or through_block < 0:
@@ -320,6 +321,10 @@ class EventLeaderboardStore:
                         "ranking_rule": "competition_draw_count_desc_wallet_asc",
                         "builder_filter_supported": definition.checkout_schema_version >= 2, "builder": None,
                         "checkout_evidence_supported": True}
+            if verification is not None:
+                # Freeze this scan's evidence strategy/range without changing
+                # existing ledger payloads or claiming how older rows were proved.
+                metadata['scan_verification'] = verification
             if definition.end_ts is None:
                 # Pin insertion order as well as block/time and identities.
                 # A later repair of an older block must not alter this evidence.

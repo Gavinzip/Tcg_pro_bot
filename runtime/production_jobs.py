@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 import json
 import math
 import os
@@ -67,6 +68,17 @@ async def _forward_diagnostics(stream, enabled):
 
 
 async def run_command(name, script, args, timeout):
+    if name == 'event-leaderboards' and enabled('TCG_DRIVE_BACKUP_ENABLED', False):
+        from runtime.job_priority import JobPriority
+        deadline = time.monotonic() + timeout
+        async with AsyncExitStack() as stack:
+            await asyncio.wait_for(stack.enter_async_context(
+                JobPriority(os.getenv('TCG_BACKUP_SOURCE', '/data')).scan()), timeout=timeout)
+            return await _run_command(name, script, args, max(.001, deadline - time.monotonic()))
+    return await _run_command(name, script, args, timeout)
+
+
+async def _run_command(name, script, args, timeout):
     started = time.monotonic()
     print(f'[production-job] {name} started', flush=True)
     child = await asyncio.create_subprocess_exec(
@@ -76,8 +88,9 @@ async def run_command(name, script, args, timeout):
     )
     readers = [asyncio.create_task(_discard_output(child.stdout)),
                asyncio.create_task(_forward_diagnostics(child.stderr, name == 'event-leaderboards'))]
+    completion = asyncio.gather(child.wait(), *readers)
     try:
-        await asyncio.wait_for(asyncio.gather(child.wait(), *readers), timeout=timeout)
+        await asyncio.wait_for(completion, timeout=timeout)
     except (asyncio.TimeoutError, asyncio.CancelledError) as error:
         if child.returncode is None:
             os.killpg(child.pid, signal.SIGTERM)
@@ -92,7 +105,7 @@ async def run_command(name, script, args, timeout):
     finally:
         for reader in readers:
             reader.cancel()
-        await asyncio.gather(*readers, return_exceptions=True)
+        await asyncio.gather(completion, *readers, return_exceptions=True)
     elapsed = time.monotonic() - started
     print(f'[production-job] {name} finished returncode={child.returncode} duration_seconds={elapsed:.3f}', flush=True)
     return child.returncode

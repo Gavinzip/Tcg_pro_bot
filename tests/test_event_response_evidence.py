@@ -52,6 +52,21 @@ class ResponseEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('private_value', serialized)
         return observations, lines, error, value, len(calls)
 
+    def test_v3_rpc_state_unavailable_is_classified_once_with_safe_context(self):
+        for action in ('eth_getStorageAt', 'eth_getCode'):
+            with self.subTest(action=action):
+                payload = {'jsonrpc': '2.0', 'error': {'code': -32000,
+                    'message': 'historical state unavailable at block 135000000 ' + SECRET}}
+                rows, lines, error, _, calls = self.observe([payload], request=lambda p:
+                    p.request('proxy', action, address='0x' + 'a' * 40, tag='0x817e3aa'))
+                self.assertEqual(str(error), 'provider_historical_state_unavailable')
+                self.assertEqual(calls, 1, 'Unsupported historical state must not get generic retries')
+                obs = rows[0]['observation']
+                self.assertEqual(obs['action'], action)
+                self.assertEqual(obs['rpc_error_message'], 'historical_state_unavailable')
+                self.assertEqual(obs['rpc_error_code'], -32000)
+                self.assertTrue(all(validated_line(line) for line in lines))
+
     def test_non_integer_success_keeps_envelope_shape_fingerprint_and_exact_query(self):
         body = {'status': '1', 'message': 'OK', 'result': 'not-a-number ' + SECRET}
         rows, _, error, _, calls = self.observe([body])

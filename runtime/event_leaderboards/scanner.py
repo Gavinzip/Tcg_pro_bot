@@ -27,13 +27,16 @@ from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_
 from .config import AUDITED_CHECKOUT_TOPICS, source_key, builder_code
 from .provider_errors import classify_failure, classify_rejected_payload, safe_diagnostic
 from .diagnostics import CURRENT, ScanDiagnostics, phase, record_request, record_provider_response
-from .response_evidence import MISSING, MAX_BODY_SAMPLE, observation, response_metadata
+from .response_evidence import result_message, MISSING, MAX_BODY_SAMPLE, observation, response_metadata
 from .integers import parse_integer
 from .boundary import first_block_at_timestamp
 from .replay import ReplayIncomplete, replay_confirmed_window
 from .verification import ReceiptPrefetch
 from .transport import PooledJSONHTTP
 from .request_safety import RateLimitRecovery
+from .errors import SourceIncomplete
+from .v3_evidence import V3EventEvidence, UPGRADED
+from .log_window import LogWindow
 
 USDT = "0x55d398326f99059ff775485246999027b3197955"
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -45,14 +48,6 @@ SCHEMAS = {DEFAULT_PACK_CONTRACTS[0]: "legacy_pack", **{a: "legacy_single" for a
 TOPICS = AUDITED_CHECKOUT_TOPICS
 _ADDRESS = re.compile(r"0x[0-9a-f]{40}\Z")
 _HASH = re.compile(r"0x[0-9a-f]{64}\Z")
-
-
-class SourceIncomplete(RuntimeError):
-    """Evidence is unavailable, malformed, inconsistent, or unsupported."""
-
-    def __init__(self, code, *, diagnostic=None):
-        super().__init__(code)
-        self.diagnostic = diagnostic
 
 
 def number(value):
@@ -137,6 +132,7 @@ class EtherscanProvider:
         # source, query, timeout and shared pacing gate below.
         reads = {("logs", "getLogs"), ("proxy", "eth_blockNumber"),
                  ("proxy", "eth_getBlockByNumber"), ("proxy", "eth_getTransactionReceipt"),
+                 ("proxy", "eth_getStorageAt"), ("proxy", "eth_getCode"),
                  ("block", "getblocknobytime")}
         attempts = 3 if (module, action) in reads else 1
         stale_retries = 0
@@ -267,7 +263,13 @@ class EtherscanProvider:
                 record_provider_response(evidence, str(failure) if failure is not None else 'ok' if completed else 'unclassified')
 
     def _response_result(self, module, action, data):
-        if not isinstance(data, dict) or data.get("error"):
+        if not isinstance(data, dict):
+            raise SourceIncomplete("provider_invalid_response")
+        if data.get('error'):
+            rpc = data['error']
+            if (isinstance(rpc, dict) and type(rpc.get('code')) is int and rpc['code'] == -32000
+                    and result_message(rpc.get('message')) == 'historical_state_unavailable'):
+                raise SourceIncomplete('provider_historical_state_unavailable')
             raise SourceIncomplete("provider_invalid_response")
         result = data.get("result")
         if module == "logs" and data.get("status") == "0" and str(data.get("message", "")).lower() == "no records found" and result == []:
@@ -381,7 +383,7 @@ def complete_logs(provider, contract, topic, start, end, *, builder=None):
                 break
         else:
             raise SourceIncomplete("provider_single_block_result_limit")
-    unique = {}
+    unique, transaction_blocks = {}, {}
     for row in rows:
         if not start <= number(row.get("blockNumber")) <= end:
             raise SourceIncomplete("log_outside_requested_range")
@@ -390,6 +392,10 @@ def complete_logs(provider, contract, topic, start, end, *, builder=None):
         if builder is not None and (len(row["topics"]) != 4 or str(row["topics"][3]).lower() != builder):
             raise SourceIncomplete("unexpected_checkout_builder")
         key = identity(row)
+        location = number(row['blockNumber']), hash32(row.get('blockHash'))
+        if key[0] in transaction_blocks and transaction_blocks[key[0]] != location:
+            raise SourceIncomplete('transaction_block_mismatch')
+        transaction_blocks[key[0]] = location
         if key in unique and unique[key] != row:
             raise SourceIncomplete("conflicting_duplicate_log")
         unique[key] = row
@@ -507,7 +513,7 @@ def verified_receipt_checkouts(provider, tx_hash, schemas):
 
 class EventLeaderboardScanner:
     def __init__(self, store, provider=None, *, confirmations=64, chunk_blocks=2000, max_chunks=100, schemas=None,
-                 replay_seconds=300, verification_workers=1):
+                 replay_seconds=300, verification_workers=1, v3_event_proof=False, combine_log_queries=False):
         self.store = store
         self.provider = provider or EtherscanProvider()
         self.confirmations = int(confirmations)
@@ -515,12 +521,22 @@ class EventLeaderboardScanner:
         self.schemas = dict(SCHEMAS if schemas is None else schemas)
         self.replay_seconds = int(replay_seconds)
         self.verification_workers = int(verification_workers)
+        self.v3_event_proof, self.combine_log_queries = bool(v3_event_proof), bool(combine_log_queries)
+        self._event_evidence = {}
         if self.confirmations < 1 or self.chunk_blocks < 1 or self.max_chunks < 1 or self.replay_seconds < 0:
             raise ValueError("invalid scanner limits")
         if not 1 <= self.verification_workers <= 8:
             raise ValueError("invalid verification worker limit")
 
+    def _publish_snapshot(self, *args, **kwargs):
+        if self._event_evidence:
+            kwargs['verification'] = {contract: evidence.summary()
+                                      for contract, evidence in self._event_evidence.items()}
+        return self.store.publish_snapshot(*args, **kwargs)
+
     def _prefetch(self, logs, receipts, schemas, known=None):
+        if logs and address(logs[0]['address']) in self._event_evidence:
+            return nullcontext(None)
         if self.verification_workers == 1:
             return nullcontext(None)
         transactions = [identity(log)[0] for log in logs if known is None or identity(log) not in known]
@@ -530,6 +546,27 @@ class EventLeaderboardScanner:
 
     def _verified_log(self, definition, schemas, schema, log, receipts, known=None):
         tx_hash, index = identity(log)
+        evidence = self._event_evidence.get(address(log['address']))
+        if evidence is not None:
+            candidate = decode_checkout(log, schema)
+            block = evidence.blocks.from_log(log)
+            previous = known.get((tx_hash, index)) if known is not None else None
+            if previous is not None:
+                if (candidate['paid_amount_raw'] != int(previous['paid_amount_raw'])
+                        or block['timestamp'] != previous['timestamp']
+                        or any(candidate[k] != previous[k] for k in candidate if k != 'paid_amount_raw')):
+                    raise SourceIncomplete('indexed_log_receipt_mismatch')
+                evidence.validate_identity(candidate)
+                # Keep the existing anchored-prefix reuse: replaying five minutes
+                # must not re-read a block for every unchanged known checkout.
+                row = previous
+            else:
+                row = evidence.validate(candidate, block)
+            if (row['timestamp'] >= definition.start_ts
+                    and (definition.end_ts is None or row['timestamp'] < definition.end_ts)
+                    and int(row['paid_amount_raw']) > 0):
+                return dict(row, chain_id=definition.chain_id)
+            return None
         # Previously verified identical evidence can be reused. Newly discovered
         # identities still require a complete receipt, payment and canonical block.
         row = known.get((tx_hash, index)) if known is not None else None
@@ -548,9 +585,10 @@ class EventLeaderboardScanner:
                 and int(row["paid_amount_raw"]) > 0):
             return dict(row, chain_id=definition.chain_id)
 
-    def _overlap_rows(self, definition, schemas, contract, start, end, receipts, known):
+    def _overlap_rows(self, definition, schemas, contract, start, end, receipts, known, read_logs=None):
         schema = schemas[contract]
-        logs = complete_logs(self.provider, contract, TOPICS[schema], start, end, builder=definition.builder)
+        logs = (read_logs(start, end) if read_logs is not None else
+                complete_logs(self.provider, contract, TOPICS[schema], start, end, builder=definition.builder))
         rows = []
         with self._prefetch(logs, receipts, schemas, known) as pending:
             for log in logs:
@@ -572,6 +610,7 @@ class EventLeaderboardScanner:
             return result
 
     def _sync(self, event_id, *, now=None, usernames=None):
+        self._event_evidence = {}
         with phase('event_setup'):
             now = int(time.time()) if now is None else int(now)
             definition = self.store.get_event(event_id)
@@ -634,6 +673,17 @@ class EventLeaderboardScanner:
                 source = source_key(definition, contract)
                 checkpoint = checkpoints[contract]
                 next_block = checkpoint["next_block"] if checkpoint else start
+                evidence = None
+                if self.v3_event_proof and schema == 'v3':
+                    if contract != VRF_V3_CONTRACT:
+                        raise SourceIncomplete('unaudited_event_proof_contract')
+                    evidence = V3EventEvidence(self.provider, bound,
+                        lambda low, high: complete_logs(self.provider, contract, UPGRADED, low, high))
+                    self._event_evidence[contract] = evidence
+                read_logs = LogWindow(
+                    lambda low, high: complete_logs(self.provider, contract, topic, low, high, builder=definition.builder),
+                    forward_start=next_block, forward_end=min(bound, next_block + self.chunk_blocks - 1),
+                    combine=self.combine_log_queries, guard=evidence)
                 if checkpoint and not checkpoint.get("block_hash"):
                     raise SourceIncomplete("checkpoint_missing_reorg_anchor")
                 if checkpoint:
@@ -645,13 +695,13 @@ class EventLeaderboardScanner:
                             report = replay_confirmed_window(store=self.store, provider=self.provider, definition=definition,
                                 contract=contract, checkpoint=checkpoint, head=head, bound=bound, seconds=self.replay_seconds,
                                 read_verified=lambda start, end, known: self._overlap_rows(
-                                    definition, schemas, contract, start, end, receipts, known))
+                                    definition, schemas, contract, start, end, receipts, known, read_logs))
                             progress.setdefault('overlap', {})[source] = report
                             overlap_details.update({k: report[k] for k in ('from_block', 'through_block', 'inserted', 'verified_checkouts') if k in report})
                 while next_block <= bound and used < self.max_chunks:
                     end = min(bound, next_block + self.chunk_blocks - 1)
                     with phase('forward_logs', source_index=source_index, from_block=next_block, through_block=end) as log_details:
-                        logs = complete_logs(self.provider, contract, topic, next_block, end, builder=definition.builder)
+                        logs = read_logs(next_block, end)
                         log_details['logs'] = len(logs)
                     # getLogs is complete for the whole range. Commit each fully
                     # verified block as an anchored prefix; a hard job deadline
@@ -669,7 +719,10 @@ class EventLeaderboardScanner:
                                         checkouts.append(row)
                             with phase('commit', new_checkouts=len(checkouts)):
                                 self.store.commit_chunk(event_id, source, checkpoint["next_block"] if checkpoint else None,
-                                                        block_number + 1, checkouts, block_hash=self.provider.block(block_number)["hash"], expected_revision=definition.revision)
+                                                        block_number + 1, checkouts,
+                                                        block_hash=(evidence.blocks.block(block_number)['hash'] if evidence is not None
+                                                                    else self.provider.block(block_number)['hash']),
+                                                        expected_revision=definition.revision)
                             checkpoint = {"next_block": block_number + 1}
                             progress["sources"][source] = {"next_block": block_number + 1, "complete": block_number >= bound}
                             with phase('commit'):
@@ -684,8 +737,10 @@ class EventLeaderboardScanner:
                         # A fully verified single-source prefix is complete as
                         # of its own watermark, even while catching up to head.
                         with phase('publish'):
-                            progress['snapshot'] = self.store.publish_snapshot(event_id,end,
+                            progress['snapshot'] = self._publish_snapshot(event_id,end,
                                 self.provider.block(end)['timestamp'],usernames=usernames,expected_revision=definition.revision)
+                if evidence is not None:
+                    progress.setdefault('verification', {})[contract] = evidence.summary()
                 progress["sources"][source] = {"next_block": next_block, "complete": next_block > bound}
                 with phase('commit'):
                     self.store.set_progress(event_id, progress)
@@ -696,7 +751,7 @@ class EventLeaderboardScanner:
             if complete:
                 # Every configured contract has reached the identical confirmed bound.
                 with phase('publish'):
-                    progress["snapshot"] = self.store.publish_snapshot(event_id, bound,
+                    progress["snapshot"] = self._publish_snapshot(event_id, bound,
                         definition.end_ts if finalized else boundary["timestamp"], finalized=finalized, usernames=usernames, expected_revision=definition.revision)
                 with phase('commit'):
                     self.store.set_progress(event_id, progress)

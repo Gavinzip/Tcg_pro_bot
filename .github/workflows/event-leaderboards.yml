@@ -38,9 +38,20 @@ jobs:
           tests.test_event_verification_concurrency
           tests.test_event_http_pool
           tests.test_event_rate_recovery
+          tests.test_event_v3_event_proof
+          tests.test_event_log_blocks
           tests.test_profile_api_auth
           tests.test_profile_activity_routes
           tests.test_production_jobs
+          tests.test_backup_scan_priority
           tests.test_bbw_checkout_events
           tests.test_bbw_bounded_migration
           -v
+      - name: Install local encrypted-backup test dependency
+        run: sudo apt-get update -qq && sudo apt-get install -y restic
+      - name: Verify encrypted backup and isolated restore
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          TCG_BACKUP_TEST_ROOT: ${{ runner.temp }}/backup-priority-roundtrip
+          TCG_BACKUP_TEST_RESTIC: /usr/bin/restic
+        run: python -m unittest tests.test_drive_backup -v
