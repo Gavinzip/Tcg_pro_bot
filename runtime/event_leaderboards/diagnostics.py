@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from .response_evidence import valid_observation
 
 PREFIX = '[event-scan-diagnostic] '
 MAX_LINE_BYTES = 16384
@@ -23,12 +24,33 @@ FAILURES = frozenset({'provider_timeout', 'provider_stale_connection', 'provider
                       'provider_dns_failure', 'provider_invalid_json', 'provider_invalid_request',
                       'provider_connection_failure', 'provider_invalid_response', 'provider_query_limit',
                       'provider_rejected_request', 'provider_rate_limit', 'provider_quota_exhausted',
-                      'provider_missing_result', 'receipt_unavailable', 'provider_http_error', 'unclassified'})
+                      'provider_missing_result', 'provider_invalid_boundary_hint', 'receipt_unavailable', 'provider_http_error', 'unclassified'})
+# Closed codes, never arbitrary exception strings or upstream payloads. Request
+# failures and terminal scan failures are separate so counters keep their meaning.
+TERMINAL_FAILURES = frozenset({
+    'invalid_integer', 'negative_integer', 'invalid_address', 'invalid_hash',
+    'invalid_abi_data', 'invalid_abi_length', 'invalid_indexed_address', 'invalid_block',
+    'boundary_above_head', 'invalid_logs_page', 'provider_repeated_log_page',
+    'provider_single_block_result_limit', 'log_outside_requested_range',
+    'unexpected_checkout_log', 'unexpected_checkout_builder', 'conflicting_duplicate_log',
+    'removed_checkout_log', 'invalid_checkout_topics', 'invalid_v3_checkout_data',
+    'unsupported_checkout_currency', 'invalid_v3_checkout_ids', 'invalid_legacy_checkout_data',
+    'unsuccessful_or_wrong_receipt', 'receipt_reorg_mismatch', 'receipt_missing_logs',
+    'inconsistent_receipt_log', 'duplicate_receipt_log', 'invalid_usdt_transfer',
+    'duplicate_checkout_id', 'invalid_legacy_batch_topics', 'invalid_legacy_batch_data',
+    'legacy_batch_members_mismatch', 'legacy_batch_dust_payment',
+    'checkout_payment_amount_mismatch', 'indexed_log_receipt_mismatch',
+    'unsupported_chain_or_decimals', 'audited_schema_configuration_mismatch',
+    'unaudited_pack_contract', 'insufficient_confirmations',
+    'checkpoint_missing_reorg_anchor', 'checkpoint_reorg_mismatch',
+    'confirmed_head_below_checkpoint', 'overlap_missing_known_checkout',
+})
 METRICS = ('attempts', 'retries', 'timeouts', 'errors', 'request_ms', 'max_request_ms',
            'pacing_wait_ms', 'retry_wait_ms')
 DETAILS = frozenset({'from_block', 'through_block', 'hint_block', 'resolved_block', 'head_block',
                      'verified_checkouts', 'inserted', 'new_checkouts', 'chunks', 'block_reads',
-                     'events', 'logs', 'known_checkouts', 'receipt_reused', 'source_index'})
+                     'events', 'logs', 'known_checkouts', 'receipt_reused', 'source_index',
+                     'target_timestamp', 'hint_invalid'})
 
 
 def _metrics():
@@ -55,10 +77,18 @@ def validated_line(line):
     try:
         data = json.loads(line[len(PREFIX):])
         allowed = {'version', 'kind', 'run_id', 'event_ref', 'phase', 'status', 'at', 'elapsed_ms',
-                   'totals', 'actions', 'phases', 'phase_actions', 'failures', 'details'}
+                   'totals', 'actions', 'phases', 'phase_actions', 'failures', 'terminal_failures', 'details',
+                   'observation', 'failure_code'}
         if not isinstance(data, dict) or set(data) - allowed or data.get('version') != 1:
             return None
-        if data.get('kind') not in {'started', 'phase_started', 'phase_finished', 'heartbeat', 'finished'}:
+        if data.get('kind') not in {'started', 'phase_started', 'phase_finished', 'heartbeat', 'finished', 'provider_response'}:
+            return None
+        if data['kind'] == 'provider_response':
+            code = data.get('failure_code')
+            if (not valid_observation(data.get('observation')) or not isinstance(code, str)
+                    or not (code == 'ok' or _failure_allowed(code) or code in TERMINAL_FAILURES)):
+                return None
+        elif 'observation' in data or 'failure_code' in data:
             return None
         if not re.fullmatch(r'[a-f0-9]{32}', data.get('run_id', '')):
             return None
@@ -91,6 +121,10 @@ def validated_line(line):
         if not isinstance(failures, dict) or any(not _failure_allowed(code) for code in failures):
             return None
         _safe_numbers(failures, set(failures))
+        terminal = data.get('terminal_failures', {})
+        if not isinstance(terminal, dict) or any(not (_failure_allowed(code) or code in TERMINAL_FAILURES) for code in terminal):
+            return None
+        _safe_numbers(terminal, set(terminal))
         return PREFIX + json.dumps(data, sort_keys=True, separators=(',', ':'), allow_nan=False)
     except (ValueError, TypeError, KeyError, OverflowError):
         return None
@@ -119,6 +153,7 @@ class ScanDiagnostics:
         self.last_emit = self.started
         self.totals, self.actions, self.phases, self.phase_actions = _metrics(), {}, {}, {}
         self.failures = {}
+        self.terminal_failures = {}
         self.current_phase = None
         self.outcome = 'ok'
 
@@ -151,6 +186,13 @@ class ScanDiagnostics:
                 target[action] = target.get(action, 0) + count
         for code, count in child.failures.items():
             self.failures[code] = self.failures.get(code, 0) + count
+        for code, count in child.terminal_failures.items():
+            self.terminal_failures[code] = self.terminal_failures.get(code, 0) + count
+
+    @synchronized
+    def terminal_failure(self, code):
+        safe = code if isinstance(code, str) and (_failure_allowed(code) or code in TERMINAL_FAILURES) else 'unclassified'
+        self.terminal_failures[safe] = self.terminal_failures.get(safe, 0) + 1
 
     @synchronized
     def emit(self, kind, **values):
@@ -170,7 +212,8 @@ class ScanDiagnostics:
     def summary(self):
         return {'totals': dict(self.totals), 'actions': {k: dict(v) for k, v in self.actions.items()},
                 'phases': {k: dict(v) for k, v in self.phases.items()},
-                'phase_actions': {k: dict(v) for k, v in self.phase_actions.items()}, 'failures': dict(self.failures)}
+                'phase_actions': {k: dict(v) for k, v in self.phase_actions.items()}, 'failures': dict(self.failures),
+                'terminal_failures': dict(self.terminal_failures)}
 
     @synchronized
     def add(self, action, **metrics):
@@ -239,3 +282,10 @@ def record_request(action, *, elapsed_ms=0, error=False, timeout=False, retry=Fa
             diagnostic.add(action, attempts=int(attempted), errors=int(error), timeouts=int(timeout),
                            retries=int(retry), request_ms=elapsed_ms, max_request_ms=elapsed_ms,
                            pacing_wait_ms=pacing_wait_ms, retry_wait_ms=retry_wait_ms)
+
+
+def record_provider_response(observation, code):
+    diagnostic = CURRENT.get()
+    if diagnostic is not None:
+        safe = code if isinstance(code, str) and (code == 'ok' or _failure_allowed(code) or code in TERMINAL_FAILURES) else 'unclassified'
+        diagnostic.emit('provider_response', observation=observation, failure_code=safe)

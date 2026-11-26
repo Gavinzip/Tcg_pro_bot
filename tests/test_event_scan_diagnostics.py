@@ -11,6 +11,26 @@ from runtime.event_leaderboards.scanner import EtherscanProvider
 
 
 class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_codes_survive_supervisor_but_arbitrary_error_text_never_does(self):
+        from runtime.event_leaderboards.diagnostics import PREFIX, ScanDiagnostics, validated_line
+        lines = []
+        with ScanDiagnostics(sink=lines.append) as parent:
+            with ScanDiagnostics(sink=lines.append, run_id=parent.run_id, event_id='fixture') as child:
+                child.terminal_failure('invalid_integer')
+                child.terminal_failure('https://private-api/?apikey=do-not-log-this')
+        self.assertEqual(parent.summary()['terminal_failures'], {'invalid_integer': 1, 'unclassified': 1})
+        reader = asyncio.StreamReader()
+        reader.feed_data(('\n'.join(lines) + '\n').encode())
+        reader.feed_eof()
+        captured = io.StringIO()
+        with patch('sys.stdout', captured):
+            await production_jobs._forward_diagnostics(reader, True)
+        self.assertIn('invalid_integer', captured.getvalue())
+        self.assertNotIn('do-not-log-this', captured.getvalue())
+        record = json.loads(lines[-1][len(PREFIX):])
+        record['terminal_failures'] = {'do-not-log-this': 1}
+        self.assertIsNone(validated_line(PREFIX + json.dumps(record)))
+
     async def test_supervisor_preserves_safe_child_diagnostics_without_raw_output(self):
         # Import inside the test so the initial red result identifies the missing feature.
         from runtime.event_leaderboards.diagnostics import PREFIX, ScanDiagnostics

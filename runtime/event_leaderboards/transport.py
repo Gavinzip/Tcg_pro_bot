@@ -26,7 +26,7 @@ class PooledJSONHTTP:
         finally:
             self.force_fresh.reset(token)
 
-    def read_json(self, url, timeout, on_response=None):
+    def read_json(self, url, timeout, on_response=None, on_payload=None):
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in {'http', 'https'} or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError('invalid_provider_url')
@@ -55,7 +55,11 @@ class PooledJSONHTTP:
                 received_headers = True
                 if on_response is not None:
                     on_response()
+                if on_payload is not None:
+                    on_payload(response.status, response.getheader('Content-Type'), None)
                 payload = response.read()
+                if on_payload is not None:
+                    on_payload(response.status, response.getheader('Content-Type'), payload)
                 if response.status != 200:
                     raise urllib.error.HTTPError(url, response.status, 'provider_http_error', {}, None)
                 result = json.loads(payload)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import nullcontext
+from contextvars import ContextVar
 from dataclasses import replace
 from itertools import groupby
 import json
@@ -20,11 +21,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 from runtime.pack_contracts import DEFAULT_PACK_CONTRACTS, VRF_V3_CONTRACT, VRF_V3_CHECKOUT_TOPIC
 from .config import AUDITED_CHECKOUT_TOPICS, source_key, builder_code
 from .provider_errors import classify_failure, classify_rejected_payload, safe_diagnostic
-from .diagnostics import CURRENT, ScanDiagnostics, phase, record_request
+from .diagnostics import CURRENT, ScanDiagnostics, phase, record_request, record_provider_response
+from .response_evidence import MISSING, MAX_BODY_SAMPLE, observation, response_metadata
+from .integers import parse_integer
 from .boundary import first_block_at_timestamp
 from .replay import ReplayIncomplete, replay_confirmed_window
 from .verification import ReceiptPrefetch
@@ -52,10 +56,8 @@ class SourceIncomplete(RuntimeError):
 
 
 def number(value):
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise SourceIncomplete("invalid_integer")
     try:
-        result = int(value, 16 if isinstance(value, str) and value.startswith("0x") else 10) if isinstance(value, str) else int(value)
+        result = parse_integer(value)
     except (TypeError, ValueError, OverflowError):
         raise SourceIncomplete("invalid_integer") from None
     if result < 0:
@@ -128,6 +130,7 @@ class EtherscanProvider:
         self._block_lock = threading.Lock()
         self._block_guards = {}
         self._http = PooledJSONHTTP() if env.get('EVENT_LEADERBOARD_HTTP_POOL') == '1' else None
+        self._attempt = ContextVar('event_provider_attempt', default=(1, 1, None))
 
     def request(self, module, action, **params):
         # All listed operations are idempotent reads. Each attempt uses the same
@@ -139,7 +142,9 @@ class EtherscanProvider:
         stale_retries = 0
         rate_retries = 0
         fresh_connection = False
+        request_ref = uuid.uuid4().hex
         for attempt in range(1, attempts + 1):
+            attempt_token = self._attempt.set((attempt, attempts, request_ref))
             try:
                 connection_scope = self._http.fresh_connection() if fresh_connection and self._http is not None else nullcontext()
                 with connection_scope:
@@ -164,6 +169,8 @@ class EtherscanProvider:
                     raise
                 record_request(action, retry=True, retry_wait_ms=(2 ** attempt) * 1000)
                 time.sleep(2 ** attempt)
+            finally:
+                self._attempt.reset(attempt_token)
 
     def _request_once(self, module, action, **params):
         with self._lock:
@@ -194,6 +201,11 @@ class EtherscanProvider:
     def _read_response(self, module, action, params):
         query = dict(chainid=self.chain_id, module=module, action=action, apikey=self.api_key, **params)
         started, stage = time.monotonic(), "connect"
+        data, failure, completed = MISSING, None, False
+        metadata = response_metadata()
+        def capture_payload(status, content_type, payload):
+            nonlocal metadata
+            metadata = response_metadata(status, content_type, payload)
         try:
             url = self.api_url + "?" + urllib.parse.urlencode(query)
             if self._http is not None:
@@ -202,14 +214,59 @@ class EtherscanProvider:
                 def reading_response():
                     nonlocal stage
                     stage = "read_json"
-                data = self._http.read_json(url, self.timeout, on_response=reading_response)
+                data = self._http.read_json(url, self.timeout, on_response=reading_response, on_payload=capture_payload)
             else:
                 with urllib.request.urlopen(url, timeout=self.timeout) as response:
                     stage = "read_json"
-                    data = json.load(response)
+                    status = getattr(response, 'status', None)
+                    media = response.headers.get('Content-Type') if getattr(response, 'headers', None) else None
+                    capture_payload(status, media, None)
+                    payload = response.read()
+                    capture_payload(status, media, payload)
+                    data = json.loads(payload)
+            stage = 'response_validate'
+            result = self._response_result(module, action, data)
+            completed, stage = True, 'complete'
+            return result
+        except SourceIncomplete as error:
+            failure = error
+            raise
         except (urllib.error.URLError, TimeoutError, OSError, ValueError, http.client.HTTPException) as error:
-            raise SourceIncomplete(classify_failure(error, stage=stage), diagnostic=safe_diagnostic(
-                module, action, params, (time.monotonic() - started) * 1000, error, stage=stage)) from None
+            if isinstance(error, urllib.error.HTTPError) and metadata['http_status'] == 0:
+                # urllib raises before returning a response object. Read only a
+                # bounded error sample; observation failure must not mask HTTP.
+                media = error.headers.get('Content-Type') if error.headers else None
+                metadata = response_metadata(error.code, media)
+                try:
+                    payload = error.read(MAX_BODY_SAMPLE + 1)
+                    complete = len(payload) < MAX_BODY_SAMPLE + 1
+                    metadata = response_metadata(error.code, media, payload, complete=complete)
+                    if complete:
+                        try:
+                            data = json.loads(payload)
+                        except (ValueError, UnicodeError):
+                            pass
+                except (OSError, ValueError, TypeError, AttributeError, http.client.HTTPException):
+                    pass
+            failure = SourceIncomplete(classify_failure(error, stage=stage), diagnostic=safe_diagnostic(
+                module, action, params, (time.monotonic() - started) * 1000, error, stage=stage))
+            raise failure from None
+        finally:
+            if action == 'getblocknobytime' or failure is not None:
+                attempt, maximum, request_ref = self._attempt.get()
+                json_state = ('decoded' if data is not MISSING else 'invalid' if failure is not None
+                              and str(failure) == 'provider_invalid_json' else
+                              'unparsed' if metadata['body_complete'] else 'unavailable')
+                evidence = observation(module, action, params, data, metadata, stage=stage,
+                    attempt=attempt, max_attempts=maximum, request_ref=request_ref or uuid.uuid4().hex,
+                    elapsed_ms=(time.monotonic() - started) * 1000, endpoint=self.api_url, json_state=json_state)
+                if failure is not None:
+                    details = failure.diagnostic or safe_diagnostic(module, action, params,
+                        (time.monotonic() - started) * 1000, failure, stage=stage)
+                    failure.diagnostic = dict(details, upstream=evidence)
+                record_provider_response(evidence, str(failure) if failure is not None else 'ok' if completed else 'unclassified')
+
+    def _response_result(self, module, action, data):
         if not isinstance(data, dict) or data.get("error"):
             raise SourceIncomplete("provider_invalid_response")
         result = data.get("result")
@@ -221,6 +278,14 @@ class EtherscanProvider:
             raise SourceIncomplete(classify_rejected_payload(result))
         if result is None:
             raise SourceIncomplete("provider_missing_result")
+        if module == 'block' and action == 'getblocknobytime':
+            try:
+                number(result)
+            except SourceIncomplete:
+                # The time-index endpoint is an optimization hint, not chain
+                # evidence. Classify its bad success payload inside the measured
+                # request; never log the payload or retry it as a transport error.
+                raise SourceIncomplete('provider_invalid_boundary_hint') from None
         if module == 'proxy' and action == 'eth_getTransactionReceipt' and not isinstance(result, dict):
             # Validate within the measured request, before it is counted as OK.
             raise SourceIncomplete('receipt_unavailable')
@@ -248,8 +313,18 @@ class EtherscanProvider:
 
     def first_block_at(self, timestamp, head):
         """Resolve seconds boundary, including chains with several blocks per second."""
-        with phase('boundary', head_block=head) as details:
-            height = number(self.request("block", "getblocknobytime", timestamp=timestamp, closest="before"))
+        with phase('boundary', head_block=head, target_timestamp=timestamp) as details:
+            try:
+                height = number(self.request("block", "getblocknobytime", timestamp=timestamp, closest="before"))
+            except SourceIncomplete as error:
+                if str(error) != 'provider_invalid_boundary_hint':
+                    raise
+                # A malformed hint must not prevent an exact search on this
+                # scan's validated canonical blocks. No previous-round cache or
+                # snapshot is used, and every comparison still uses block().
+                details['hint_invalid'] = 1
+                anchors = [row for row in self._blocks.values() if 0 <= row['number'] <= head]
+                height = min(anchors, key=lambda row: abs(row['timestamp'] - timestamp))['number'] if anchors else head
             details['hint_block'] = height
             if height > head:
                 raise SourceIncomplete("boundary_above_head")
@@ -492,6 +567,8 @@ class EventLeaderboardScanner:
                              run_id=parent.run_id if parent else None, event_id=event_id) as diagnostic:
             result = self._sync(event_id, now=now, usernames=usernames)
             diagnostic.outcome = 'error' if result['state'] == 'stale' else 'ok'
+            if result['state'] == 'stale':
+                diagnostic.terminal_failure(result.get('error'))
             return result
 
     def _sync(self, event_id, *, now=None, usernames=None):

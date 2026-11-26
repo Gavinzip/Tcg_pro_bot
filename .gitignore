@@ -5,6 +5,7 @@ SERVER_ENV_BACKUP.md
 __pycache__/
 *.pyc
 /venv
+/.venv/
 /.vscode
 .DS_Store
 output_run/
