@@ -14,10 +14,10 @@ MAX_NUMBER = 10**15
 KINDS = {'missing', 'null', 'bool', 'int', 'float', 'string', 'array', 'object', 'other'}
 MODULES = {'block', 'proxy', 'logs', 'unknown'}
 ACTIONS = {'getblocknobytime', 'eth_blockNumber', 'eth_getBlockByNumber',
-           'eth_getTransactionReceipt', 'getLogs', 'unknown'}
+           'eth_getTransactionReceipt', 'eth_getStorageAt', 'eth_getCode', 'getLogs', 'unknown'}
 MESSAGES = {'missing', 'ok', 'notok', 'no_records_found', 'other'}
 RESULT_MESSAGES = {'missing', 'rate_limit', 'daily_quota', 'invalid_api_key', 'query_limit',
-                   'no_closest_block', 'invalid_timestamp', 'other'}
+                   'no_closest_block', 'invalid_timestamp', 'historical_state_unavailable', 'other'}
 INTEGER_ISSUES = {'not_applicable', 'not_inspected', 'missing', 'null', 'wrong_type', 'empty',
                   'invalid_integer', 'negative_integer', 'valid'}
 
@@ -37,6 +37,8 @@ def result_message(value):
     if not isinstance(value, str):
         return 'other'
     text = value[:4096].lower()
+    if 'historical' in text and 'state' in text and any(s in text for s in ('unavailable', 'not available')):
+        return 'historical_state_unavailable'
     if 'daily' in text and any(s in text for s in ('limit', 'credit', 'quota')):
         return 'daily_quota'
     if 'rate limit' in text:

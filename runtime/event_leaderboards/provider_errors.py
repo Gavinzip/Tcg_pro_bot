@@ -42,7 +42,7 @@ def safe_diagnostic(module, action, params, elapsed_ms, error, *, stage):
     result = {
         "module": module if module in {"proxy", "block", "logs"} else "unknown",
         "action": action if action in {"eth_blockNumber", "eth_getBlockByNumber", "eth_getTransactionReceipt",
-                                       "getblocknobytime", "getLogs"} else "unknown",
+                                       "eth_getStorageAt", "eth_getCode", "getblocknobytime", "getLogs"} else "unknown",
         "stage": stage,
         "elapsed_ms": max(0, int(elapsed_ms)),
     }
