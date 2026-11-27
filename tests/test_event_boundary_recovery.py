@@ -80,8 +80,12 @@ class BoundaryRecoveryTests(unittest.TestCase):
                 self.assertLessEqual(diagnostic.totals['attempts'], 40)
         observations = [json.loads(line.split(' ', 1)[1]) for line in diagnostic_lines
                         if '"kind":"provider_response"' in line or '"kind": "provider_response"' in line]
-        self.assertEqual(len(observations), 5)
-        self.assertTrue(all(row['failure_code'] == 'provider_invalid_boundary_hint' for row in observations))
+        boundary = [row for row in observations if row['observation']['action'] == 'getblocknobytime']
+        log_reads = [row for row in observations if row['observation']['action'] == 'getLogs']
+        self.assertEqual(len(boundary), 5)
+        self.assertTrue(all(row['failure_code'] == 'provider_invalid_boundary_hint' for row in boundary))
+        self.assertEqual(len(log_reads), 6)
+        self.assertTrue(all(row['failure_code'] == 'ok' for row in log_reads))
         evidence = store.read_checkout_snapshot('ongoing')[1]
         self.assertEqual(len(evidence), 2)
         self.assertEqual(sum(r['draw_count'] for r in evidence), 5)
