@@ -23,6 +23,7 @@ jobs:
         run: >-
           python -m unittest
           tests.test_event_replay
+          tests.test_event_overlap_evidence
           tests.test_event_query_retention
           tests.test_event_leaderboard_scanner
           tests.test_event_leaderboard_store

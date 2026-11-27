@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from .response_evidence import valid_observation
+from .overlap_evidence import valid_overlap_comparison
 
 PREFIX = '[event-scan-diagnostic] '
 MAX_LINE_BYTES = 16384
@@ -99,10 +100,15 @@ def validated_line(line):
         data = json.loads(line[len(PREFIX):])
         allowed = {'version', 'kind', 'run_id', 'event_ref', 'phase', 'status', 'at', 'elapsed_ms',
                    'totals', 'actions', 'phases', 'phase_actions', 'failures', 'terminal_failures', 'details',
-                   'observation', 'failure_code'}
+                   'observation', 'failure_code', 'comparison'}
         if not isinstance(data, dict) or set(data) - allowed or data.get('version') != 1:
             return None
-        if data.get('kind') not in {'started', 'phase_started', 'phase_finished', 'heartbeat', 'finished', 'provider_response'}:
+        if data.get('kind') not in {'started', 'phase_started', 'phase_finished', 'heartbeat', 'finished', 'provider_response', 'overlap_comparison'}:
+            return None
+        if data['kind'] == 'overlap_comparison':
+            if not valid_overlap_comparison(data.get('comparison')):
+                return None
+        elif 'comparison' in data:
             return None
         if data['kind'] == 'provider_response':
             code = data.get('failure_code')

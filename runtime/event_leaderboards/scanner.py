@@ -37,6 +37,7 @@ from .request_safety import RateLimitRecovery
 from .errors import SourceIncomplete
 from .v3_evidence import V3EventEvidence, UPGRADED
 from .log_window import LogWindow
+from .overlap_evidence import overlap_comparison
 
 USDT = "0x55d398326f99059ff775485246999027b3197955"
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -248,7 +249,7 @@ class EtherscanProvider:
                 module, action, params, (time.monotonic() - started) * 1000, error, stage=stage))
             raise failure from None
         finally:
-            if action == 'getblocknobytime' or failure is not None:
+            if action in {'getblocknobytime', 'getLogs'} or failure is not None:
                 attempt, maximum, request_ref = self._attempt.get()
                 json_state = ('decoded' if data is not MISSING else 'invalid' if failure is not None
                               and str(failure) == 'provider_invalid_json' else
@@ -597,6 +598,16 @@ class EventLeaderboardScanner:
                 row = self._verified_log(definition, schemas, schema, log, receipts, known)
                 if row is not None:
                     rows.append(row)
+        # Inspect existing results only. No retry, second query, data repair or
+        # relaxation of the replay completeness check is performed here.
+        diagnostic = CURRENT.get()
+        verified = {(row['tx_hash'], row['log_index']) for row in rows}
+        if diagnostic is not None and not set(known).issubset(verified):
+            cached = read_logs.cached if isinstance(read_logs, LogWindow) else None
+            query = (cached[0], cached[1], {identity(log) for log in cached[2]}) if cached is not None else None
+            comparison = overlap_comparison(start, end, known,
+                {identity(log) for log in logs}, verified, query)
+            diagnostic.emit('overlap_comparison', comparison=comparison)
         return rows
 
     def sync(self, event_id, *, now=None, usernames=None):
