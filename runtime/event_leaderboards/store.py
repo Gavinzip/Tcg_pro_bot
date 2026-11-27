@@ -15,6 +15,7 @@ from .config import DEFAULT_DB_PATH, EventDefinition, builder_code, iso_time, ti
 from .aggregation import build_rankings
 from .evidence_history import initialize_evidence_history, insertion_watermark, checkout_payloads
 from .query_retention import QueryRetention
+from .checkout_pages import CheckoutPages
 
 
 class LedgerConflict(ValueError):
@@ -31,6 +32,7 @@ class CheckoutEvidenceUnavailable(ValueError):
 class EventLeaderboardStore:
     def __init__(self, path: str | None = None, *, update_interval_seconds=None, stale_after_seconds=None, query_retention_events=None):
         self.query_retention = QueryRetention.configured(query_retention_events)
+        self._checkout_pages = CheckoutPages()
         self.path = str(path or os.getenv("EVENT_LEADERBOARD_DB_PATH") or DEFAULT_DB_PATH)
         self.update_interval_seconds = max(60, int(update_interval_seconds if update_interval_seconds is not None
             else os.getenv("EVENT_LEADERBOARD_SYNC_INTERVAL_SECONDS", "600")))
@@ -368,6 +370,26 @@ class EventLeaderboardStore:
         builder = metadata["builder"]
         if not metadata.get('checkout_evidence_supported'):
             raise CheckoutEvidenceUnavailable('Snapshot has no frozen checkout evidence; wait for a new complete snapshot.')
+        rows = self._checkout_rows(event_id, metadata, identities)
+        return metadata, rows, health
+
+    def read_checkout_page(self, event_id, snapshot_id=None, *, builder=None, offset=0, limit=1000):
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError('invalid checkout page bounds')
+        # Always re-read health, revision, retention and builder scope BEFORE a
+        # cache lookup. A cached successful page is not fresh payment evidence.
+        metadata, identities, health = self.read_snapshot(event_id, snapshot_id, builder=builder)
+        if metadata is None:
+            return None, [], health, 0
+        if not metadata.get('checkout_evidence_supported'):
+            raise CheckoutEvidenceUnavailable('Snapshot has no frozen checkout evidence; wait for a new complete snapshot.')
+        key = (event_id, metadata['revision'], metadata['snapshot_id'], metadata['builder'])
+        rows, total = self._checkout_pages.page(key, offset, limit,
+            lambda: self._checkout_rows(event_id, metadata, identities))
+        return metadata, rows, health, total
+
+    def _checkout_rows(self, event_id, metadata, identities):
+        builder = metadata['builder']
         with self._connection() as db:
             storage = metadata.get('checkout_evidence_storage')
             if storage in {'ledger_range_v1', 'ledger_range_v2'}:
@@ -380,10 +402,11 @@ class EventLeaderboardStore:
                     raise CheckoutEvidenceUnavailable('Snapshot has no frozen insertion watermark.')
                 frozen_identities = {alias: row for row in identities for alias in row['aliases']}
                 rows = []
+                through_at = timestamp(metadata['data_through_at'])
                 for raw in checkout_payloads(db, event_id, metadata['revision'], cutoff):
                     checkout = json.loads(raw[0])
                     if (checkout['block_number'] > metadata['through_block']
-                            or checkout['timestamp'] > timestamp(metadata['data_through_at'])
+                            or checkout['timestamp'] > through_at
                             or (builder is not None and checkout.get('builder') != builder)):
                         continue
                     identity = frozen_identities.get(checkout['wallet'])
@@ -400,7 +423,7 @@ class EventLeaderboardStore:
                 raise CheckoutEvidenceUnavailable('Unsupported checkout snapshot storage version.')
         if builder is not None:
             rows = [r for r in rows if r.get('builder') == builder]
-        return metadata, rows, health
+        return rows
 
     def read_snapshot(self, event_id, snapshot_id=None, *, builder=None):
         if builder is not None:

@@ -158,17 +158,15 @@ class EventLeaderboardHTTP:
                         or (raw_builder is not None and builder != cursor["builder"])):
                     raise ValueError("cursor does not match checkout scope")
                 snapshot_id, builder, offset = cursor["snapshot_id"], cursor["builder"], cursor["offset"]
-            metadata, rows, health = self.store.read_checkout_snapshot(event_id, snapshot_id, builder=builder)
+            metadata, selected, health, total = self.store.read_checkout_page(
+                event_id, snapshot_id, builder=builder, offset=offset, limit=limit)
             if metadata is None:
                 return (503 if health["last_error"] else 202), {
                     "event_id": event_id, "snapshot_id": None, "builder": builder,
                     "status": "initializing", **health}
             builder = metadata["builder"]
-            if offset > len(rows):
-                raise ValueError("cursor offset outside snapshot")
-            selected = rows[offset:offset + limit]
             following = offset + len(selected)
-            cursor = None if following >= len(rows) else _cursor({
+            cursor = None if following >= total else _cursor({
                 "snapshot_id": metadata["snapshot_id"], "builder": builder, "offset": following,
                 "sort": "checkout", "order": "asc", "q": ""})
             identities = {}
@@ -177,7 +175,7 @@ class EventLeaderboardHTTP:
                 identities = {"identities": [
                     {key: row[key] for key in ("wallet", "aliases", "username")} for row in global_rows]}
             return 200, {**metadata, **health, **identities, "evidence_type": "confirmed_paid_checkout",
-                         "rows": selected, "total_checkouts": len(rows), "next_cursor": cursor}
+                         "rows": selected, "total_checkouts": total, "next_cursor": cursor}
         except SnapshotExpired as exc:
             return 409, {"error": "snapshot_unavailable", "message": str(exc), "event_id": event_id}
         except (BuilderFilterUnavailable, CheckoutEvidenceUnavailable) as exc:

@@ -29,6 +29,7 @@ jobs:
           tests.test_event_leaderboard_store
           tests.test_event_builder_scope
           tests.test_event_checkout_evidence
+          tests.test_event_checkout_paging_cost
           tests.test_event_provider_errors
           tests.test_event_provider_retries
           tests.test_event_scan_diagnostics
