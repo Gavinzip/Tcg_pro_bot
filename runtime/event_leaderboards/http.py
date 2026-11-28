@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .config import builder_code, load_event_definitions
 from .store import BuilderFilterUnavailable, CheckoutEvidenceUnavailable, EventLeaderboardStore
 from .query_retention import SnapshotExpired
+from .checkout_pages import CheckoutCacheUnavailable
 
 SORT_FIELDS = {"rank", "draw_count", "wallet", "username", "paid_amount"}
 
@@ -178,6 +179,8 @@ class EventLeaderboardHTTP:
                          "rows": selected, "total_checkouts": total, "next_cursor": cursor}
         except SnapshotExpired as exc:
             return 409, {"error": "snapshot_unavailable", "message": str(exc), "event_id": event_id}
+        except CheckoutCacheUnavailable:
+            return 503, {"error": "checkout_cache_unavailable", "message": "Checkout evidence pagination is temporarily unavailable.", "event_id": event_id}
         except (BuilderFilterUnavailable, CheckoutEvidenceUnavailable) as exc:
             return 409, {"error": "checkout_evidence_unavailable", "message": str(exc),
                          "event_id": event_id, "snapshot_id": snapshot_id, "builder": builder}

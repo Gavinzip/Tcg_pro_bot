@@ -162,7 +162,7 @@ class CheckoutPageBoundsTests(unittest.TestCase):
             self.assertEqual(page[0]['value'], 'x' * 200)
         self.assertEqual(len(cache._entries), 1)
         self.assertLessEqual(cache._bytes, 100)
-        self.assertEqual(calls.count('x' * 200), 2)
+        self.assertEqual(calls.count('x' * 200), 1)
         for _ in range(2):
             with self.assertRaisesRegex(ValueError, 'projection failed'):
                 cache.page('failed', 0, 1, lambda: (_ for _ in ()).throw(ValueError('projection failed')))

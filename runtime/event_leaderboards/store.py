@@ -378,17 +378,22 @@ class EventLeaderboardStore:
             raise ValueError('invalid checkout page bounds')
         # Always re-read health, revision, retention and builder scope BEFORE a
         # cache lookup. A cached successful page is not fresh payment evidence.
-        metadata, identities, health = self.read_snapshot(event_id, snapshot_id, builder=builder)
+        metadata, _, health = self.read_snapshot(event_id, snapshot_id, builder=builder, include_rows=False)
         if metadata is None:
             return None, [], health, 0
         if not metadata.get('checkout_evidence_supported'):
             raise CheckoutEvidenceUnavailable('Snapshot has no frozen checkout evidence; wait for a new complete snapshot.')
         key = (event_id, metadata['revision'], metadata['snapshot_id'], metadata['builder'])
-        rows, total = self._checkout_pages.page(key, offset, limit,
-            lambda: self._checkout_rows(event_id, metadata, identities))
+        def load():
+            _, identities, _ = self.read_snapshot(event_id, metadata['snapshot_id'], builder=metadata['builder'])
+            return self._iter_checkout_rows(event_id, metadata, identities)
+        rows, total = self._checkout_pages.page(key, offset, limit, load)
         return metadata, rows, health, total
 
     def _checkout_rows(self, event_id, metadata, identities):
+        return list(self._iter_checkout_rows(event_id, metadata, identities))
+
+    def _iter_checkout_rows(self, event_id, metadata, identities):
         builder = metadata['builder']
         with self._connection() as db:
             storage = metadata.get('checkout_evidence_storage')
@@ -401,7 +406,6 @@ class EventLeaderboardStore:
                 if type(cutoff) is not int or cutoff < 0:
                     raise CheckoutEvidenceUnavailable('Snapshot has no frozen insertion watermark.')
                 frozen_identities = {alias: row for row in identities for alias in row['aliases']}
-                rows = []
                 through_at = timestamp(metadata['data_through_at'])
                 for raw in checkout_payloads(db, event_id, metadata['revision'], cutoff):
                     checkout = json.loads(raw[0])
@@ -412,20 +416,20 @@ class EventLeaderboardStore:
                     identity = frozen_identities.get(checkout['wallet'])
                     if identity is None:
                         raise LedgerConflict('frozen checkout identity missing')
-                    rows.append({**checkout,'source_wallet':checkout['wallet'],'wallet':identity['wallet'],
+                    yield {**checkout,'source_wallet':checkout['wallet'],'wallet':identity['wallet'],
                         'aliases':identity['aliases'],'username':identity['username'],
-                        'pack_id':None if checkout['pack_id'] in (None,'None') else checkout['pack_id']})
+                        'pack_id':None if checkout['pack_id'] in (None,'None') else checkout['pack_id']}
             elif storage is None:
-                rows = [json.loads(r[0]) for r in db.execute(
+                for record in db.execute(
                     'SELECT payload FROM snapshot_checkout_rows WHERE snapshot_id=? ORDER BY tx_hash,log_index',
-                    (metadata['snapshot_id'],))]
+                    (metadata['snapshot_id'],)):
+                    row = json.loads(record[0])
+                    if builder is None or row.get('builder') == builder:
+                        yield row
             else:
                 raise CheckoutEvidenceUnavailable('Unsupported checkout snapshot storage version.')
-        if builder is not None:
-            rows = [r for r in rows if r.get('builder') == builder]
-        return rows
 
-    def read_snapshot(self, event_id, snapshot_id=None, *, builder=None):
+    def read_snapshot(self, event_id, snapshot_id=None, *, builder=None, include_rows=True):
         if builder is not None:
             builder = builder_code(builder)
         with self._connection() as db:
@@ -465,10 +469,16 @@ class EventLeaderboardStore:
             if builder is not None:
                 if not metadata["builder_filter_supported"]:
                     raise BuilderFilterUnavailable("Snapshot has no complete builder evidence; refresh after the versioned rescan.")
-                rows = [json.loads(row[0]) for row in db.execute(
-                    "SELECT payload FROM snapshot_builder_rows WHERE snapshot_id=? AND builder=?",
-                    (record["snapshot_id"], builder))]
-                metadata["total_participants"] = len(rows)
+                if include_rows:
+                    rows = [json.loads(row[0]) for row in db.execute(
+                        "SELECT payload FROM snapshot_builder_rows WHERE snapshot_id=? AND builder=?",
+                        (record["snapshot_id"], builder))]
+                    metadata["total_participants"] = len(rows)
+                else:
+                    rows = []
+                    metadata["total_participants"] = db.execute(
+                        "SELECT COUNT(*) FROM snapshot_builder_rows WHERE snapshot_id=? AND builder=?",
+                        (record["snapshot_id"], builder)).fetchone()[0]
             else:
-                rows = [json.loads(row[0]) for row in db.execute("SELECT payload FROM snapshot_rows WHERE snapshot_id=?", (record["snapshot_id"],))]
+                rows = [json.loads(row[0]) for row in db.execute("SELECT payload FROM snapshot_rows WHERE snapshot_id=?", (record["snapshot_id"],))] if include_rows else []
             return metadata, rows, health
